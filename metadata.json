@@ -1,0 +1,10 @@
+{
+  "name": "FaceMorph Studio",
+  "description": "Private, on-device real-time face swapping with multi-face detection, live camera preview, skin tone matching, and batch export.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
