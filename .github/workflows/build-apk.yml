@@ -15,11 +15,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
@@ -32,19 +27,7 @@ jobs:
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Install npm dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: TypeScript typecheck
-        run: npm run lint
-
-      - name: Build web bundle
-        run: npm run build
-
-      - name: Sync Capacitor Android project
-        run: npx cap sync android
-
-      - name: Build Debug APK with Gradle
+      - name: Build Pure Native Android APK with Gradle
         run: |
           cd android
           chmod +x gradlew
@@ -68,6 +51,6 @@ jobs:
             gh release upload "$TAG" FaceMorph-Studio-debug.apk --clobber
           else
             gh release create "$TAG" FaceMorph-Studio-debug.apk \
-              --title "FaceMorph Studio Android APK (Latest)" \
-              --notes "Download FaceMorph-Studio-debug.apk directly on your Android phone to install and test."
+              --title "FaceMorph Studio Native Android APK (Latest)" \
+              --notes "Pure native Kotlin & Jetpack Compose Android APK (Android 7.0+ / API 24+). Download FaceMorph-Studio-debug.apk directly on your phone to install."
           fi
