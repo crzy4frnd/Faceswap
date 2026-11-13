@@ -30,6 +30,10 @@ import {
   DEFAULT_SEGMENTATION_OPTIONS,
 } from '../utils/customAssetSegmenter';
 import { loadImage } from '../utils/faceEngine';
+import kimonoUrl from '../assets/images/costume_silk_kimono_1794472960844.jpg';
+import emeraldPendantUrl from '../assets/images/costume_emerald_pendant_1794472974484.jpg';
+import blazerUrl from '../assets/images/asset_tailored_blazer_1794417020215.jpg';
+import goldNecklaceUrl from '../assets/images/asset_gold_necklace_1794417020572.jpg';
 
 interface Props {
   onAssetAdded?: (assetId: string) => void;
@@ -633,7 +637,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                     {[
                       {
                         name: 'Royal Silk Kimono Robe',
-                        url: '/src/assets/images/costume_silk_kimono_1794472960844.jpg',
+                        url: kimonoUrl,
                         category: 'clothing' as const,
                         anchor: 'shoulders' as const,
                         mat: 'silk' as const,
@@ -641,7 +645,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                       },
                       {
                         name: 'Colombian Emerald Pendant',
-                        url: '/src/assets/images/costume_emerald_pendant_1794472974484.jpg',
+                        url: emeraldPendantUrl,
                         category: 'jewelry' as const,
                         anchor: 'neck' as const,
                         mat: 'wool' as const,
@@ -649,7 +653,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                       },
                       {
                         name: 'Tailored Midnight Blazer',
-                        url: '/src/assets/images/asset_tailored_blazer_1794417020215.jpg',
+                        url: blazerUrl,
                         category: 'clothing' as const,
                         anchor: 'shoulders' as const,
                         mat: 'wool' as const,
@@ -657,7 +661,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                       },
                       {
                         name: 'Solitaire Gold Necklace',
-                        url: '/src/assets/images/asset_gold_necklace_1794417020572.jpg',
+                        url: goldNecklaceUrl,
                         category: 'jewelry' as const,
                         anchor: 'neck' as const,
                         mat: 'wool' as const,

@@ -1,4 +1,9 @@
 import { WardrobeAsset } from '../types/body';
+import blazerUrl from '../assets/images/asset_tailored_blazer_1794417020215.jpg';
+import kimonoUrl from '../assets/images/costume_silk_kimono_1794472960844.jpg';
+import emeraldPendantUrl from '../assets/images/costume_emerald_pendant_1794472974484.jpg';
+import goldNecklaceUrl from '../assets/images/asset_gold_necklace_1794417020572.jpg';
+import watchChronoUrl from '../assets/images/asset_luxury_watch_1794417021558.jpg';
 
 export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
   {
@@ -6,7 +11,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     name: 'Tailored Midnight Blazer',
     category: 'clothing',
     subCategory: 'blazer',
-    imageUrl: '/src/assets/images/asset_tailored_blazer_1794417020215.jpg',
+    imageUrl: blazerUrl,
     anchorPoint: 'shoulders',
     defaultScale: 1.0,
     tags: ['Formal', 'Luxury Wool', 'Structured Lapel'],
@@ -18,7 +23,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     name: 'Embroidered Royal Silk Kimono',
     category: 'clothing',
     subCategory: 'robe',
-    imageUrl: '/src/assets/images/costume_silk_kimono_1794472960844.jpg',
+    imageUrl: kimonoUrl,
     anchorPoint: 'shoulders',
     defaultScale: 1.15,
     tags: ['Costume', 'Crimson Silk', 'Gold Phoenix Embroidery', 'Flowing Hem'],
@@ -30,7 +35,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     name: 'Royal Emerald & Platinum Pendant',
     category: 'jewelry',
     subCategory: 'necklace',
-    imageUrl: '/src/assets/images/costume_emerald_pendant_1794472974484.jpg',
+    imageUrl: emeraldPendantUrl,
     anchorPoint: 'neck',
     defaultScale: 0.62,
     tags: ['Colombian Emerald', 'Halo Pave', 'Platinum Chain'],
@@ -41,7 +46,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     name: 'Solitaire Diamond Pendant',
     category: 'jewelry',
     subCategory: 'necklace',
-    imageUrl: '/src/assets/images/asset_gold_necklace_1794417020572.jpg',
+    imageUrl: goldNecklaceUrl,
     anchorPoint: 'neck',
     defaultScale: 0.65,
     tags: ['18K Gold', 'Pave Diamond', 'Collarbone Fit'],
@@ -52,7 +57,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     name: 'Chronograph Steel & Gold Watch',
     category: 'jewelry',
     subCategory: 'watch',
-    imageUrl: '/src/assets/images/asset_luxury_watch_1794417021558.jpg',
+    imageUrl: watchChronoUrl,
     anchorPoint: 'wrist',
     defaultScale: 0.38,
     tags: ['Swiss Automatic', 'Two-Tone', 'Tachymeter'],
