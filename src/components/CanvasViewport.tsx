@@ -80,6 +80,24 @@ export const CanvasViewport: React.FC = () => {
     visible: false,
   });
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchStartRef = useRef<{
+    dist: number;
+    zoom: number;
+    midX: number;
+    midY: number;
+    panX: number;
+    panY: number;
+  } | null>(null);
+  const panStartRef = useRef<{
+    clientX: number;
+    clientY: number;
+    panX: number;
+    panY: number;
+  } | null>(null);
+  const didPanDragRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Geometric Mesh & Manual Landmark Nudge state
@@ -132,20 +150,146 @@ export const CanvasViewport: React.FC = () => {
     }
   };
 
-  // 2. Handle dragging split slider
+  const clampZoom = (z: number) => Math.max(0.6, Math.min(4.0, z));
+
+  const clampPan = useCallback((px: number, py: number, z: number) => {
+    const container = containerRef.current;
+    if (!container || z <= 1.01) return { x: 0, y: 0 };
+    const rect = container.getBoundingClientRect();
+    const maxX = (rect.width * (z - 1)) * 0.55 + 80;
+    const maxY = (rect.height * (z - 1)) * 0.55 + 80;
+    return {
+      x: Math.max(-maxX, Math.min(maxX, px)),
+      y: Math.max(-maxY, Math.min(maxY, py)),
+    };
+  }, []);
+
+  const resetView = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  // Reset pan when target image changes
+  useEffect(() => {
+    resetView();
+  }, [targetImageUrl, resetView]);
+
+  // Smooth wheel / trackpad pinch zoom centered on pointer
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left - rect.width / 2;
+      const cy = e.clientY - rect.top - rect.height / 2;
+      const factor = e.ctrlKey ? 1 - e.deltaY * 0.01 : e.deltaY < 0 ? 1.12 : 0.89;
+      setZoom((prevZoom) => {
+        const nextZoom = clampZoom(prevZoom * factor);
+        const ratio = nextZoom / prevZoom;
+        setPan((prevPan) =>
+          clampPan(
+            cx - (cx - prevPan.x) * ratio,
+            cy - (cy - prevPan.y) * ratio,
+            nextZoom
+          )
+        );
+        return nextZoom;
+      });
+    };
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [clampPan]);
+
+  // 2. Handle pinch-to-zoom, pan, brush painting & split slider
   const handlePointerDown = (e: React.PointerEvent) => {
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // Multi-touch pinch-to-zoom + two-finger pan
+    if (activePointersRef.current.size === 2) {
+      setIsPainting(false);
+      setIsDraggingSplit(false);
+      setIsPanning(true);
+      panStartRef.current = null;
+      const pts = Array.from(activePointersRef.current.values());
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      pinchStartRef.current = {
+        dist: Math.max(10, dist),
+        zoom,
+        midX,
+        midY,
+        panX: pan.x,
+        panY: pan.y,
+      };
+      return;
+    }
+
     if (adjustments.brushMode !== 'none') {
       setIsPainting(true);
       handleBrushStroke(e.clientX, e.clientY);
       return;
     }
-    if (compareMode === 'split') {
+
+    if (compareMode === 'split' && zoom <= 1.02) {
       setIsDraggingSplit(true);
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Single-pointer drag to pan when zoomed in (or middle-button pan)
+    if (zoom > 1.02 || e.button === 1) {
+      didPanDragRef.current = false;
+      setIsPanning(true);
+      panStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        panX: pan.x,
+        panY: pan.y,
+      };
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
     }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    if (activePointersRef.current.has(e.pointerId)) {
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    // Active 2-finger pinch & pan
+    if (activePointersRef.current.size === 2 && pinchStartRef.current && containerRef.current) {
+      const pts = Array.from(activePointersRef.current.values());
+      const curDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const curMidX = (pts[0].x + pts[1].x) / 2;
+      const curMidY = (pts[0].y + pts[1].y) / 2;
+
+      const start = pinchStartRef.current;
+      const nextZoom = clampZoom(start.zoom * (curDist / start.dist));
+      const rect = containerRef.current.getBoundingClientRect();
+      const relMidX = start.midX - rect.left - rect.width / 2;
+      const relMidY = start.midY - rect.top - rect.height / 2;
+      const scaleRatio = nextZoom / start.zoom;
+
+      const dxMid = curMidX - start.midX;
+      const dyMid = curMidY - start.midY;
+
+      const targetPanX = relMidX - (relMidX - start.panX) * scaleRatio + dxMid;
+      const targetPanY = relMidY - (relMidY - start.panY) * scaleRatio + dyMid;
+
+      setZoom(nextZoom);
+      setPan(clampPan(targetPanX, targetPanY, nextZoom));
+      return;
+    }
+
     if (adjustments.brushMode !== 'none') {
       const container = containerRef.current;
       if (container) {
@@ -163,18 +307,36 @@ export const CanvasViewport: React.FC = () => {
     }
 
     if (isDraggingSplit && containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
+      const rect = outputCanvasRef.current?.getBoundingClientRect() || containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
       setSplitPos(pct);
+      return;
+    }
+
+    if (isPanning && panStartRef.current) {
+      const dx = e.clientX - panStartRef.current.clientX;
+      const dy = e.clientY - panStartRef.current.clientY;
+      if (Math.hypot(dx, dy) > 4) {
+        didPanDragRef.current = true;
+      }
+      setPan(clampPan(panStartRef.current.panX + dx, panStartRef.current.panY + dy, zoom));
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    setIsPainting(false);
-    setIsDraggingSplit(false);
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size < 2) {
+      pinchStartRef.current = null;
+    }
+    if (activePointersRef.current.size === 0) {
+      setIsPainting(false);
+      setIsDraggingSplit(false);
+      setIsPanning(false);
+      panStartRef.current = null;
+    }
     try {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {
       // ignore
     }
@@ -446,12 +608,31 @@ export const CanvasViewport: React.FC = () => {
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
         onPointerLeave={() => {
-          setIsPainting(false);
+          if (activePointersRef.current.size === 0) {
+            setIsPainting(false);
+            setIsPanning(false);
+          }
           setBrushHover((prev) => ({ ...prev, visible: false }));
         }}
+        onDoubleClick={() => {
+          if (adjustments.brushMode === 'none') {
+            if (zoom > 1.05) {
+              resetView();
+            } else {
+              setZoom(2);
+            }
+          }
+        }}
         className={`flex-1 relative flex items-center justify-center p-2 sm:p-4 overflow-hidden touch-none ${
-          adjustments.brushMode !== 'none' ? 'cursor-crosshair' : ''
+          adjustments.brushMode !== 'none'
+            ? 'cursor-crosshair'
+            : zoom > 1.02
+            ? isPanning
+              ? 'cursor-grabbing'
+              : 'cursor-grab'
+            : ''
         }`}
       >
         {/* Interactive Brush Cursor Follower */}
@@ -486,8 +667,10 @@ export const CanvasViewport: React.FC = () => {
         )}
 
         <div
-          className="relative max-w-full max-h-full flex items-center justify-center rounded-xl overflow-hidden shadow-2xl transition-transform"
-          style={{ transform: `scale(${zoom})` }}
+          className={`relative max-w-full max-h-full flex items-center justify-center rounded-xl overflow-hidden shadow-2xl ${
+            isPanning ? '' : 'transition-transform duration-100'
+          }`}
+          style={{ transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
         >
           {/* Swapped Render Canvas */}
           <canvas
@@ -660,7 +843,9 @@ export const CanvasViewport: React.FC = () => {
               return (
                 <div
                   key={face.id}
-                  onClick={() => setSelectedFaceId(face.id)}
+                  onClick={() => {
+                    if (!didPanDragRef.current) setSelectedFaceId(face.id);
+                  }}
                   className={`absolute rounded-xl transition-all cursor-pointer pointer-events-auto ${
                     isSelected
                       ? 'border-2 border-indigo-500 bg-indigo-500/10 shadow-[0_0_12px_rgba(99,102,241,0.4)]'
@@ -788,7 +973,11 @@ export const CanvasViewport: React.FC = () => {
 
         <div className="flex items-center gap-1 bg-black/40 backdrop-blur-md rounded-lg p-0.5 border border-white/10">
           <button
-            onClick={() => setZoom((z) => Math.max(0.6, z - 0.15))}
+            onClick={() => {
+              const next = clampZoom(zoom - 0.25);
+              setZoom(next);
+              setPan((p) => clampPan(p.x, p.y, next));
+            }}
             className="p-1 text-slate-300 hover:text-white rounded"
             title="Zoom out"
           >
@@ -798,16 +987,20 @@ export const CanvasViewport: React.FC = () => {
             {Math.round(zoom * 100)}%
           </span>
           <button
-            onClick={() => setZoom((z) => Math.min(2.5, z + 0.15))}
+            onClick={() => {
+              const next = clampZoom(zoom + 0.25);
+              setZoom(next);
+              setPan((p) => clampPan(p.x, p.y, next));
+            }}
             className="p-1 text-slate-300 hover:text-white rounded"
             title="Zoom in"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={() => setZoom(1)}
+            onClick={resetView}
             className="p-1 text-slate-300 hover:text-white rounded"
-            title="Reset Zoom"
+            title="Reset Zoom & Pan"
           >
             <Maximize className="w-3.5 h-3.5" />
           </button>

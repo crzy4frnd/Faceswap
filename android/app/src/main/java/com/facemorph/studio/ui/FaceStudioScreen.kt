@@ -9,6 +9,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,7 +46,9 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +56,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -79,6 +84,13 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
 
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Align
     var activeLandmarkKey by remember { mutableStateOf("nose") }
+    var viewportZoom by remember { mutableFloatStateOf(1f) }
+    var viewportPan by remember { mutableStateOf(Offset.Zero) }
+
+    LaunchedEffect(viewModel.activeTargetId, targetBmp) {
+        viewportZoom = 1f
+        viewportPan = Offset.Zero
+    }
 
     val targetPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { viewModel.loadTargetFromUri(it) }
@@ -176,6 +188,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .clipToBounds()
                 .background(Color(0xFF060A13)),
             contentAlignment = Alignment.Center
         ) {
@@ -183,18 +196,67 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = { tapOffset ->
+                                    if (viewportZoom > 1.1f) {
+                                        viewportZoom = 1f
+                                        viewportPan = Offset.Zero
+                                    } else {
+                                        val cx = size.width / 2f
+                                        val cy = size.height / 2f
+                                        val newZoom = 2.25f
+                                        viewportPan = Offset(
+                                            (cx - tapOffset.x) * (newZoom - 1f) * 0.6f,
+                                            (cy - tapOffset.y) * (newZoom - 1f) * 0.6f
+                                        )
+                                        viewportZoom = newZoom
+                                    }
+                                }
+                            )
+                        }
+                        .pointerInput(adj.showGeometricMesh) {
+                            detectTransformGestures { centroid, panDelta, zoomDelta, _ ->
+                                val prevZoom = viewportZoom
+                                val nextZoom = (prevZoom * zoomDelta).coerceIn(1f, 4f)
+                                val allowSinglePan = !adj.showGeometricMesh && nextZoom > 1.02f
+                                val effectivePan = if (zoomDelta != 1f || allowSinglePan) panDelta else Offset.Zero
+                                val cx = size.width / 2f
+                                val cy = size.height / 2f
+                                val scaleRatio = nextZoom / prevZoom
+                                val newPanX = (centroid.x - cx) - ((centroid.x - cx) - viewportPan.x) * scaleRatio + effectivePan.x
+                                val newPanY = (centroid.y - cy) - ((centroid.y - cy) - viewportPan.y) * scaleRatio + effectivePan.y
+
+                                viewportZoom = nextZoom
+                                if (nextZoom <= 1.02f) {
+                                    viewportPan = Offset.Zero
+                                } else {
+                                    val maxX = size.width * (nextZoom - 1f) * 0.55f
+                                    val maxY = size.height * (nextZoom - 1f) * 0.55f
+                                    viewportPan = Offset(
+                                        newPanX.coerceIn(-maxX, maxX),
+                                        newPanY.coerceIn(-maxY, maxY)
+                                    )
+                                }
+                            }
+                        }
                         .pointerInput(adj.showGeometricMesh, faces, viewModel.selectedFaceId) {
                             detectDragGestures { change, dragAmount ->
-                                change.consume()
                                 if (!adj.showGeometricMesh) return@detectDragGestures
+                                change.consume()
                                 val selId = viewModel.selectedFaceId ?: faces.firstOrNull()?.id ?: return@detectDragGestures
                                 val bw = renderedBitmap.width.toFloat()
                                 val bh = renderedBitmap.height.toFloat()
-                                val scale = min(size.width / bw, size.height / bh)
+                                val baseScale = min(size.width / bw, size.height / bh)
+                                val scale = baseScale * viewportZoom
+                                val drawW = bw * scale
+                                val drawH = bh * scale
+                                val left = (size.width - drawW) / 2f + viewportPan.x
+                                val top = (size.height - drawH) / 2f + viewportPan.y
                                 val dxImg = dragAmount.x / scale
                                 val dyImg = dragAmount.y / scale
-                                val tapX = (change.position.x - (size.width - bw * scale) / 2f) / scale
-                                val tapY = (change.position.y - (size.height - bh * scale) / 2f) / scale
+                                val tapX = (change.position.x - left) / scale
+                                val tapY = (change.position.y - top) / scale
 
                                 val f = faces.find { it.id == selId }
                                 if (f != null) {
@@ -218,11 +280,12 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 ) {
                     val bw = renderedBitmap.width.toFloat()
                     val bh = renderedBitmap.height.toFloat()
-                    val scale = min(size.width / bw, size.height / bh)
+                    val baseScale = min(size.width / bw, size.height / bh)
+                    val scale = baseScale * viewportZoom
                     val drawW = bw * scale
                     val drawH = bh * scale
-                    val left = (size.width - drawW) / 2f
-                    val top = (size.height - drawH) / 2f
+                    val left = (size.width - drawW) / 2f + viewportPan.x
+                    val top = (size.height - drawH) / 2f + viewportPan.y
 
                     drawImage(
                         image = renderedBitmap.asImageBitmap(),
@@ -250,6 +313,25 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             strokeWidth = 2.5f
                         )
                     }
+                }
+            }
+
+            if (viewportZoom > 1.05f) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xCC0B1120))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                        .clickable {
+                            viewportZoom = 1f
+                            viewportPan = Offset.Zero
+                        }
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                ) {
+                    Text("${(viewportZoom * 100).toInt()}% · Reset", color = Color(0xFF22D3EE), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
 
