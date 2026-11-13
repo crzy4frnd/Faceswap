@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FaceMorph Studio</string>
+    <string name="title_activity_main">FaceMorph Studio</string>
+    <string name="package_name">com.facemorph.studio</string>
+    <string name="custom_url_scheme">com.facemorph.studio</string>
+</resources>
