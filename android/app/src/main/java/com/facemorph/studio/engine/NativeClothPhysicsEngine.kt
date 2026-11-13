@@ -62,13 +62,22 @@ class PendantState(
 
 object NativeClothPhysicsEngine {
 
-    fun scanBody(bitmapWidth: Float, bitmapHeight: Float, faceCenterX: Float?, faceBottomY: Float?): BodyScanResult {
+    fun scanBody(
+        bitmapWidth: Float,
+        bitmapHeight: Float,
+        faceCenterX: Float?,
+        faceBottomY: Float?,
+        faceWidth: Float? = null,
+        faceHeight: Float? = null
+    ): BodyScanResult {
+        val fw = faceWidth ?: (bitmapWidth * 0.22f)
+        val fh = faceHeight ?: (fw * 1.25f)
         val cx = faceCenterX ?: (bitmapWidth * 0.5f)
-        val neckY = faceBottomY?.let { it + bitmapHeight * 0.03f } ?: (bitmapHeight * 0.36f)
-        val shoulderHalfW = bitmapWidth * 0.22f
-        val shoulderY = neckY + bitmapHeight * 0.06f
+        val neckY = faceBottomY?.let { it + fh * 0.12f } ?: (bitmapHeight * 0.36f)
+        val shoulderHalfW = (fw * 1.22f).coerceIn(bitmapWidth * 0.10f, bitmapWidth * 0.34f)
+        val shoulderY = neckY + fh * 0.24f
         val waistHalfW = shoulderHalfW * 0.78f
-        val waistY = shoulderY + bitmapHeight * 0.26f
+        val waistY = shoulderY + fh * 1.48f
 
         return BodyScanResult(
             shoulderWidthCm = 44,
@@ -76,15 +85,15 @@ object NativeClothPhysicsEngine {
             waistCm = 79,
             neckCm = 38,
             estimatedSize = "US M · EU 48",
-            nose = Point2D(cx, neckY - bitmapHeight * 0.14f),
+            nose = Point2D(cx, neckY - fh * 0.65f),
             throat = Point2D(cx, neckY),
             leftShoulder = Point2D(cx - shoulderHalfW, shoulderY),
             rightShoulder = Point2D(cx + shoulderHalfW, shoulderY),
-            sternum = Point2D(cx, shoulderY + bitmapHeight * 0.08f),
+            sternum = Point2D(cx, shoulderY + fh * 0.45f),
             leftWaist = Point2D(cx - waistHalfW, waistY),
             rightWaist = Point2D(cx + waistHalfW, waistY),
-            leftWrist = Point2D(cx - shoulderHalfW * 1.25f, waistY + bitmapHeight * 0.05f),
-            rightWrist = Point2D(cx + shoulderHalfW * 1.25f, waistY + bitmapHeight * 0.05f)
+            leftWrist = Point2D(cx - shoulderHalfW * 1.22f, waistY + fh * 0.25f),
+            rightWrist = Point2D(cx + shoulderHalfW * 1.22f, waistY + fh * 0.25f)
         )
     }
 

@@ -8,6 +8,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,15 +17,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessibilityNew
+import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.Checkroom
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -39,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -62,7 +68,7 @@ class MainActivity : ComponentActivity() {
                 primary = Color(0xFF6366F1),
                 secondary = Color(0xFF22D3EE),
                 background = Color(0xFF020617),
-                surface = Color(0xFF0F172A),
+                surface = Color(0xFF0B1120),
                 onPrimary = Color.White,
                 onBackground = Color.White,
                 onSurface = Color.White
@@ -110,69 +116,87 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
         containerColor = Color(0xFF020617),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF0F172A))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Face,
-                        contentDescription = null,
-                        tint = Color(0xFF818CF8),
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column {
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .background(Color(0xFF0A0F1E))
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF4F46E5)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Face, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(Modifier.width(10.dp))
                         Text(
-                            "FaceMorph Studio",
+                            "FaceMorph",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
+                            fontSize = 16.sp
                         )
+                        Spacer(Modifier.width(6.dp))
                         Text(
-                            "Pure Native Kotlin • Android 7.0+",
-                            color = Color(0xFF22D3EE),
-                            fontSize = 10.sp
+                            studioViewModel.activeTab.label,
+                            color = Color(0xFF818CF8),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF111827))
+                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                            .clickable { studioViewModel.showCustomAssetDialog = true }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Scan", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
-                Text(
-                    "NATIVE AR",
-                    color = Color(0xFF34D399),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .background(Color(0xFF064E3B), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                )
+                HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
             }
         },
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0F172A)) {
-                StudioTab.entries.forEach { tab ->
-                    val icon = when (tab) {
-                        StudioTab.FACE_STUDIO -> Icons.Default.Face
-                        StudioTab.BODY_PHYSICS -> Icons.Default.AccessibilityNew
-                        StudioTab.LIVE_CAMERA -> Icons.Default.Videocam
-                        StudioTab.VAULT -> Icons.Default.Checkroom
-                    }
-                    NavigationBarItem(
-                        selected = studioViewModel.activeTab == tab,
-                        onClick = { studioViewModel.activeTab = tab },
-                        icon = { Icon(icon, contentDescription = tab.label) },
-                        label = { Text(tab.label, fontSize = 10.sp) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Color.White,
-                            selectedTextColor = Color(0xFF818CF8),
-                            indicatorColor = Color(0xFF312E81),
-                            unselectedIconColor = Color(0xFF94A3B8),
-                            unselectedTextColor = Color(0xFF94A3B8)
+            Column {
+                HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                NavigationBar(
+                    containerColor = Color(0xFF0A0F1E),
+                    modifier = Modifier.height(64.dp)
+                ) {
+                    StudioTab.entries.forEach { tab ->
+                        val icon = when (tab) {
+                            StudioTab.FACE_STUDIO -> Icons.Default.Face
+                            StudioTab.BODY_PHYSICS -> Icons.Default.AccessibilityNew
+                            StudioTab.LIVE_CAMERA -> Icons.Default.Videocam
+                            StudioTab.VAULT -> Icons.Default.Checkroom
+                        }
+                        NavigationBarItem(
+                            selected = studioViewModel.activeTab == tab,
+                            onClick = { studioViewModel.activeTab = tab },
+                            icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(20.dp)) },
+                            label = { Text(tab.label, fontSize = 10.sp, fontWeight = FontWeight.Medium) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Color.White,
+                                selectedTextColor = Color(0xFF818CF8),
+                                indicatorColor = Color(0xFF312E81),
+                                unselectedIconColor = Color(0xFF64748B),
+                                unselectedTextColor = Color(0xFF64748B)
+                            )
                         )
-                    )
+                    }
                 }
             }
         }

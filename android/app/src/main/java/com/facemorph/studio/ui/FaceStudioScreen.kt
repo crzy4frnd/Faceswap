@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Compare
@@ -38,7 +37,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -47,6 +45,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -76,20 +75,23 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     val faces = viewModel.detectedFaces
     val adj = viewModel.adjustments
     val profileCache = viewModel.profileBitmapCache.toMap()
+    val metricsCache = viewModel.profileMetricsCache.toMap()
 
+    var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Align
     var activeLandmarkKey by remember { mutableStateOf("nose") }
 
     val targetPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { viewModel.loadTargetFromUri(it) }
     }
     val facePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { viewModel.addCustomFaceFromUri(it, "Custom Face") }
+        uri?.let { viewModel.addCustomFaceFromUri(it, "My Face") }
     }
 
     val renderedBitmap: Bitmap? = remember(
         targetBmp,
         faces,
         profileCache,
+        metricsCache,
         adj,
         viewModel.splitCompareEnabled,
         viewModel.splitComparePercent
@@ -99,6 +101,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 targetBitmap = it,
                 faces = faces,
                 profileBitmaps = profileCache,
+                profileMetrics = metricsCache,
                 adjustments = adj,
                 splitPercent = if (viewModel.splitCompareEnabled) viewModel.splitComparePercent else null
             )
@@ -110,40 +113,70 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
             .fillMaxSize()
             .background(Color(0xFF020617))
     ) {
-        // Top Target Picker & Quick Actions Bar
+        // Slim Top Target Ribbon + Save Pill (No Overlap on Canvas)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF0F172A))
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .background(Color(0xFF0A0F1E))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            viewModel.targetSamples.forEach { sample ->
-                FilterChip(
-                    selected = viewModel.activeTargetId == sample.id,
-                    onClick = { viewModel.loadTargetSample(sample) },
-                    label = { Text(sample.title, fontSize = 11.sp) }
-                )
-            }
-            Button(
-                onClick = { targetPicker.launch("image/*") },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
-                modifier = Modifier.height(34.dp)
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
+                viewModel.targetSamples.forEach { sample ->
+                    val selected = viewModel.activeTargetId == sample.id
+                    Text(
+                        text = sample.title,
+                        color = if (selected) Color.White else Color(0xFF94A3B8),
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) Color(0xFF312E81) else Color(0xFF111827))
+                            .border(1.dp, if (selected) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                            .clickable { viewModel.loadTargetSample(sample) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF111827))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                        .clickable { targetPicker.launch("image/*") }
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
+                ) {
+                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Photo", color = Color(0xFFE2E8F0), fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = { renderedBitmap?.let { viewModel.exportBitmapToGallery(it, "FaceSwap") } },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.height(30.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+            ) {
+                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("Gallery", fontSize = 11.sp)
+                Text("Save", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
-        // Main Interactive Viewport
+        // Clean Interactive Canvas Viewport
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(Color(0xFF090D16)),
+                .background(Color(0xFF060A13)),
             contentAlignment = Alignment.Center
         ) {
             if (renderedBitmap != null) {
@@ -177,9 +210,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                     val nearest = pts.minByOrNull { (_, p) ->
                                         hypot((p.x - tapX).toDouble(), (p.y - tapY).toDouble())
                                     }
-                                    if (nearest != null) {
-                                        activeLandmarkKey = nearest.first
-                                    }
+                                    if (nearest != null) activeLandmarkKey = nearest.first
                                     viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, dxImg, dyImg)
                                 }
                             }
@@ -216,221 +247,305 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             color = Color.White,
                             start = Offset(splitX, top),
                             end = Offset(splitX, top + drawH),
-                            strokeWidth = 3f
+                            strokeWidth = 2.5f
                         )
                     }
                 }
             }
 
-            // Top Right Canvas Tool Buttons
+            // Minimal Bottom-Right Corner Tools (Never Obscuring Faces)
             Row(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
+                    .align(Alignment.BottomEnd)
                     .padding(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                IconButton(
-                    onClick = {
-                        viewModel.adjustments = adj.copy(showGeometricMesh = !adj.showGeometricMesh)
-                    },
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(if (adj.showGeometricMesh) Color(0xFF0891B2) else Color(0xAA0F172A))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (adj.showGeometricMesh) Color(0xDD0891B2) else Color(0xCC0B1120))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                        .clickable { viewModel.adjustments = adj.copy(showGeometricMesh = !adj.showGeometricMesh) }
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
                 ) {
-                    Icon(Icons.Default.GridOn, contentDescription = "Landmark Mesh", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.GridOn, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Mesh", color = Color.White, fontSize = 11.sp)
                 }
 
-                IconButton(
-                    onClick = { viewModel.splitCompareEnabled = !viewModel.splitCompareEnabled },
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(if (viewModel.splitCompareEnabled) Color(0xFF4F46E5) else Color(0xAA0F172A))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (viewModel.splitCompareEnabled) Color(0xDD4F46E5) else Color(0xCC0B1120))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                        .clickable { viewModel.splitCompareEnabled = !viewModel.splitCompareEnabled }
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
                 ) {
-                    Icon(Icons.Default.Compare, contentDescription = "Compare", tint = Color.White, modifier = Modifier.size(18.dp))
-                }
-
-                IconButton(
-                    onClick = { renderedBitmap?.let { viewModel.exportBitmapToGallery(it, "FaceSwap") } },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF059669))
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = "Save to Gallery", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Compare, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Before/After", color = Color.White, fontSize = 11.sp)
                 }
             }
 
-            // Floating Nudge HUD when Geometric Mesh is active
+            // Landmark Nudge Bar (only visible when Mesh is active)
             if (adj.showGeometricMesh && faces.isNotEmpty()) {
                 val selId = viewModel.selectedFaceId ?: faces.first().id
                 Row(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xCC0F172A))
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        .align(Alignment.BottomStart)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xDD0B1120))
+                        .border(1.dp, Color(0xFF0891B2), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(activeLandmarkKey.uppercase(), color = Color(0xFF22D3EE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, -4f, 0f) }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.KeyboardArrowLeft, contentDescription = null, tint = Color.White)
+                    Text(activeLandmarkKey.uppercase(), color = Color(0xFF22D3EE), fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
+                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, -3f, 0f) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.KeyboardArrowLeft, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                     }
-                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, 0f, -4f) }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = null, tint = Color.White)
+                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, 0f, -3f) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                     }
-                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, 0f, 4f) }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, tint = Color.White)
+                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, 0f, 3f) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                     }
-                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, 4f, 0f) }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = Color.White)
+                    IconButton(onClick = { viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, 3f, 0f) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                     }
-                    IconButton(onClick = { viewModel.resetFaceLandmarks(selId) }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.RestartAlt, contentDescription = "Reset", tint = Color(0xFFFBBF24))
+                    IconButton(onClick = { viewModel.resetFaceLandmarks(selId) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.RestartAlt, contentDescription = "Reset", tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
                     }
                 }
             }
         }
 
-        // Bottom Controls Sheet
+        // Clean Segmented Bottom Studio Deck (Zero Clipped Sliders!)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(250.dp)
-                .background(Color(0xFF0F172A))
-                .verticalScroll(rememberScrollState())
-                .padding(12.dp),
+                .height(212.dp)
+                .background(Color(0xFF0B1120))
+                .border(1.dp, Color(0xFF1E293B))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Face Profiles Strip
+            // Segmented Tabs
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF111827))
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                viewModel.faceProfiles.forEach { profile ->
-                    val isSelected = viewModel.activeProfileId == profile.id
-                    val pBmp = profileCache[profile.id]
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                listOf("Faces", "Blend", "Align").forEachIndexed { idx, label ->
+                    val selected = activeDeckTab == idx
+                    Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .border(
-                                width = if (isSelected) 2.dp else 1.dp,
-                                color = if (isSelected) Color(0xFF6366F1) else Color(0xFF334155),
-                                shape = RoundedCornerShape(12.dp)
-                            )
-                            .background(if (isSelected) Color(0xFF1E1B4B) else Color(0xFF020617))
-                            .clickable { viewModel.assignProfileToSelectedOrAll(profile.id) }
-                            .padding(6.dp)
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) Color(0xFF4F46E5) else Color.Transparent)
+                            .clickable { activeDeckTab = idx }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        if (pBmp != null) {
-                            Image(
-                                bitmap = pBmp.asImageBitmap(),
-                                contentDescription = profile.name,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                            )
-                        }
-                        Spacer(Modifier.height(3.dp))
-                        Text(profile.name, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-
-                // Add Custom Face from Gallery
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(12.dp))
-                        .background(Color(0xFF1E293B))
-                        .clickable { facePicker.launch("image/*") }
-                        .padding(8.dp)
-                ) {
-                    Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(36.dp))
-                    Text("+ Face", color = Color(0xFF818CF8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-
-            // Multi-Face Toggle Chips
-            if (faces.size > 1) {
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    faces.forEachIndexed { idx, f ->
-                        FilterChip(
-                            selected = viewModel.selectedFaceId == f.id,
-                            onClick = {
-                                viewModel.selectedFaceId = f.id
-                            },
-                            label = { Text("Face #${idx + 1} (${if (f.enabled) "ON" else "OFF"})", fontSize = 10.sp) }
+                        Text(
+                            label,
+                            color = if (selected) Color.White else Color(0xFF94A3B8),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
                 }
             }
 
-            if (viewModel.splitCompareEnabled) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Split Compare", color = Color(0xFF94A3B8), fontSize = 11.sp, modifier = Modifier.width(96.dp))
-                    Slider(
-                        value = viewModel.splitComparePercent,
-                        onValueChange = { viewModel.splitComparePercent = it },
-                        valueRange = 5f..95f,
-                        modifier = Modifier.weight(1f)
-                    )
+            when (activeDeckTab) {
+                0 -> {
+                    // Faces Selection + Multi-Face Manager
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        viewModel.faceProfiles.forEach { profile ->
+                            val isSelected = viewModel.activeProfileId == profile.id
+                            val pBmp = profileCache[profile.id]
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.5.dp, if (isSelected) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(12.dp))
+                                    .background(if (isSelected) Color(0xFF1E1B4B) else Color(0xFF111827))
+                                    .clickable { viewModel.assignProfileToSelectedOrAll(profile.id) }
+                                    .padding(8.dp)
+                            ) {
+                                if (pBmp != null) {
+                                    Image(
+                                        bitmap = pBmp.asImageBitmap(),
+                                        contentDescription = profile.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.size(44.dp).clip(CircleShape)
+                                    )
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Column {
+                                    Text(profile.name, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(profile.tag, color = Color(0xFF818CF8), fontSize = 10.sp)
+                                }
+                            }
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(12.dp))
+                                .background(Color(0xFF111827))
+                                .clickable { facePicker.launch("image/*") }
+                                .padding(horizontal = 12.dp, vertical = 14.dp)
+                        ) {
+                            Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Import Face", color = Color(0xFFE2E8F0), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    if (faces.size > 1) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            faces.forEachIndexed { idx, f ->
+                                val isSel = viewModel.selectedFaceId == f.id
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isSel) Color(0xFF312E81) else Color(0xFF111827))
+                                        .border(1.dp, if (isSel) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            if (viewModel.selectedFaceId == f.id) {
+                                                viewModel.toggleFaceEnabled(f.id)
+                                            } else {
+                                                viewModel.selectedFaceId = f.id
+                                            }
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        "Face ${idx + 1} · ${if (f.enabled) "ON" else "OFF"}",
+                                        color = if (f.enabled) Color.White else Color(0xFF64748B),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    } else if (viewModel.splitCompareEnabled) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Split ${viewModel.splitComparePercent.toInt()}%", color = Color(0xFF94A3B8), fontSize = 11.sp, modifier = Modifier.width(84.dp))
+                            Slider(
+                                value = viewModel.splitComparePercent,
+                                onValueChange = { viewModel.splitComparePercent = it },
+                                valueRange = 5f..95f,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    } else {
+                        Text(
+                            "Tip: Tap a face profile to swap. Enable Before/After to compare.",
+                            color = Color(0xFF64748B),
+                            fontSize = 11.sp
+                        )
+                    }
                 }
-            }
 
-            // Swap Strength & Smart Blend
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Swap ${adj.swapStrength}%", color = Color.White, fontSize = 11.sp, modifier = Modifier.width(90.dp))
-                Slider(
-                    value = adj.swapStrength.toFloat(),
-                    onValueChange = { viewModel.adjustments = adj.copy(swapStrength = it.toInt()) },
-                    valueRange = 0f..100f,
-                    colors = SliderDefaults.colors(thumbColor = Color(0xFF6366F1), activeTrackColor = Color(0xFF6366F1)),
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Feather ${adj.featherRadius}px", color = Color.White, fontSize = 11.sp, modifier = Modifier.width(90.dp))
-                Slider(
-                    value = adj.featherRadius.toFloat(),
-                    onValueChange = { viewModel.adjustments = adj.copy(featherRadius = it.toInt()) },
-                    valueRange = 6f..45f,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Smart Blend", color = Color(0xFFCBD5E1), fontSize = 11.sp)
-                    Spacer(Modifier.width(6.dp))
-                    Switch(
-                        checked = adj.smartBlend,
-                        onCheckedChange = { viewModel.adjustments = adj.copy(smartBlend = it) }
-                    )
+                1 -> {
+                    // Blend Tab
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Opacity ${adj.swapStrength}%", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                        Slider(
+                            value = adj.swapStrength.toFloat(),
+                            onValueChange = { viewModel.adjustments = adj.copy(swapStrength = it.toInt()) },
+                            valueRange = 0f..100f,
+                            colors = SliderDefaults.colors(thumbColor = Color(0xFF6366F1), activeTrackColor = Color(0xFF6366F1)),
+                            modifier = Modifier.weight(1f).height(32.dp)
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Feather ${adj.featherRadius}px", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                        Slider(
+                            value = adj.featherRadius.toFloat(),
+                            onValueChange = { viewModel.adjustments = adj.copy(featherRadius = it.toInt()) },
+                            valueRange = 8f..45f,
+                            modifier = Modifier.weight(1f).height(32.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Skin Match", color = Color(0xFFCBD5E1), fontSize = 11.sp)
+                            Spacer(Modifier.width(6.dp))
+                            Switch(checked = adj.skinToneMatch, onCheckedChange = { viewModel.adjustments = adj.copy(skinToneMatch = it) })
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Smart Edge", color = Color(0xFFCBD5E1), fontSize = 11.sp)
+                            Spacer(Modifier.width(6.dp))
+                            Switch(checked = adj.smartBlend, onCheckedChange = { viewModel.adjustments = adj.copy(smartBlend = it) })
+                        }
+                    }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Auto-Mask", color = Color(0xFFCBD5E1), fontSize = 11.sp)
-                    Spacer(Modifier.width(6.dp))
-                    Switch(
-                        checked = adj.autoMaskHair,
-                        onCheckedChange = { viewModel.adjustments = adj.copy(autoMaskHair = it) }
-                    )
+
+                2 -> {
+                    // Align Tab
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Size ${(adj.scale * 100).toInt()}%", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                        Slider(
+                            value = adj.scale,
+                            onValueChange = { viewModel.adjustments = adj.copy(scale = it) },
+                            valueRange = 0.75f..1.35f,
+                            modifier = Modifier.weight(1f).height(32.dp)
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Tilt ${adj.rotation.toInt()}°", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                        Slider(
+                            value = adj.rotation,
+                            onValueChange = { viewModel.adjustments = adj.copy(rotation = it) },
+                            valueRange = -25f..25f,
+                            modifier = Modifier.weight(1f).height(32.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Landmark Mesh", color = Color(0xFFCBD5E1), fontSize = 11.sp)
+                            Spacer(Modifier.width(6.dp))
+                            Switch(
+                                checked = adj.showGeometricMesh,
+                                onCheckedChange = { viewModel.adjustments = adj.copy(showGeometricMesh = it) }
+                            )
+                        }
+                        Button(
+                            onClick = { viewModel.adjustments = adj.copy(scale = 1.0f, rotation = 0f, offsetX = 0f, offsetY = 0f) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                        ) {
+                            Text("Reset", fontSize = 11.sp)
+                        }
+                    }
                 }
             }
         }

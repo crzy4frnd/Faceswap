@@ -27,6 +27,7 @@ import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.FittedWardrobeLayer
 import com.facemorph.studio.model.LiveCameraConfig
 import com.facemorph.studio.model.Point2D
+import com.facemorph.studio.model.SourceFaceMetrics
 import com.facemorph.studio.model.StudioTab
 import com.facemorph.studio.model.TargetSampleItem
 import com.facemorph.studio.model.WardrobeAssetItem
@@ -49,7 +50,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var faceProfiles by mutableStateOf(
         listOf(
             FaceProfileItem("profile-elena", "Elena Vance", R.drawable.face_profile_elena, tag = "Studio"),
-            FaceProfileItem("profile-maya", "Maya Lin", R.drawable.face_profile_maya, tag = "High Contrast")
+            FaceProfileItem("profile-maya", "Maya Lin", R.drawable.face_profile_maya, tag = "Portrait")
         )
     )
     var activeProfileId by mutableStateOf("profile-elena")
@@ -57,8 +58,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     // Target Portraits
     val targetSamples = listOf(
         TargetSampleItem("sample-single", "Studio Portrait", R.drawable.portrait_single),
-        TargetSampleItem("sample-duo", "Urban Café Duo", R.drawable.portrait_duo),
-        TargetSampleItem("sample-group", "Friends Group", R.drawable.portrait_group)
+        TargetSampleItem("sample-duo", "Café Duo", R.drawable.portrait_duo),
+        TargetSampleItem("sample-group", "Friends", R.drawable.portrait_group)
     )
     var activeTargetId by mutableStateOf("sample-single")
     var targetBitmap by mutableStateOf<Bitmap?>(null)
@@ -68,20 +69,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var splitCompareEnabled by mutableStateOf(false)
     var splitComparePercent by mutableFloatStateOf(50f)
 
-    // Bitmap Caches
+    // Bitmap & Metrics Caches
     val profileBitmapCache = mutableStateMapOf<String, Bitmap>()
+    val profileMetricsCache = mutableStateMapOf<String, SourceFaceMetrics>()
     val wardrobeBitmapCache = mutableStateMapOf<String, Bitmap>()
     val backgroundBitmapCache = mutableStateMapOf<String, Bitmap>()
 
     // Body Fit & Physics
     var bodyScan by mutableStateOf<BodyScanResult?>(null)
+    var bodySubjectFaceId by mutableStateOf<String?>(null)
     var clothConfig by mutableStateOf(ClothPhysicsConfig())
-    var showBodyScanHud by mutableStateOf(true)
+    var showBodyScanHud by mutableStateOf(false)
     var wardrobeAssets by mutableStateOf<List<WardrobeAssetItem>>(emptyList())
     var fittedLayers by mutableStateOf(
         listOf(
             FittedWardrobeLayer("asset-blazer", visible = true, scale = 1.0f),
-            FittedWardrobeLayer("asset-emerald", visible = true, scale = 0.62f)
+            FittedWardrobeLayer("asset-emerald", visible = true, scale = 0.56f)
         )
     )
     var selectedWardrobeId by mutableStateOf("asset-blazer")
@@ -101,7 +104,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             faceProfiles.forEach { p ->
                 p.drawableResId?.let { res ->
                     NativeStorageHelper.loadBitmapFromResource(ctx, res, 900)?.let { bmp ->
-                        withContext(Dispatchers.Main) { profileBitmapCache[p.id] = bmp }
+                        val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
+                        withContext(Dispatchers.Main) {
+                            profileBitmapCache[p.id] = bmp
+                            profileMetricsCache[p.id] = metrics
+                        }
                     }
                 }
             }
@@ -118,12 +125,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 ),
                 WardrobeAssetItem(
                     id = "asset-kimono",
-                    name = "Royal Silk Kimono",
+                    name = "Silk Kimono",
                     category = WardrobeCategory.CLOTHING,
                     anchorPoint = BodyAnchorPoint.SHOULDERS,
                     fabricType = FabricType.SILK,
                     drawableResId = R.drawable.wardrobe_kimono,
-                    defaultScale = 1.15f
+                    defaultScale = 1.12f
                 ),
                 WardrobeAssetItem(
                     id = "asset-emerald",
@@ -131,23 +138,23 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     category = WardrobeCategory.JEWELRY,
                     anchorPoint = BodyAnchorPoint.NECK,
                     drawableResId = R.drawable.wardrobe_emerald_pendant,
-                    defaultScale = 0.62f
+                    defaultScale = 0.56f
                 ),
                 WardrobeAssetItem(
                     id = "asset-diamond",
-                    name = "Diamond Necklace",
+                    name = "Gold Necklace",
                     category = WardrobeCategory.JEWELRY,
                     anchorPoint = BodyAnchorPoint.NECK,
                     drawableResId = R.drawable.wardrobe_gold_necklace,
-                    defaultScale = 0.65f
+                    defaultScale = 0.62f
                 ),
                 WardrobeAssetItem(
                     id = "asset-watch",
-                    name = "Chronograph Watch",
+                    name = "Chronograph",
                     category = WardrobeCategory.JEWELRY,
                     anchorPoint = BodyAnchorPoint.WRIST,
                     drawableResId = R.drawable.wardrobe_watch,
-                    defaultScale = 0.38f
+                    defaultScale = 0.36f
                 )
             )
             val savedCustom = loadSavedCustomWardrobe()
@@ -158,7 +165,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 val bmp = when {
                     item.customFilePath != null -> NativeStorageHelper.loadBitmapFromFile(item.customFilePath, 900)
                     item.drawableResId != null -> NativeStorageHelper.loadBitmapFromResource(ctx, item.drawableResId, 900)
-                        ?.let { NativeAssetSegmenter.extractTransparentAsset(it, tolerance = 32) }
+                        ?.let { NativeAssetSegmenter.extractTransparentAsset(it, tolerance = 36) }
                     else -> null
                 }
                 if (bmp != null) loadedWardrobeMaps[item.id] = bmp
@@ -195,13 +202,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun loadTargetFromBitmap(bmp: Bitmap) {
-        activeTargetId = "camera-capture"
-        viewModelScope.launch(Dispatchers.IO) {
-            applyTargetBitmap(bmp)
-        }
-    }
-
     private suspend fun applyTargetBitmap(bmp: Bitmap) {
         val faces = NativeFaceSwapEngine.detectFaces(bmp, activeProfileId)
         val firstFace = faces.firstOrNull()
@@ -209,28 +209,47 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             bmp.width.toFloat(),
             bmp.height.toFloat(),
             firstFace?.let { (it.boxLeft + it.boxRight) * 0.5f },
-            firstFace?.boxBottom
+            firstFace?.boxBottom,
+            firstFace?.let { it.boxRight - it.boxLeft },
+            firstFace?.let { it.boxBottom - it.boxTop }
         )
         withContext(Dispatchers.Main) {
             targetBitmap = bmp
             detectedFaces = faces
             selectedFaceId = firstFace?.id
+            bodySubjectFaceId = firstFace?.id
             bodyScan = scan
         }
+    }
+
+    fun selectBodySubjectFace(faceId: String) {
+        val bmp = targetBitmap ?: return
+        val face = detectedFaces.find { it.id == faceId } ?: return
+        bodySubjectFaceId = faceId
+        bodyScan = NativeClothPhysicsEngine.scanBody(
+            bmp.width.toFloat(),
+            bmp.height.toFloat(),
+            (face.boxLeft + face.boxRight) * 0.5f,
+            face.boxBottom,
+            face.boxRight - face.boxLeft,
+            face.boxBottom - face.boxTop
+        )
     }
 
     fun addCustomFaceFromUri(uri: Uri, name: String = "My Face") {
         viewModelScope.launch(Dispatchers.IO) {
             val bmp = NativeStorageHelper.loadBitmapFromUri(ctx, uri, 900) ?: return@launch
+            val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
             val id = "profile-${System.currentTimeMillis()}"
             val path = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$id.png")
             val item = FaceProfileItem(id = id, name = name, customFilePath = path, tag = "Custom")
             withContext(Dispatchers.Main) {
                 faceProfiles = listOf(item) + faceProfiles
                 profileBitmapCache[id] = bmp
+                profileMetricsCache[id] = metrics
                 activeProfileId = id
                 assignProfileToSelectedOrAll(id)
-                showToast("Added custom face profile!")
+                showToast("Face imported & aligned")
             }
         }
     }
@@ -323,14 +342,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 selectedWardrobeId = id
                 fittedLayers = fittedLayers + FittedWardrobeLayer(assetId = id, visible = true, scale = defaultScale)
 
-                // Also equip directly in Live AR camera
                 liveConfig = if (category == WardrobeCategory.CLOTHING) {
                     liveConfig.copy(selectedClothingId = id, wearClothes = true)
                 } else {
                     liveConfig.copy(selectedJewelryId = id, wearJewelry = true)
                 }
                 customAssetNonce++
-                showToast("Converted '${item.name}' into AR Wardrobe Asset!")
+                showToast("Saved '${item.name}' to Wardrobe & Live AR")
             }
         }
     }
@@ -347,7 +365,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             withContext(Dispatchers.Main) {
                 backgroundBitmapCache["custom"] = bmp
                 liveConfig = liveConfig.copy(activeBgId = "custom", removeBackground = true)
-                showToast("Custom virtual background loaded!")
+                showToast("Custom background active")
             }
         }
     }
@@ -356,7 +374,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch(Dispatchers.IO) {
             val ok = NativeStorageHelper.saveBitmapToGallery(ctx, bitmap)
             withContext(Dispatchers.Main) {
-                showToast(if (ok) "$label saved to Pictures/FaceMorphStudio!" else "Failed to save image.")
+                showToast(if (ok) "Saved $label to Gallery" else "Could not save image")
             }
         }
     }

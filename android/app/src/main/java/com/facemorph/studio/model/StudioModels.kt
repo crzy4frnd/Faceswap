@@ -18,6 +18,17 @@ data class FaceLandmarksData(
     val chin: Point2D
 )
 
+data class SourceFaceMetrics(
+    val cropLeft: Float,
+    val cropTop: Float,
+    val cropRight: Float,
+    val cropBottom: Float,
+    val eyeMidXRatio: Float,
+    val eyeMidYRatio: Float,
+    val eyeDistRatio: Float,
+    val rollDeg: Float
+)
+
 data class DetectedFaceData(
     val id: String,
     val boxLeft: Float,
@@ -51,11 +62,11 @@ data class TargetSampleItem(
 data class FaceAdjustments(
     val swapStrength: Int = 92,
     val skinToneMatch: Boolean = true,
-    val featherRadius: Int = 24,
+    val featherRadius: Int = 28,
     val autoMaskHair: Boolean = true,
     val autoMaskAccessories: Boolean = true,
     val smartBlend: Boolean = true,
-    val smartBlendIntensity: Int = 80,
+    val smartBlendIntensity: Int = 82,
     val showGeometricMesh: Boolean = false,
     val scale: Float = 1.0f,
     val rotation: Float = 0f,
@@ -70,11 +81,11 @@ enum class WardrobeCategory(val label: String) {
 }
 
 enum class BodyAnchorPoint(val label: String) {
-    SHOULDERS("Shoulders / Torso"),
-    NECK("Neck / Collarbone"),
-    HEAD("Head / Crown"),
-    WRIST("Wrist / Bracelet"),
-    WAIST("Waist / Belt")
+    SHOULDERS("Shoulders"),
+    NECK("Neck"),
+    HEAD("Head"),
+    WRIST("Wrist"),
+    WAIST("Waist")
 }
 
 enum class FabricType(
@@ -117,7 +128,7 @@ data class FittedWardrobeLayer(
     val rotation: Float = 0f,
     val offsetX: Float = 0f,
     val offsetY: Float = 0f,
-    val shadowDepth: Int = 55
+    val shadowDepth: Int = 45
 )
 
 data class ClothPhysicsConfig(
@@ -126,7 +137,7 @@ data class ClothPhysicsConfig(
     val fabricType: FabricType = FabricType.WOOL,
     val gravity: Float = 0.55f,
     val airResistance: Int = 65,
-    val windStrength: Float = 1.5f,
+    val windStrength: Float = 1.2f,
     val windTurbulence: Float = 0.45f,
     val gustFrequency: Float = 1.0f,
     val airFanActive: Boolean = false,
@@ -159,13 +170,13 @@ data class LiveCameraConfig(
     val removeBackground: Boolean = true,
     val activeBgId: String = "studio",
     val removeHairAndBlemishes: Boolean = true,
-    val hairRemovalIntensity: Int = 75,
+    val hairRemovalIntensity: Int = 55,
     val wearClothes: Boolean = true,
     val wearJewelry: Boolean = true,
     val selectedClothingId: String = "asset-blazer",
     val selectedJewelryId: String = "asset-emerald",
-    val faceSwapEnabled: Boolean = true,
-    val swapStrength: Int = 88,
+    val faceSwapEnabled: Boolean = false,
+    val swapStrength: Int = 90,
     val showLandmarkMesh: Boolean = false,
     val useFrontCamera: Boolean = true
 )

@@ -8,7 +8,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,7 +30,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -55,7 +56,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
     var filter by remember { mutableStateOf("ALL") }
 
     val facePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { viewModel.addCustomFaceFromUri(it, "Vault Face") }
+        uri?.let { viewModel.addCustomFaceFromUri(it, "Custom Face") }
     }
 
     val filteredAssets = remember(viewModel.wardrobeAssets, filter) {
@@ -74,45 +75,45 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Header Action Cards
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = { viewModel.showCustomAssetDialog = true },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706)),
-                modifier = Modifier.weight(1f)
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.weight(1f).height(40.dp)
             ) {
                 Icon(Icons.Default.AddAPhoto, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Scan Costume / Jewelry", fontSize = 11.sp)
+                Text("Scan Costume", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
             Button(
                 onClick = { facePicker.launch("image/*") },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
-                modifier = Modifier.weight(1f)
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.weight(1f).height(40.dp)
             ) {
                 Icon(Icons.Default.Face, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Import Face", fontSize = 11.sp)
+                Text("Import Face", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
-        // Face Profiles Section
-        Text("Face Profiles Vault", color = Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text("Face Profiles", color = Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             viewModel.faceProfiles.forEach { p ->
                 val bmp = viewModel.profileBitmapCache[p.id]
                 val active = viewModel.activeProfileId == p.id
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
-                        .border(1.5.dp, if (active) Color(0xFF6366F1) else Color(0xFF334155), RoundedCornerShape(12.dp))
-                        .background(if (active) Color(0xFF1E1B4B) else Color(0xFF0F172A))
+                        .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(12.dp))
+                        .background(if (active) Color(0xFF1E1B4B) else Color(0xFF0B1120))
                         .clickable {
                             viewModel.assignProfileToSelectedOrAll(p.id)
                             viewModel.activeTab = StudioTab.FACE_STUDIO
@@ -120,32 +121,42 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                         .padding(8.dp)
                 ) {
                     if (bmp != null) {
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = p.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(48.dp).clip(CircleShape)
-                        )
+                        Image(bitmap = bmp.asImageBitmap(), contentDescription = p.name, contentScale = ContentScale.Crop, modifier = Modifier.size(40.dp).clip(CircleShape))
                     }
-                    Spacer(Modifier.height(4.dp))
-                    Text(p.name, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                    Text(p.tag, color = Color(0xFF818CF8), fontSize = 9.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(p.name, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Text(p.tag, color = Color(0xFF818CF8), fontSize = 9.sp)
+                    }
                 }
             }
         }
 
-        // Filter Chips
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-            listOf("ALL" to "All (${viewModel.wardrobeAssets.size})", "CLOTHING" to "Clothes", "JEWELRY" to "Jewelry", "CUSTOM" to "Custom Scanned").forEach { (key, label) ->
-                FilterChip(
-                    selected = filter == key,
-                    onClick = { filter = key },
-                    label = { Text(label, fontSize = 11.sp) }
-                )
+        // Clean Filter Segment
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF0B1120))
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            listOf("ALL" to "All", "CLOTHING" to "Clothes", "JEWELRY" to "Jewelry", "CUSTOM" to "Custom").forEach { (key, label) ->
+                val sel = filter == key
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (sel) Color(0xFF4F46E5) else Color.Transparent)
+                        .clickable { filter = key }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(label, color = if (sel) Color.White else Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
 
-        // Assets List
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -156,26 +167,26 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFF0F172A))
-                        .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(14.dp))
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF0B1120))
+                        .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp))
                         .padding(10.dp)
                 ) {
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = asset.name,
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .size(54.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.White)
-                        )
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF162033)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (bmp != null) {
+                            Image(bitmap = bmp.asImageBitmap(), contentDescription = asset.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(4.dp))
+                        }
                     }
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(asset.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("${asset.category.label} • ${asset.anchorPoint.label} • ${asset.fabricType.label}", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                        Text("${asset.category.label} · ${asset.anchorPoint.label}", color = Color(0xFF94A3B8), fontSize = 10.sp)
                     }
                     Button(
                         onClick = {
@@ -183,13 +194,15 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                             viewModel.activeTab = StudioTab.BODY_PHYSICS
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
-                        modifier = Modifier.height(34.dp)
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(32.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                     ) {
-                        Text("Wear", fontSize = 11.sp)
+                        Text("Try On", fontSize = 11.sp)
                     }
                     if (asset.isCustom) {
                         IconButton(onClick = { viewModel.removeCustomAsset(asset.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFF87171))
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFF87171), modifier = Modifier.size(18.dp))
                         }
                     }
                 }
