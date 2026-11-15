@@ -5,16 +5,36 @@ import emeraldPendantUrl from '../assets/images/costume_emerald_pendant_17944729
 import goldNecklaceUrl from '../assets/images/asset_gold_necklace_1794417020572.jpg';
 import watchChronoUrl from '../assets/images/asset_luxury_watch_1794417021558.jpg';
 
+export interface ClothingTagDef {
+  id: string;
+  label: string;
+  defaultAnchor: WardrobeAsset['anchorPoint'];
+  defaultFabric: NonNullable<WardrobeAsset['fabricType']>;
+  defaultScale: number;
+}
+
+export const BUILTIN_CLOTHING_TAGS: ClothingTagDef[] = [
+  { id: 'suit', label: 'Suits', defaultAnchor: 'shoulders', defaultFabric: 'wool', defaultScale: 1.04 },
+  { id: 'shirt', label: 'Shirts', defaultAnchor: 'shoulders', defaultFabric: 'cotton', defaultScale: 1.0 },
+  { id: 'bikini', label: 'Bikini', defaultAnchor: 'chest', defaultFabric: 'silk', defaultScale: 0.88 },
+  { id: 'dress', label: 'Dresses', defaultAnchor: 'shoulders', defaultFabric: 'silk', defaultScale: 1.05 },
+  { id: 'jacket', label: 'Jackets', defaultAnchor: 'shoulders', defaultFabric: 'leather', defaultScale: 1.06 },
+  { id: 'robe', label: 'Robes', defaultAnchor: 'shoulders', defaultFabric: 'silk', defaultScale: 1.12 },
+  { id: 'skirt', label: 'Skirts', defaultAnchor: 'waist', defaultFabric: 'cotton', defaultScale: 1.0 },
+  { id: 'pants', label: 'Pants', defaultAnchor: 'waist', defaultFabric: 'cotton', defaultScale: 1.0 },
+];
+
 export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
   {
     id: 'asset-blazer-navy',
     name: 'Tailored Midnight Blazer',
     category: 'clothing',
-    subCategory: 'blazer',
+    subCategory: 'suit',
+    clothingTag: 'suit',
     imageUrl: blazerUrl,
     anchorPoint: 'shoulders',
     defaultScale: 1.0,
-    tags: ['Formal', 'Luxury Wool', 'Structured Lapel'],
+    tags: ['Suits', 'Formal', 'Luxury Wool', 'Structured Lapel'],
     brand: 'Atelier Sartorial',
     fabricType: 'wool',
   },
@@ -23,10 +43,11 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     name: 'Embroidered Royal Silk Kimono',
     category: 'clothing',
     subCategory: 'robe',
+    clothingTag: 'robe',
     imageUrl: kimonoUrl,
     anchorPoint: 'shoulders',
-    defaultScale: 1.15,
-    tags: ['Costume', 'Crimson Silk', 'Gold Phoenix Embroidery', 'Flowing Hem'],
+    defaultScale: 1.12,
+    tags: ['Robes', 'Costume', 'Crimson Silk', 'Flowing Hem'],
     brand: 'Kyoto Imperial Silk',
     fabricType: 'silk',
   },
@@ -38,7 +59,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     imageUrl: emeraldPendantUrl,
     anchorPoint: 'neck',
     defaultScale: 0.62,
-    tags: ['Colombian Emerald', 'Halo Pave', 'Platinum Chain'],
+    tags: ['Necklace', 'Colombian Emerald', 'Platinum Chain'],
     brand: 'Imperial Crown Jewels',
   },
   {
@@ -49,7 +70,7 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     imageUrl: goldNecklaceUrl,
     anchorPoint: 'neck',
     defaultScale: 0.65,
-    tags: ['18K Gold', 'Pave Diamond', 'Collarbone Fit'],
+    tags: ['Necklace', '18K Gold', 'Pave Diamond'],
     brand: 'Maison Haute',
   },
   {
@@ -60,12 +81,36 @@ export const INITIAL_WARDROBE_ASSETS: WardrobeAsset[] = [
     imageUrl: watchChronoUrl,
     anchorPoint: 'wrist',
     defaultScale: 0.38,
-    tags: ['Swiss Automatic', 'Two-Tone', 'Tachymeter'],
+    tags: ['Watch', 'Swiss Automatic', 'Two-Tone'],
     brand: 'Geneva Horology',
   },
 ];
 
 const CUSTOM_ASSETS_KEY = 'facestudio_custom_wardrobe_v2';
+const CUSTOM_CLOTHING_TAGS_KEY = 'facestudio_custom_clothing_tags_v1';
+
+export function normalizeTagId(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+export function getAssetClothingTagId(asset: WardrobeAsset): string {
+  const raw = (asset.clothingTag || asset.subCategory || 'shirt').toLowerCase().trim();
+  if (raw === 'blazer' || raw === 'suits' || raw === 'tuxedo') return 'suit';
+  if (raw === 'top' || raw === 'tops' || raw === 't-shirt' || raw === 'tshirt' || raw === 'shirts' || raw === 'blouse') {
+    return 'shirt';
+  }
+  if (raw === 'bikinis' || raw === 'swimwear' || raw === 'swimsuit') return 'bikini';
+  if (raw === 'dresses' || raw === 'gown') return 'dress';
+  if (raw === 'jackets' || raw === 'coat' || raw === 'hoodie') return 'jacket';
+  if (raw === 'robes' || raw === 'kimono') return 'robe';
+  if (raw === 'skirts') return 'skirt';
+  if (raw === 'trousers' || raw === 'jeans') return 'pants';
+  return normalizeTagId(raw) || 'shirt';
+}
 
 export function loadSavedCustomAssets(): WardrobeAsset[] {
   try {
@@ -85,5 +130,24 @@ export function saveCustomAssetsToStorage(assets: WardrobeAsset[]): void {
     localStorage.setItem(CUSTOM_ASSETS_KEY, JSON.stringify(customOnly));
   } catch (err) {
     console.warn('Failed to save custom wardrobe assets:', err);
+  }
+}
+
+export function loadSavedCustomClothingTags(): ClothingTagDef[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_CLOTHING_TAGS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomClothingTagsToStorage(tags: ClothingTagDef[]): void {
+  try {
+    localStorage.setItem(CUSTOM_CLOTHING_TAGS_KEY, JSON.stringify(tags));
+  } catch {
+    // ignore storage quota errors
   }
 }

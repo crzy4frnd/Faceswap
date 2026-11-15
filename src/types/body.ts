@@ -33,17 +33,27 @@ export interface BodyLandmarks {
   rightWrist: Point;
 }
 
+export type WardrobeCategory = 'clothing' | 'jewelry' | 'object' | 'accessory';
+
+export type BuiltinClothingTag =
+  | 'suit'
+  | 'blazer'
+  | 'shirt'
+  | 'top'
+  | 'bikini'
+  | 'dress'
+  | 'robe'
+  | 'jacket'
+  | 'hoodie'
+  | 'pants'
+  | 'skirt';
+
 export interface WardrobeAsset {
   id: string;
   name: string;
-  category: 'clothing' | 'jewelry' | 'accessory';
+  category: WardrobeCategory;
   subCategory:
-    | 'blazer'
-    | 'top'
-    | 'dress'
-    | 'robe'
-    | 'jacket'
-    | 'hoodie'
+    | BuiltinClothingTag
     | 'necklace'
     | 'watch'
     | 'bracelet'
@@ -53,9 +63,13 @@ export interface WardrobeAsset {
     | 'crown'
     | 'glasses'
     | 'waist'
-    | 'custom';
+    | 'handbag'
+    | 'prop'
+    | 'custom'
+    | (string & {});
+  clothingTag?: string; // Canonical clothing tab/tag (e.g. "Suit", "Shirt", "Bikini", or user-created tag)
   imageUrl: string;
-  anchorPoint: 'shoulders' | 'neck' | 'wrist' | 'ears' | 'head' | 'waist';
+  anchorPoint: 'shoulders' | 'neck' | 'wrist' | 'ears' | 'head' | 'waist' | 'chest';
   defaultScale: number;
   tags: string[];
   brand?: string;
@@ -63,6 +77,12 @@ export interface WardrobeAsset {
   customCreatedAt?: number;
   fabricType?: 'silk' | 'cotton' | 'wool' | 'leather';
   thumbnailUrl?: string;
+}
+
+export interface MaterialSurfaceSettings {
+  textureIntensity: number; // 0 - 100 (normal-mapped weave & surface relief)
+  roughness: number; // 0 - 100 (0 = glossy, 100 = matte diffuse)
+  shine: number; // 0 - 100 (specular highlight & Fresnel sheen intensity)
 }
 
 export interface FittedAsset {
@@ -78,6 +98,7 @@ export interface FittedAsset {
   blendMode: 'natural' | 'stitch';
   fabricType?: 'silk' | 'cotton' | 'wool' | 'leather';
   physicsStiffness?: number; // 1 - 10
+  materialSurface?: MaterialSurfaceSettings;
 }
 
 export type ClothMotionPreset = 'still' | 'breathing' | 'walking' | 'breeze' | 'dance';
@@ -100,7 +121,32 @@ export interface ClothPhysicsConfig {
   chestExpansion: number; // -10 - +20 px
   showPhysicsWireframe: boolean;
   showTensionStress: boolean;
+  showBodyColliders?: boolean;
   isSimulating: boolean;
+}
+
+export interface BodyCollisionCapsule {
+  id: string;
+  zone: 'ribcage' | 'waist' | 'hips' | 'neck' | 'arm';
+  p1: Point;
+  p2: Point;
+  r1: number;
+  r2: number;
+  friction: number;
+}
+
+export interface ClothContactPoint {
+  x: number;
+  y: number;
+  zone: BodyCollisionCapsule['zone'];
+  impulse: number;
+}
+
+export interface ClothSimulationMetrics {
+  avgTensionN: number;
+  peakStrainPct: number;
+  activeCollisions: number;
+  kineticEnergy: number;
 }
 
 export interface ClothParticle {
@@ -124,5 +170,6 @@ export interface ClothSpring {
   restLength: number;
   stiffness: number;
   type: 'structural' | 'shear' | 'bending';
+  strain?: number;
 }
 

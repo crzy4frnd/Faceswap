@@ -1,9 +1,19 @@
-import { BodyLandmarks, BodyMeasurements, FittedAsset, WardrobeAsset } from '../types/body';
+import {
+  BodyCollisionCapsule,
+  BodyLandmarks,
+  BodyMeasurements,
+  ClothContactPoint,
+  FittedAsset,
+  WardrobeAsset,
+} from '../types/body';
 import { Rect, Point } from '../types/face';
 import {
   ClothMeshState,
   ClothPhysicsConfig,
   PendantPhysicsState,
+  drawBodyCollisionMesh,
+  getDefaultMaterialSurface,
+  getNormalMappedClothSurface,
   renderClothMesh,
 } from './clothPhysicsEngine';
 
@@ -236,9 +246,131 @@ export function drawBodyMeasurementHUD(
   ctx.restore();
 }
 
+export interface GarmentFitGeometry {
+  anchorLeft: Point;
+  anchorRight: Point;
+  centerX: number;
+  topY: number;
+  targetW: number;
+  targetH: number;
+  angle: number;
+  anchorMode: 'shoulders' | 'chest' | 'waist';
+  garmentType: string;
+}
+
+/**
+ * Computes exact body-measurement-matched dimensions & anchor coordinates for any clothing item,
+ * factoring in scanned shoulder/chest/waist spans, garment category tag, fit tightness, and image aspect ratio.
+ */
+export function computeGarmentFitBox(
+  landmarks: BodyLandmarks,
+  asset: WardrobeAsset,
+  assetImg: HTMLImageElement,
+  item: FittedAsset
+): GarmentFitGeometry {
+  const imgW = assetImg.naturalWidth || assetImg.width || 1;
+  const imgH = assetImg.naturalHeight || assetImg.height || 1;
+  const aspect = imgH / imgW;
+
+  const shoulderSpan = Math.hypot(
+    landmarks.rightShoulder.x - landmarks.leftShoulder.x,
+    landmarks.rightShoulder.y - landmarks.leftShoulder.y
+  );
+  const chestSpan = Math.hypot(
+    landmarks.rightChest.x - landmarks.leftChest.x,
+    landmarks.rightChest.y - landmarks.leftChest.y
+  );
+  const waistSpan = Math.hypot(
+    landmarks.rightWaist.x - landmarks.leftWaist.x,
+    landmarks.rightWaist.y - landmarks.leftWaist.y
+  );
+  const torsoLen = Math.max(20, landmarks.navel.y - landmarks.leftShoulder.y);
+
+  const gt = (asset.clothingTag || asset.subCategory || 'shirt').toLowerCase();
+  const tightnessFactor = 0.92 + (item.fitTightness / 100) * 0.18;
+
+  if (asset.anchorPoint === 'waist' || gt === 'skirt' || gt === 'pants') {
+    const anchorLeft = landmarks.leftWaist;
+    const anchorRight = landmarks.rightWaist;
+    const midX = (anchorLeft.x + anchorRight.x) / 2;
+    const midY = (anchorLeft.y + anchorRight.y) / 2;
+    const angle = Math.atan2(anchorRight.y - anchorLeft.y, anchorRight.x - anchorLeft.x);
+    const targetW = waistSpan * 1.32 * item.scale * tightnessFactor;
+    const rawH = targetW * aspect;
+    const targetH = gt === 'skirt' ? Math.min(rawH, torsoLen * 1.45) : rawH;
+    return {
+      anchorLeft,
+      anchorRight,
+      centerX: midX + item.offsetX,
+      topY: midY + item.offsetY - targetH * 0.06,
+      targetW,
+      targetH,
+      angle,
+      anchorMode: 'waist',
+      garmentType: gt,
+    };
+  }
+
+  if (asset.anchorPoint === 'chest' || gt === 'bikini') {
+    const anchorLeft = landmarks.leftChest;
+    const anchorRight = landmarks.rightChest;
+    const midX = (anchorLeft.x + anchorRight.x) / 2;
+    const midY = (anchorLeft.y + anchorRight.y) / 2;
+    const angle = Math.atan2(anchorRight.y - anchorLeft.y, anchorRight.x - anchorLeft.x);
+    const widthMult = gt === 'bikini' ? 1.14 : 1.18;
+    const targetW = chestSpan * widthMult * item.scale * tightnessFactor;
+    const targetH = targetW * aspect;
+    return {
+      anchorLeft,
+      anchorRight,
+      centerX: midX + item.offsetX,
+      topY: midY + item.offsetY - targetH * 0.28,
+      targetW,
+      targetH,
+      angle,
+      anchorMode: 'chest',
+      garmentType: gt,
+    };
+  }
+
+  // Shoulders / Torso default (Suit, Blazer, Shirt, Dress, Robe, Jacket, Custom)
+  const anchorLeft = landmarks.leftShoulder;
+  const anchorRight = landmarks.rightShoulder;
+  const shoulderCenter = {
+    x: (anchorLeft.x + anchorRight.x) / 2,
+    y: (anchorLeft.y + anchorRight.y) / 2,
+  };
+  const angle = Math.atan2(anchorRight.y - anchorLeft.y, anchorRight.x - anchorLeft.x);
+
+  const widthMult =
+    gt === 'suit' || gt === 'blazer' || gt === 'jacket'
+      ? 1.42
+      : gt === 'robe'
+      ? 1.48
+      : gt === 'dress'
+      ? 1.34
+      : 1.36;
+
+  const targetW = shoulderSpan * widthMult * item.scale * tightnessFactor;
+  const targetH = targetW * aspect;
+  const collarRaise = gt === 'suit' || gt === 'blazer' || gt === 'jacket' ? 0.12 : 0.1;
+
+  return {
+    anchorLeft,
+    anchorRight,
+    centerX: shoulderCenter.x + item.offsetX,
+    topY: shoulderCenter.y + item.offsetY - targetH * collarRaise,
+    targetW,
+    targetH,
+    angle,
+    anchorMode: 'shoulders',
+    garmentType: gt,
+  };
+}
+
 /**
  * High-performance smart stitch renderer:
- * Aligns, warps, and stitches clothes and fine jewelry onto the scanned body,
+ * Aligns, warps, and stitches clothes, jewelry, and objects onto the scanned body,
  * powered by dynamic 2D mass-spring cloth physics simulation and catenary jewelry pendulum dynamics.
  */
 export async function renderFittedAssetsOnBody(
@@ -252,7 +384,8 @@ export async function renderFittedAssetsOnBody(
   measurements?: BodyMeasurements,
   clothMeshMap?: Record<string, ClothMeshState>,
   clothConfig?: ClothPhysicsConfig,
-  pendantPhysicsMap?: Record<string, PendantPhysicsState>
+  pendantPhysicsMap?: Record<string, PendantPhysicsState>,
+  bodyColliders?: BodyCollisionCapsule[]
 ) {
   const width = baseImage.naturalWidth || baseImage.width;
   const height = baseImage.naturalHeight || baseImage.height;
@@ -265,6 +398,11 @@ export async function renderFittedAssetsOnBody(
   // 1. Draw base portrait
   ctx.drawImage(baseImage, 0, 0, width, height);
 
+  // Optional 1b. Draw anatomical body collision capsules beneath garments
+  if (clothConfig?.showBodyColliders && bodyColliders && bodyColliders.length > 0) {
+    drawBodyCollisionMesh(ctx, bodyColliders, []);
+  }
+
   // 2. Loop over and stitch active fitted assets
   for (const item of fittedAssets) {
     if (!item.visible) continue;
@@ -274,20 +412,37 @@ export async function renderFittedAssetsOnBody(
 
     ctx.save();
 
-    // Check if cloth physics is active for this garment
+    const isClothMeshAnchor =
+      asset.category === 'clothing' ||
+      asset.anchorPoint === 'shoulders' ||
+      asset.anchorPoint === 'chest' ||
+      asset.anchorPoint === 'waist';
+
     const clothMesh = clothMeshMap?.[item.assetId];
     const useClothPhysics =
       clothConfig?.enabled &&
-      asset.anchorPoint === 'shoulders' &&
+      isClothMeshAnchor &&
       clothMesh &&
       clothMesh.particles.length > 0;
+
+    const effectiveSurface =
+      item.materialSurface ||
+      getDefaultMaterialSurface(item.fabricType || asset.fabricType || clothConfig?.fabricType);
 
     if (useClothPhysics && clothMesh) {
       // Dynamic mass-spring cloth physics rendering
       if (item.shadowDepth > 0) {
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
-        ctx.shadowBlur = (item.shadowDepth / 100) * 22;
-        ctx.shadowOffsetY = (item.shadowDepth / 100) * 12;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.38)';
+        ctx.shadowBlur = (item.shadowDepth / 100) * 18;
+        ctx.shadowOffsetY = (item.shadowDepth / 100) * 10;
+      }
+
+      if (item.offsetX !== 0 || item.offsetY !== 0 || item.rotation !== 0) {
+        const cx = clothMesh.anchorX + item.offsetX;
+        const cy = clothMesh.anchorY + item.offsetY;
+        ctx.translate(cx, cy);
+        ctx.rotate((item.rotation * Math.PI) / 180);
+        ctx.translate(-clothMesh.anchorX, -clothMesh.anchorY);
       }
 
       renderClothMesh(
@@ -295,43 +450,29 @@ export async function renderFittedAssetsOnBody(
         assetImg,
         clothMesh,
         clothConfig.showPhysicsWireframe,
-        clothConfig.showTensionStress
+        clothConfig.showTensionStress,
+        effectiveSurface
       );
-    } else if (asset.anchorPoint === 'shoulders') {
-      // Static fallback when physics is disabled
-      const shoulderWidth = Math.abs(landmarks.rightShoulder.x - landmarks.leftShoulder.x);
-      const shoulderCenter = {
-        x: (landmarks.leftShoulder.x + landmarks.rightShoulder.x) / 2,
-        y: (landmarks.leftShoulder.y + landmarks.rightShoulder.y) / 2,
-      };
+    } else if (isClothMeshAnchor) {
+      // Measurement-matched static fallback when physics simulation is paused/disabled
+      const geom = computeGarmentFitBox(landmarks, asset, assetImg, item);
+      const litSurface = getNormalMappedClothSurface(assetImg, effectiveSurface);
 
-      const angle = Math.atan2(
-        landmarks.rightShoulder.y - landmarks.leftShoulder.y,
-        landmarks.rightShoulder.x - landmarks.leftShoulder.x
-      );
-
-      const tightnessFactor = 0.95 + (item.fitTightness / 100) * 0.18;
-      const targetW = shoulderWidth * 1.45 * item.scale * tightnessFactor;
-      const targetH = targetW * (assetImg.height / assetImg.width);
-
-      const posX = shoulderCenter.x + item.offsetX;
-      const posY = shoulderCenter.y + item.offsetY - targetH * 0.14;
-
-      ctx.translate(posX, posY);
-      ctx.rotate(angle + (item.rotation * Math.PI) / 180);
+      ctx.translate(geom.centerX, geom.topY);
+      ctx.rotate(geom.angle + (item.rotation * Math.PI) / 180);
 
       if (item.shadowDepth > 0) {
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-        ctx.shadowBlur = (item.shadowDepth / 100) * 22;
-        ctx.shadowOffsetY = (item.shadowDepth / 100) * 12;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+        ctx.shadowBlur = (item.shadowDepth / 100) * 18;
+        ctx.shadowOffsetY = (item.shadowDepth / 100) * 10;
       }
 
-      ctx.drawImage(assetImg, -targetW / 2, 0, targetW, targetH);
+      ctx.drawImage(litSurface, -geom.targetW / 2, 0, geom.targetW, geom.targetH);
     } else if (asset.anchorPoint === 'neck') {
-      // Jewelry (Pendant Necklace, Choker, Chains)
+      // Jewelry (Pendant Necklace, Choker, Chains) or Neck Object
       const neckWidth = Math.abs(landmarks.rightShoulder.x - landmarks.leftShoulder.x) * 0.38;
       const targetW = neckWidth * item.scale;
-      const targetH = targetW * (assetImg.height / assetImg.width);
+      const targetH = targetW * ((assetImg.naturalHeight || assetImg.height) / Math.max(1, assetImg.naturalWidth || assetImg.width));
 
       const pendantState = pendantPhysicsMap?.[item.assetId];
       let posX = landmarks.throat.x + item.offsetX;
@@ -357,9 +498,9 @@ export async function renderFittedAssetsOnBody(
 
       ctx.drawImage(assetImg, -targetW / 2, 0, targetW, targetH);
     } else if (asset.anchorPoint === 'wrist') {
-      // Watch / Bracelet
+      // Watch / Bracelet / Handheld Object
       const targetW = Math.abs(landmarks.rightShoulder.x - landmarks.leftShoulder.x) * 0.28 * item.scale;
-      const targetH = targetW * (assetImg.height / assetImg.width);
+      const targetH = targetW * ((assetImg.naturalHeight || assetImg.height) / Math.max(1, assetImg.naturalWidth || assetImg.width));
 
       const posX = landmarks.leftWrist.x + item.offsetX;
       const posY = landmarks.leftWrist.y + item.offsetY;
@@ -377,14 +518,18 @@ export async function renderFittedAssetsOnBody(
 
       ctx.drawImage(assetImg, -targetW / 2, -targetH / 2, targetW, targetH);
     } else if (asset.anchorPoint === 'head') {
-      // Headwear (Hat, Crown, Tiara, Cap, Glasses)
+      // Headwear / Eyewear / Head Objects (Hat, Crown, Glasses, Headphones)
       const headWidth = Math.abs(landmarks.rightShoulder.x - landmarks.leftShoulder.x) * 0.72;
       const targetW = headWidth * item.scale;
-      const targetH = targetW * (assetImg.height / assetImg.width);
+      const targetH = targetW * ((assetImg.naturalHeight || assetImg.height) / Math.max(1, assetImg.naturalWidth || assetImg.width));
 
-      // Position above nose / forehead
+      const isEyewear =
+        asset.subCategory === 'glasses' ||
+        asset.tags.some((t) => t.toLowerCase().includes('glass'));
       const posX = landmarks.nose.x + item.offsetX;
-      const posY = landmarks.nose.y + item.offsetY - targetH * 0.85;
+      const posY = isEyewear
+        ? landmarks.nose.y + item.offsetY - targetH * 0.52
+        : landmarks.nose.y + item.offsetY - targetH * 0.88;
 
       ctx.translate(posX, posY);
       if (item.rotation !== 0) {
@@ -392,30 +537,9 @@ export async function renderFittedAssetsOnBody(
       }
 
       if (item.shadowDepth > 0) {
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-        ctx.shadowBlur = (item.shadowDepth / 100) * 16;
-        ctx.shadowOffsetY = 6;
-      }
-
-      ctx.drawImage(assetImg, -targetW / 2, 0, targetW, targetH);
-    } else if (asset.anchorPoint === 'waist') {
-      // Waistwear (Belt, Skirt, Sash, Pants)
-      const waistWidth = Math.abs(landmarks.rightWaist.x - landmarks.leftWaist.x) * 1.35;
-      const targetW = waistWidth * item.scale;
-      const targetH = targetW * (assetImg.height / assetImg.width);
-
-      const posX = (landmarks.leftWaist.x + landmarks.rightWaist.x) / 2 + item.offsetX;
-      const posY = (landmarks.leftWaist.y + landmarks.rightWaist.y) / 2 + item.offsetY - targetH * 0.15;
-
-      ctx.translate(posX, posY);
-      if (item.rotation !== 0) {
-        ctx.rotate((item.rotation * Math.PI) / 180);
-      }
-
-      if (item.shadowDepth > 0) {
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-        ctx.shadowBlur = (item.shadowDepth / 100) * 18;
-        ctx.shadowOffsetY = 8;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
+        ctx.shadowBlur = (item.shadowDepth / 100) * 14;
+        ctx.shadowOffsetY = 5;
       }
 
       ctx.drawImage(assetImg, -targetW / 2, 0, targetW, targetH);
@@ -423,7 +547,7 @@ export async function renderFittedAssetsOnBody(
       // Earrings
       const earSpan = Math.abs(landmarks.rightShoulder.x - landmarks.leftShoulder.x) * 0.4;
       const targetW = earSpan * 0.35 * item.scale;
-      const targetH = targetW * (assetImg.height / assetImg.width);
+      const targetH = targetW * ((assetImg.naturalHeight || assetImg.height) / Math.max(1, assetImg.naturalWidth || assetImg.width));
 
       const posX = landmarks.throat.x + item.offsetX;
       const posY = landmarks.throat.y + item.offsetY - targetH * 0.5;
@@ -437,6 +561,21 @@ export async function renderFittedAssetsOnBody(
     }
 
     ctx.restore();
+  }
+
+  // 2b. Draw active collision contact sparks over fitted garments when collider mesh or stress heatmap is enabled
+  if ((clothConfig?.showBodyColliders || clothConfig?.showTensionStress) && clothMeshMap) {
+    const allContacts: ClothContactPoint[] = [];
+    for (const item of fittedAssets) {
+      if (!item.visible) continue;
+      const mesh = clothMeshMap[item.assetId];
+      if (mesh?.contactPoints?.length) {
+        allContacts.push(...mesh.contactPoints);
+      }
+    }
+    if (allContacts.length > 0) {
+      drawBodyCollisionMesh(ctx, [], allContacts);
+    }
   }
 
   // 3. Draw Body Measurements & Caliper HUD if active

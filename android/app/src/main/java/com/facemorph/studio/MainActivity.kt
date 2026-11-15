@@ -120,28 +120,28 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .height(44.dp)
                         .background(Color(0xFF0A0F1E))
-                        .padding(horizontal = 14.dp),
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(28.dp)
-                                .clip(RoundedCornerShape(8.dp))
+                                .size(26.dp)
+                                .clip(RoundedCornerShape(7.dp))
                                 .background(Color(0xFF4F46E5)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Face, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.Face, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                         }
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         Text(
                             "FaceMorph",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
+                            fontSize = 15.sp
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
@@ -152,18 +152,20 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                         )
                     }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF111827))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                            .clickable { studioViewModel.showCustomAssetDialog = true }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(5.dp))
-                        Text("Scan", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    if (studioViewModel.activeTab != StudioTab.FACE_STUDIO) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF111827))
+                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                                .clickable { studioViewModel.showCustomAssetDialog = true }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("Scan Item", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
                     }
                 }
                 HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
@@ -174,7 +176,7 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                 HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
                 NavigationBar(
                     containerColor = Color(0xFF0A0F1E),
-                    modifier = Modifier.height(64.dp)
+                    modifier = Modifier.height(58.dp)
                 ) {
                     StudioTab.entries.forEach { tab ->
                         val icon = when (tab) {
@@ -186,8 +188,8 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                         NavigationBarItem(
                             selected = studioViewModel.activeTab == tab,
                             onClick = { studioViewModel.activeTab = tab },
-                            icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(20.dp)) },
-                            label = { Text(tab.label, fontSize = 10.sp, fontWeight = FontWeight.Medium) },
+                            icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(19.dp)) },
+                            label = { Text(tab.label, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = Color.White,
                                 selectedTextColor = Color(0xFF818CF8),

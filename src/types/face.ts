@@ -36,6 +36,8 @@ export interface DetectedFace {
   yaw?: number;
   pitch?: number;
   roll?: number;
+  estimatedAge?: number;
+  expression?: 'Smiling' | 'Laughing' | 'Neutral' | 'Focused' | 'Surprised';
 }
 
 export interface FaceProfile {
@@ -55,17 +57,23 @@ export interface FaceAdjustments {
   skinToneMatch: boolean; // auto skin tone color matching
   skinToneStrength: number; // 0 - 100
   featherRadius: number; // 2 - 50 px
+  edgeSoftness: number; // 0 - 100% feathering intensity of the face mask
   brightness: number; // -100 to +100
   contrast: number; // -100 to +100
   shadows: number; // -100 to +100
   temperature: number; // -100 to +100 (warmth)
   saturation: number; // -100 to +100
+  hue: number; // -180 to +180 deg hue shift
+  vibrance: number; // -100 to +100 intelligent skin-safe saturation boost
   scale: number; // 0.8 - 1.2
-  rotation: number; // -20 to +20 deg
+  rotation: number; // -30 to +30 deg (head roll)
+  headPitch: number; // -30 to +30 deg (vertical tilt up/down)
+  headYaw: number; // -30 to +30 deg (horizontal turn left/right)
   offsetX: number; // -50 to +50 px
   offsetY: number; // -50 to +50 px
   edgeSmoothing: 'soft' | 'natural' | 'sharp';
   // Hair & Accessory Auto-Masking & Fine-Tune Brush
+  smartMasking: boolean; // edge-detection swap boundary refinement & anti-halo decontamination
   autoMaskHair: boolean; // auto-detect hair & bangs
   autoMaskAccessories: boolean; // auto-detect glasses, hats, jewelry
   maskSensitivity: number; // 0 - 100%
@@ -77,8 +85,30 @@ export interface FaceAdjustments {
   smartBlend: boolean; // dynamic boundary texture & topology feathering
   smartBlendIntensity: number; // 0 - 100%
   textureMatching: boolean; // pore and grain frequency preservation
-  // Geometric Mesh & Manual Landmark Nudge
+  skinSmoothing: number; // 0 - 100% real-time edge-preserving bilateral filter
+  skinTextureSmoothing: number; // 0 - 100% blur-masking noise reduction preserving facial edges
+  autoAmbientLight: boolean; // auto-harmonize exposure & color temperature to target light source
+  // Geometric Mesh, Wireframe Landmarks & Manual Landmark Nudge
+  showFaceLandmarks: boolean; // overlay real-time wireframe grid on detected face for adjustment visualization
   showGeometricMesh: boolean; // display geometric mesh overlay for manual landmark alignment
+  // Adaptive Motion-Aware Swap Quality
+  motionSensitivity: boolean; // automatically scale down swap processing intensity during high camera motion
+  // Real-time Background Brightness & Contrast Matching
+  lightingAdjustment: number; // 0 - 100% real-time brightness & contrast match to target background
+  // Ambient Scene Shadow Overlay Depth & Opacity Matching
+  shadowMatcher: number; // 0 - 100% adjusts depth & opacity of shadow overlays to match scene ambient lighting
+  // Cinematic Skin Highlight Glow
+  softBloom: number; // 0 - 100% subtle bloom glow on skin highlights
+  // Subject Tracking Camera Refocus
+  autoRefocus: boolean; // auto re-center bounding box on largest face on sudden subject shift
+  // Post-Processing Cutout Edge Anti-Aliasing
+  antiAliasing: boolean; // post-processing FXAA-style filter to smooth jagged cutout edges
+  // Cross-Feature Jawline & Brow Ridge Morphing
+  genderMorph: number; // -100 (softer/tapered) to +100 (stronger/defined) jaw & brow prominence
+  // Border Local Contrast Separation
+  edgeContrast: number; // 0 - 100% local contrast enhancement along the swap-to-target border
+  // Temporal Video Frame Stabilization
+  motionSmoothing: number; // 0 - 100% temporal filter across video frames to reduce jitter & flicker
 }
 
 export interface HistoryItem {
@@ -111,6 +141,8 @@ export interface LiveTrackingState {
   yaw: number;
   smileScore: number;
   eyeOpenScore: number;
+  motionLevel?: 'low' | 'medium' | 'high';
+  qualityMode?: 'high' | 'balanced' | 'light';
   box?: Rect;
 }
 
@@ -124,6 +156,8 @@ export interface LiveCameraConfig {
   splitPos: number; // 0-100%
   scale: number;
   rotation: number;
+  headPitch?: number;
+  headYaw?: number;
   offsetX: number;
   offsetY: number;
   expressionPreset: 'natural' | 'smile' | 'neutral' | 'vocal';
@@ -139,6 +173,24 @@ export interface LiveCameraConfig {
   wearJewelry: boolean;
   selectedClothingId: string;
   selectedJewelryId: string;
+  // Synced Studio Tone, Lighting & Smoothing Adjustments
+  brightness?: number;
+  contrast?: number;
+  temperature?: number;
+  saturation?: number;
+  hue?: number;
+  vibrance?: number;
+  skinSmoothing?: number;
+  motionSensitivity?: boolean;
+  lightingAdjustment?: number;
+  shadowMatcher?: number;
+  softBloom?: number;
+  autoRefocus?: boolean;
+  antiAliasing?: boolean;
+  genderMorph?: number;
+  edgeContrast?: number;
+  motionSmoothing?: number;
+  edgeSoftness?: number;
   // Capture Mode
   captureMode: 'photo' | 'video';
 }

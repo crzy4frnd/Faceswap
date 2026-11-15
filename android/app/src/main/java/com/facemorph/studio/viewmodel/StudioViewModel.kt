@@ -46,22 +46,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var activeTab by mutableStateOf(StudioTab.FACE_STUDIO)
     var toastMessage by mutableStateOf<String?>(null)
 
-    // Face Profiles
-    var faceProfiles by mutableStateOf(
-        listOf(
-            FaceProfileItem("profile-elena", "Elena Vance", R.drawable.face_profile_elena, tag = "Studio"),
-            FaceProfileItem("profile-maya", "Maya Lin", R.drawable.face_profile_maya, tag = "Portrait")
-        )
-    )
-    var activeProfileId by mutableStateOf("profile-elena")
+    // User-added Face Profiles only (no dummy faces preloaded)
+    var faceProfiles by mutableStateOf<List<FaceProfileItem>>(emptyList())
+    var activeProfileId by mutableStateOf("")
 
-    // Target Portraits
+    // Optional sample scenes accessible from the More menu if desired
     val targetSamples = listOf(
         TargetSampleItem("sample-single", "Studio Portrait", R.drawable.portrait_single),
         TargetSampleItem("sample-duo", "Café Duo", R.drawable.portrait_duo),
-        TargetSampleItem("sample-group", "Friends", R.drawable.portrait_group)
+        TargetSampleItem("sample-group", "Group Scene", R.drawable.portrait_group)
     )
-    var activeTargetId by mutableStateOf("sample-single")
+    var activeTargetId by mutableStateOf("")
     var targetBitmap by mutableStateOf<Bitmap?>(null)
     var detectedFaces by mutableStateOf<List<DetectedFaceData>>(emptyList())
     var selectedFaceId by mutableStateOf<String?>(null)
@@ -96,20 +91,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         loadBuiltInCaches()
-        loadTargetSample(targetSamples.first())
     }
 
     private fun loadBuiltInCaches() {
         viewModelScope.launch(Dispatchers.IO) {
-            faceProfiles.forEach { p ->
-                p.drawableResId?.let { res ->
-                    NativeStorageHelper.loadBitmapFromResource(ctx, res, 900)?.let { bmp ->
-                        val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
-                        withContext(Dispatchers.Main) {
-                            profileBitmapCache[p.id] = bmp
-                            profileMetricsCache[p.id] = metrics
-                        }
-                    }
+            val savedFaces = loadSavedFaceProfiles()
+            val loadedFaceMaps = mutableMapOf<String, Bitmap>()
+            val loadedMetricsMaps = mutableMapOf<String, SourceFaceMetrics>()
+            savedFaces.forEach { p ->
+                val bmp = p.customFilePath?.let { NativeStorageHelper.loadBitmapFromFile(it, 900) }
+                if (bmp != null) {
+                    loadedFaceMaps[p.id] = bmp
+                    loadedMetricsMaps[p.id] = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
                 }
             }
 
@@ -177,6 +170,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeStorageHelper.loadBitmapFromResource(ctx, R.drawable.bg_sunset_terrace, 960)?.let { bgMap["sunset"] = it }
 
             withContext(Dispatchers.Main) {
+                val validFaces = savedFaces.filter { loadedFaceMaps.containsKey(it.id) }
+                faceProfiles = validFaces
+                profileBitmapCache.putAll(loadedFaceMaps)
+                profileMetricsCache.putAll(loadedMetricsMaps)
+                if (activeProfileId.isBlank() && validFaces.isNotEmpty()) {
+                    activeProfileId = validFaces.first().id
+                }
                 wardrobeAssets = allWardrobe
                 wardrobeBitmapCache.putAll(loadedWardrobeMaps)
                 backgroundBitmapCache.putAll(bgMap)
@@ -195,15 +195,56 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun loadTargetFromUri(uri: Uri) {
-        activeTargetId = "custom-target"
+        activeTargetId = "gallery-${System.currentTimeMillis()}"
         viewModelScope.launch(Dispatchers.IO) {
-            val bmp = NativeStorageHelper.loadBitmapFromUri(ctx, uri, 1280) ?: return@launch
+            val bmp = NativeStorageHelper.loadBitmapFromUri(ctx, uri, 1280)
+            if (bmp == null) {
+                withContext(Dispatchers.Main) { showToast("Could not open selected photo") }
+                return@launch
+            }
             applyTargetBitmap(bmp)
         }
     }
 
+    fun loadTargetFromFile(filePath: String) {
+        activeTargetId = "camera-${System.currentTimeMillis()}"
+        viewModelScope.launch(Dispatchers.IO) {
+            val bmp = NativeStorageHelper.loadBitmapFromFile(filePath, 1280)
+            if (bmp == null) {
+                withContext(Dispatchers.Main) { showToast("Could not read captured photo") }
+                return@launch
+            }
+            applyTargetBitmap(bmp)
+        }
+    }
+
+    fun loadTargetFromBitmap(bmp: Bitmap) {
+        activeTargetId = "bitmap-${System.currentTimeMillis()}"
+        viewModelScope.launch(Dispatchers.IO) {
+            applyTargetBitmap(bmp)
+        }
+    }
+
+    fun clearTargetPhoto() {
+        activeTargetId = ""
+        targetBitmap = null
+        detectedFaces = emptyList()
+        selectedFaceId = null
+        bodySubjectFaceId = null
+        bodyScan = null
+    }
+
+    fun rescanTargetFaces() {
+        val bmp = targetBitmap ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            applyTargetBitmap(bmp)
+            withContext(Dispatchers.Main) { showToast("Faces rescanned") }
+        }
+    }
+
     private suspend fun applyTargetBitmap(bmp: Bitmap) {
-        val faces = NativeFaceSwapEngine.detectFaces(bmp, activeProfileId)
+        val defaultProf = activeProfileId.takeIf { it.isNotBlank() }
+        val faces = NativeFaceSwapEngine.detectFaces(bmp, defaultProf)
         val firstFace = faces.firstOrNull()
         val scan = NativeClothPhysicsEngine.scanBody(
             bmp.width.toFloat(),
@@ -236,21 +277,69 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun addCustomFaceFromUri(uri: Uri, name: String = "My Face") {
+    fun addCustomFaceFromUri(uri: Uri, name: String? = null, sourceLabel: String = "Gallery") {
         viewModelScope.launch(Dispatchers.IO) {
-            val bmp = NativeStorageHelper.loadBitmapFromUri(ctx, uri, 900) ?: return@launch
-            val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
-            val id = "profile-${System.currentTimeMillis()}"
-            val path = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$id.png")
-            val item = FaceProfileItem(id = id, name = name, customFilePath = path, tag = "Custom")
-            withContext(Dispatchers.Main) {
-                faceProfiles = listOf(item) + faceProfiles
-                profileBitmapCache[id] = bmp
-                profileMetricsCache[id] = metrics
-                activeProfileId = id
-                assignProfileToSelectedOrAll(id)
-                showToast("Face imported & aligned")
+            val bmp = NativeStorageHelper.loadBitmapFromUri(ctx, uri, 900)
+            if (bmp == null) {
+                withContext(Dispatchers.Main) { showToast("Could not open face photo") }
+                return@launch
             }
+            saveAndSelectFaceBitmap(bmp, name, sourceLabel)
+        }
+    }
+
+    fun addCustomFaceFromFile(filePath: String, name: String? = null, sourceLabel: String = "Camera") {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bmp = NativeStorageHelper.loadBitmapFromFile(filePath, 900)
+            if (bmp == null) {
+                withContext(Dispatchers.Main) { showToast("Could not read captured face") }
+                return@launch
+            }
+            saveAndSelectFaceBitmap(bmp, name, sourceLabel)
+        }
+    }
+
+    fun addCustomFaceFromBitmap(bmp: Bitmap, name: String? = null, sourceLabel: String = "Camera") {
+        viewModelScope.launch(Dispatchers.IO) {
+            saveAndSelectFaceBitmap(bmp, name, sourceLabel)
+        }
+    }
+
+    private suspend fun saveAndSelectFaceBitmap(bmp: Bitmap, name: String?, sourceLabel: String) {
+        val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
+        val id = "profile-${System.currentTimeMillis()}"
+        val path = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$id.png")
+        withContext(Dispatchers.Main) {
+            val finalName = name?.takeIf { it.isNotBlank() } ?: "Face ${faceProfiles.size + 1}"
+            val item = FaceProfileItem(id = id, name = finalName, customFilePath = path, tag = sourceLabel)
+            val updatedList = listOf(item) + faceProfiles
+            faceProfiles = updatedList
+            persistFaceProfiles(updatedList)
+            profileBitmapCache[id] = bmp
+            profileMetricsCache[id] = metrics
+            activeProfileId = id
+            assignProfileToSelectedOrAll(id)
+            showToast("Added '$finalName' from $sourceLabel")
+        }
+    }
+
+    fun removeFaceProfile(profileId: String) {
+        val removed = faceProfiles.find { it.id == profileId }
+        val updated = faceProfiles.filterNot { it.id == profileId }
+        faceProfiles = updated
+        persistFaceProfiles(updated)
+        profileBitmapCache.remove(profileId)
+        profileMetricsCache.remove(profileId)
+        NativeStorageHelper.deleteInternalFile(removed?.customFilePath)
+
+        val fallbackId = updated.firstOrNull()?.id ?: ""
+        if (activeProfileId == profileId) {
+            activeProfileId = fallbackId
+        }
+        detectedFaces = detectedFaces.map { face ->
+            if (face.assignedProfileId == profileId) {
+                face.copy(assignedProfileId = fallbackId.takeIf { it.isNotBlank() })
+            } else face
         }
     }
 
@@ -258,7 +347,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         activeProfileId = profileId
         detectedFaces = detectedFaces.map { face ->
             if (selectedFaceId == null || face.id == selectedFaceId) {
-                face.copy(assignedProfileId = profileId, enabled = true)
+                face.copy(assignedProfileId = profileId.takeIf { it.isNotBlank() }, enabled = true)
             } else {
                 face
             }
@@ -381,6 +470,40 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     fun showToast(msg: String) {
         toastMessage = msg
+    }
+
+    private fun persistFaceProfiles(list: List<FaceProfileItem>) {
+        val arr = JSONArray()
+        list.forEach { item ->
+            val obj = JSONObject().apply {
+                put("id", item.id)
+                put("name", item.name)
+                put("customFilePath", item.customFilePath ?: "")
+                put("tag", item.tag)
+            }
+            arr.put(obj)
+        }
+        prefs.edit().putString("custom_face_profiles_v1", arr.toString()).apply()
+    }
+
+    private fun loadSavedFaceProfiles(): List<FaceProfileItem> {
+        val raw = prefs.getString("custom_face_profiles_v1", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { idx ->
+                val o = arr.getJSONObject(idx)
+                val path = o.optString("customFilePath", "")
+                if (path.isBlank()) null
+                else FaceProfileItem(
+                    id = o.getString("id"),
+                    name = o.getString("name"),
+                    customFilePath = path,
+                    tag = o.optString("tag", "Custom")
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun persistCustomWardrobe(list: List<WardrobeAssetItem>) {

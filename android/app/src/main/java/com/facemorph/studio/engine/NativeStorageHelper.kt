@@ -4,14 +4,24 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileOutputStream
 
 object NativeStorageHelper {
+
+    fun createTempCameraUri(context: Context, prefix: String = "capture"): Pair<Uri, File> {
+        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+        val file = File(dir, "${prefix}_${System.currentTimeMillis()}.jpg")
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        return uri to file
+    }
 
     fun loadBitmapFromResource(context: Context, resId: Int, maxDim: Int = 1400): Bitmap? {
         return try {
@@ -43,7 +53,16 @@ object NativeStorageHelper {
                 inSampleSize = sample
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            BitmapFactory.decodeFile(path, decodeOpts)
+            val raw = BitmapFactory.decodeFile(path, decodeOpts) ?: return null
+            val orientation = try {
+                ExifInterface(path).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            } catch (_: Exception) {
+                ExifInterface.ORIENTATION_NORMAL
+            }
+            applyExifOrientation(raw, orientation)
         } catch (_: Exception) {
             null
         }
@@ -63,11 +82,50 @@ object NativeStorageHelper {
                 inSampleSize = sample
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            context.contentResolver.openInputStream(uri)?.use { stream ->
+            val raw = context.contentResolver.openInputStream(uri)?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, decodeOpts)
+            } ?: return null
+
+            val orientation = try {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    ExifInterface(stream).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+                } ?: ExifInterface.ORIENTATION_NORMAL
+            } catch (_: Exception) {
+                ExifInterface.ORIENTATION_NORMAL
             }
+            applyExifOrientation(raw, orientation)
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            else -> return bitmap
+        }
+        return try {
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (rotated !== bitmap) bitmap.recycle()
+            rotated
+        } catch (_: Exception) {
+            bitmap
         }
     }
 
@@ -81,6 +139,15 @@ object NativeStorageHelper {
             outFile.absolutePath
         } catch (_: Exception) {
             null
+        }
+    }
+
+    fun deleteInternalFile(path: String?) {
+        if (path.isNullOrBlank()) return
+        try {
+            val f = File(path)
+            if (f.exists()) f.delete()
+        } catch (_: Exception) {
         }
     }
 
@@ -107,7 +174,6 @@ object NativeStorageHelper {
                 resolver.update(uri, values, null, null)
                 true
             } else {
-                // Android 7.0 - 9.0 (API 24 - 28)
                 @Suppress("DEPRECATION")
                 val picturesDir = File(
                     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),

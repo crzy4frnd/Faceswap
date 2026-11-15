@@ -76,8 +76,15 @@ fun CustomAssetDialog(
         rawBitmap?.let { NativeAssetSegmenter.extractTransparentAsset(it, tolerance) }
     }
 
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
-        if (bmp != null) rawBitmap = bmp
+    var pendingCameraFile by remember { mutableStateOf<java.io.File?>(null) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val file = pendingCameraFile
+        if (success && file != null && file.exists()) {
+            NativeStorageHelper.loadBitmapFromFile(file.absolutePath, 900)?.let { loaded ->
+                rawBitmap = loaded
+            }
+        }
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -115,7 +122,11 @@ fun CustomAssetDialog(
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
-                        onClick = { cameraLauncher.launch(null) },
+                        onClick = {
+                            val (uri, file) = NativeStorageHelper.createTempCameraUri(context, "asset")
+                            pendingCameraFile = file
+                            cameraLauncher.launch(uri)
+                        },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706)),
                         modifier = Modifier.weight(1f)
                     ) {

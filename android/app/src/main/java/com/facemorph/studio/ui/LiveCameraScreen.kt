@@ -23,6 +23,7 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -45,18 +46,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.AddPhotoAlternate
-import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.Checkroom
-import androidx.compose.material.icons.filled.Diamond
-import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GridOn
-import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -86,12 +87,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.facemorph.studio.engine.NativeLiveArEngine
+import com.facemorph.studio.engine.NativeStorageHelper
 import com.facemorph.studio.model.WardrobeCategory
 import com.facemorph.studio.viewmodel.StudioViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -111,6 +114,8 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
     val latestActiveProfileId by rememberUpdatedState(viewModel.activeProfileId)
 
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Effects, 1=Background, 2=Wardrobe
+    var isDeckExpanded by remember { mutableStateOf(true) }
+    var pendingFaceCameraFile by remember { mutableStateOf<File?>(null) }
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -132,6 +137,21 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
 
     val bgPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { viewModel.loadCustomBackgroundFromUri(it) }
+    }
+
+    val faceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let {
+            viewModel.addCustomFaceFromUri(it, sourceLabel = "Gallery")
+            viewModel.liveConfig = viewModel.liveConfig.copy(faceSwapEnabled = true)
+        }
+    }
+
+    val faceCameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val file = pendingFaceCameraFile
+        if (success && file != null && file.exists()) {
+            viewModel.addCustomFaceFromFile(file.absolutePath, sourceLabel = "Camera")
+            viewModel.liveConfig = viewModel.liveConfig.copy(faceSwapEnabled = true)
+        }
     }
 
     var processedBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -322,7 +342,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
             .fillMaxSize()
             .background(Color(0xFF020617))
     ) {
-        // Clean Camera Viewport (No Buttons Covering Chest or Face!)
+        // Maximized Camera Preview Stage
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -345,7 +365,6 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                     }
                 }
             } else {
-                // Keep hidden 1x1dp surface for CameraX lifecycle without ghosting behind AR bitmap
                 AndroidView(factory = { previewView }, modifier = Modifier.size(1.dp).alpha(0f))
 
                 processedBitmap?.let { bmp ->
@@ -373,7 +392,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                     }
                 }
 
-                // Minimal Top-Right Flip + Mesh Pills
+                // Top-Right Flip + Mesh Toggles
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -382,7 +401,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(36.dp)
                             .clip(RoundedCornerShape(9.dp))
                             .background(if (config.showLandmarkMesh) Color(0xDD0891B2) else Color(0xCC0B1120))
                             .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
@@ -393,7 +412,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                     }
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(36.dp)
                             .clip(RoundedCornerShape(9.dp))
                             .background(Color(0xCC0B1120))
                             .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
@@ -406,20 +425,20 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
             }
         }
 
-        // Dedicated Capture Bar (Separated from Camera Preview!)
+        // Compact Capture Action Bar
         if (hasCameraPermission) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF070B14))
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(9.dp))
                         .background(Color(0xFF1E293B))
                         .clickable { viewModel.showCustomAssetDialog = true }
                         .padding(horizontal = 10.dp, vertical = 7.dp)
@@ -429,10 +448,9 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                     Text("Scan Item", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                 }
 
-                // Clean Shutter Button
                 Box(
                     modifier = Modifier
-                        .size(46.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .background(Color.White)
                         .border(3.dp, Color(0xFF6366F1), CircleShape)
@@ -441,14 +459,13 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.CameraAlt, contentDescription = "Snap Photo", tint = Color(0xFF0F172A), modifier = Modifier.size(22.dp))
+                    Icon(Icons.Default.CameraAlt, contentDescription = "Snap Photo", tint = Color(0xFF0F172A), modifier = Modifier.size(20.dp))
                 }
 
-                // Record Video Button
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(9.dp))
                         .background(if (isRecording) Color(0xFFDC2626) else Color(0xFF1E293B))
                         .clickable { toggleVideoRecording() }
                         .padding(horizontal = 12.dp, vertical = 7.dp)
@@ -457,7 +474,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                         if (isRecording) Icons.Default.Stop else Icons.Default.Videocam,
                         contentDescription = null,
                         tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                     Spacer(Modifier.width(5.dp))
                     Text(if (isRecording) "Stop" else "Record", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
@@ -465,177 +482,284 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
             }
         }
 
-        // Clean Segmented Bottom Studio Deck
+        // Collapsible Bottom Studio Deck
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(175.dp)
+                .animateContentSize()
                 .background(Color(0xFF0B1120))
-                .border(1.dp, Color(0xFF1E293B))
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF111827))
-                    .padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf("Effects", "Background", "Wardrobe").forEachIndexed { idx, label ->
-                    val selected = activeDeckTab == idx
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (selected) Color(0xFF4F46E5) else Color.Transparent)
-                            .clickable { activeDeckTab = idx }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(label, color = if (selected) Color.White else Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(Color(0xFF111827))
+                        .padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf("Effects", "Background", "Wardrobe").forEachIndexed { idx, label ->
+                        val selected = isDeckExpanded && activeDeckTab == idx
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(if (selected) Color(0xFF4F46E5) else Color.Transparent)
+                                .clickable {
+                                    if (isDeckExpanded && activeDeckTab == idx) {
+                                        isDeckExpanded = false
+                                    } else {
+                                        activeDeckTab = idx
+                                        isDeckExpanded = true
+                                    }
+                                }
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(label, color = if (selected) Color.White else Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
                     }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF111827))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                        .clickable { isDeckExpanded = !isDeckExpanded },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (isDeckExpanded) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                        contentDescription = if (isDeckExpanded) "Collapse" else "Expand",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
 
-            when (activeDeckTab) {
-                0 -> {
-                    // Clean Feature Toggles
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        val toggles = listOf(
-                            Triple("BG Cutout", config.removeBackground) { viewModel.liveConfig = config.copy(removeBackground = !config.removeBackground) },
-                            Triple("Skin Smooth", config.removeHairAndBlemishes) { viewModel.liveConfig = config.copy(removeHairAndBlemishes = !config.removeHairAndBlemishes) },
-                            Triple("Clothes", config.wearClothes) { viewModel.liveConfig = config.copy(wearClothes = !config.wearClothes) },
-                            Triple("Jewelry", config.wearJewelry) { viewModel.liveConfig = config.copy(wearJewelry = !config.wearJewelry) },
-                            Triple("Face Swap", config.faceSwapEnabled) { viewModel.liveConfig = config.copy(faceSwapEnabled = !config.faceSwapEnabled) }
-                        )
-                        toggles.forEach { (label, active, onClick) ->
-                            Text(
-                                label,
-                                color = if (active) Color.White else Color(0xFF94A3B8),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (active) Color(0xFF312E81) else Color(0xFF111827))
-                                    .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(8.dp))
-                                    .clickable { onClick() }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-
-                    if (config.removeHairAndBlemishes) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Smooth ${config.hairRemovalIntensity}%", color = Color(0xFFF472B6), fontSize = 11.sp, modifier = Modifier.width(88.dp))
-                            Slider(
-                                value = config.hairRemovalIntensity.toFloat(),
-                                onValueChange = { viewModel.liveConfig = config.copy(hairRemovalIntensity = it.toInt()) },
-                                valueRange = 0f..100f,
-                                modifier = Modifier.weight(1f).height(28.dp)
-                            )
-                        }
-                    } else if (config.faceSwapEnabled) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Swap ${config.swapStrength}%", color = Color(0xFF818CF8), fontSize = 11.sp, modifier = Modifier.width(88.dp))
-                            Slider(
-                                value = config.swapStrength.toFloat(),
-                                onValueChange = { viewModel.liveConfig = config.copy(swapStrength = it.toInt()) },
-                                valueRange = 20f..100f,
-                                modifier = Modifier.weight(1f).height(28.dp)
-                            )
-                        }
-                    } else {
-                        Text("Tap any studio effect above to toggle live AR layers.", color = Color(0xFF64748B), fontSize = 11.sp)
-                    }
-                }
-
-                1 -> {
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        listOf(
-                            "studio" to "Studio Loft",
-                            "neon" to "Cyberpunk",
-                            "sunset" to "Sunset",
-                            "green" to "Chroma Green"
-                        ).forEach { (id, title) ->
-                            val sel = config.removeBackground && config.activeBgId == id
-                            Text(
-                                title,
-                                color = if (sel) Color.White else Color(0xFF94A3B8),
-                                fontSize = 11.sp,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (sel) Color(0xFF312E81) else Color(0xFF111827))
-                                    .border(1.dp, if (sel) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
-                                    .clickable { viewModel.liveConfig = config.copy(activeBgId = id, removeBackground = true) }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp)
-                            )
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF111827))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
-                                .clickable { bgPicker.launch("image/*") }
-                                .padding(horizontal = 12.dp, vertical = 10.dp)
-                        ) {
-                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(15.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text("Gallery BG", color = Color.White, fontSize = 11.sp)
-                        }
-                    }
-                }
-
-                2 -> {
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        viewModel.wardrobeAssets.forEach { asset ->
-                            val active = if (asset.category == WardrobeCategory.CLOTHING) {
-                                config.wearClothes && config.selectedClothingId == asset.id
-                            } else {
-                                config.wearJewelry && config.selectedJewelryId == asset.id
-                            }
-                            val bmp = viewModel.wardrobeBitmapCache[asset.id]
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .width(74.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
-                                    .background(if (active) Color(0xFF1E1B4B) else Color(0xFF111827))
-                                    .clickable {
-                                        viewModel.liveConfig = if (asset.category == WardrobeCategory.CLOTHING) {
-                                            config.copy(selectedClothingId = asset.id, wearClothes = true)
-                                        } else {
-                                            config.copy(selectedJewelryId = asset.id, wearJewelry = true)
-                                        }
-                                    }
-                                    .padding(6.dp)
+            if (isDeckExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    when (activeDeckTab) {
+                        0 -> {
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFF162033)),
-                                    contentAlignment = Alignment.Center
+                                val toggles = listOf(
+                                    Triple("BG Cutout", config.removeBackground) { viewModel.liveConfig = config.copy(removeBackground = !config.removeBackground) },
+                                    Triple("Skin Smooth", config.removeHairAndBlemishes) { viewModel.liveConfig = config.copy(removeHairAndBlemishes = !config.removeHairAndBlemishes) },
+                                    Triple("Clothes", config.wearClothes) { viewModel.liveConfig = config.copy(wearClothes = !config.wearClothes) },
+                                    Triple("Jewelry", config.wearJewelry) { viewModel.liveConfig = config.copy(wearJewelry = !config.wearJewelry) },
+                                    Triple("Face Swap", config.faceSwapEnabled) { viewModel.liveConfig = config.copy(faceSwapEnabled = !config.faceSwapEnabled) }
+                                )
+                                toggles.forEach { (label, active, onClick) ->
+                                    Text(
+                                        label,
+                                        color = if (active) Color.White else Color(0xFF94A3B8),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (active) Color(0xFF312E81) else Color(0xFF111827))
+                                            .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                                            .clickable { onClick() }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+
+                            if (config.faceSwapEnabled && viewModel.faceProfiles.isEmpty()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    if (bmp != null) {
-                                        Image(bitmap = bmp.asImageBitmap(), contentDescription = asset.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp))
+                                    Text("Add Face:", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF1E1B4B))
+                                            .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
+                                            .clickable { faceGalleryPicker.launch("image/*") }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Gallery", color = Color.White, fontSize = 11.sp)
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF082F49))
+                                            .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(8.dp))
+                                            .clickable {
+                                                val (uri, file) = NativeStorageHelper.createTempCameraUri(context, "live_face")
+                                                pendingFaceCameraFile = file
+                                                faceCameraLauncher.launch(uri)
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFF22D3EE), modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Camera", color = Color.White, fontSize = 11.sp)
                                     }
                                 }
-                                Spacer(Modifier.height(3.dp))
-                                Text(asset.name, color = Color.White, fontSize = 9.sp, maxLines = 1)
+                            } else if (config.removeHairAndBlemishes) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Smooth ${config.hairRemovalIntensity}%", color = Color(0xFFF472B6), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                                    Slider(
+                                        value = config.hairRemovalIntensity.toFloat(),
+                                        onValueChange = { viewModel.liveConfig = config.copy(hairRemovalIntensity = it.toInt()) },
+                                        valueRange = 0f..100f,
+                                        modifier = Modifier.weight(1f).height(26.dp)
+                                    )
+                                }
+                            } else if (config.faceSwapEnabled) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Swap ${config.swapStrength}%", color = Color(0xFF818CF8), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                                    Slider(
+                                        value = config.swapStrength.toFloat(),
+                                        onValueChange = { viewModel.liveConfig = config.copy(swapStrength = it.toInt()) },
+                                        valueRange = 20f..100f,
+                                        modifier = Modifier.weight(1f).height(26.dp)
+                                    )
+                                }
+                            } else {
+                                Text("Tap any effect chip above to toggle live AR layers.", color = Color(0xFF64748B), fontSize = 11.sp)
+                            }
+                        }
+
+                        1 -> {
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Original",
+                                    color = if (!config.removeBackground) Color.White else Color(0xFF94A3B8),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (!config.removeBackground) Color(0xFF312E81) else Color(0xFF111827))
+                                        .border(1.dp, if (!config.removeBackground) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                        .clickable { viewModel.liveConfig = config.copy(removeBackground = false) }
+                                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                                )
+                                listOf(
+                                    "studio" to "Studio Loft",
+                                    "neon" to "Cyberpunk",
+                                    "sunset" to "Sunset",
+                                    "green" to "Chroma Green"
+                                ).forEach { (id, title) ->
+                                    val sel = config.removeBackground && config.activeBgId == id
+                                    Text(
+                                        title,
+                                        color = if (sel) Color.White else Color(0xFF94A3B8),
+                                        fontSize = 11.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(if (sel) Color(0xFF312E81) else Color(0xFF111827))
+                                            .border(1.dp, if (sel) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                            .clickable { viewModel.liveConfig = config.copy(activeBgId = id, removeBackground = true) }
+                                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF111827))
+                                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                        .clickable { bgPicker.launch("image/*") }
+                                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                                ) {
+                                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Gallery BG", color = Color.White, fontSize = 11.sp)
+                                }
+                            }
+                        }
+
+                        2 -> {
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .width(66.dp)
+                                        .height(66.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF111827))
+                                        .clickable {
+                                            viewModel.liveConfig = config.copy(wearClothes = false, wearJewelry = false)
+                                        }
+                                        .padding(6.dp)
+                                ) {
+                                    Icon(Icons.Default.Block, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("Clear", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                                }
+
+                                viewModel.wardrobeAssets.forEach { asset ->
+                                    val active = if (asset.category == WardrobeCategory.CLOTHING) {
+                                        config.wearClothes && config.selectedClothingId == asset.id
+                                    } else {
+                                        config.wearJewelry && config.selectedJewelryId == asset.id
+                                    }
+                                    val bmp = viewModel.wardrobeBitmapCache[asset.id]
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        modifier = Modifier
+                                            .width(78.dp)
+                                            .height(66.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                            .background(if (active) Color(0xFF1E1B4B) else Color(0xFF111827))
+                                            .clickable {
+                                                viewModel.liveConfig = if (asset.category == WardrobeCategory.CLOTHING) {
+                                                    config.copy(selectedClothingId = asset.id, wearClothes = true)
+                                                } else {
+                                                    config.copy(selectedJewelryId = asset.id, wearJewelry = true)
+                                                }
+                                            }
+                                            .padding(5.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(34.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF162033)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (bmp != null) {
+                                                Image(bitmap = bmp.asImageBitmap(), contentDescription = asset.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp))
+                                            }
+                                        }
+                                        Spacer(Modifier.height(3.dp))
+                                        Text(asset.name, color = Color.White, fontSize = 9.sp, maxLines = 1)
+                                    }
+                                }
                             }
                         }
                     }

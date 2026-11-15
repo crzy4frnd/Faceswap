@@ -296,3 +296,553 @@ export class CanvasVideoRecorder {
     return Math.floor((Date.now() - this.startTime) / 1000);
   }
 }
+
+export type SwapMotionLevel = 'low' | 'medium' | 'high';
+export type SwapQualityMode = 'high' | 'balanced' | 'light';
+
+export interface AdaptiveSwapQualityProfile {
+  qualityMode: SwapQualityMode;
+  motionLevel: SwapMotionLevel;
+  motionScore: number;
+  renderScale: number;
+  hairRemovalInterval: number; // 1 = every frame, 2 = alternate frames, 0 = disabled
+  useFilterBlur: boolean;
+  useSoftLightToneBlend: boolean;
+  useDropShadows: boolean;
+}
+
+export function getStaticHighQualityProfile(): AdaptiveSwapQualityProfile {
+  return {
+    qualityMode: 'high',
+    motionLevel: 'low',
+    motionScore: 0,
+    renderScale: 1.0,
+    hairRemovalInterval: 1,
+    useFilterBlur: true,
+    useSoftLightToneBlend: true,
+    useDropShadows: true,
+  };
+}
+
+/**
+ * Lightweight optical + IMU motion detector for live camera frames.
+ * Computes downsampled frame-to-frame luminance delta in <0.15ms and applies
+ * hysteresis to switch cleanly between high, balanced, and lightweight swap modes.
+ */
+export class CameraMotionAnalyzer {
+  private readonly sampleW = 48;
+  private readonly sampleH = 36;
+  private sampleCanvas: HTMLCanvasElement | null = null;
+  private sampleCtx: CanvasRenderingContext2D | null = null;
+  private prevLuma: Uint8Array | null = null;
+  private smoothedMotion = 0;
+  private currentMode: SwapQualityMode = 'high';
+  private lastModeUpgradeBlockUntil = 0;
+
+  private ensureContext(): CanvasRenderingContext2D | null {
+    if (typeof document === 'undefined') return null;
+    if (!this.sampleCanvas) {
+      this.sampleCanvas = document.createElement('canvas');
+      this.sampleCanvas.width = this.sampleW;
+      this.sampleCanvas.height = this.sampleH;
+      this.sampleCtx = this.sampleCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    return this.sampleCtx;
+  }
+
+  public reset(): void {
+    this.prevLuma = null;
+    this.smoothedMotion = 0;
+    this.currentMode = 'high';
+    this.lastModeUpgradeBlockUntil = 0;
+  }
+
+  public analyze(
+    video: HTMLVideoElement | null,
+    isLiveVideoReady: boolean,
+    imuImpulse: number = 0,
+    nowMs: number = performance.now()
+  ): AdaptiveSwapQualityProfile {
+    let opticalMotion = 0;
+
+    if (isLiveVideoReady && video) {
+      const ctx = this.ensureContext();
+      if (ctx) {
+        try {
+          ctx.drawImage(video, 0, 0, this.sampleW, this.sampleH);
+          const pixels = ctx.getImageData(0, 0, this.sampleW, this.sampleH).data;
+          const total = this.sampleW * this.sampleH;
+
+          if (!this.prevLuma) {
+            this.prevLuma = new Uint8Array(total);
+            for (let i = 0; i < total; i++) {
+              const p = i * 4;
+              this.prevLuma[i] = (pixels[p] * 77 + pixels[p + 1] * 150 + pixels[p + 2] * 29) >> 8;
+            }
+          } else {
+            let diffSum = 0;
+            let activeDiffCount = 0;
+            // Stride by 2 pixels for fast frame-to-frame delta
+            for (let i = 0; i < total; i += 2) {
+              const p = i * 4;
+              const luma = (pixels[p] * 77 + pixels[p + 1] * 150 + pixels[p + 2] * 29) >> 8;
+              const delta = Math.abs(luma - this.prevLuma[i]);
+              this.prevLuma[i] = luma;
+              diffSum += delta;
+              if (delta > 14) activeDiffCount++;
+            }
+            const sampledCount = Math.ceil(total / 2);
+            const meanDelta = diffSum / sampledCount;
+            const activeRatio = activeDiffCount / sampledCount;
+            // Scale combined delta & moving-pixel ratio onto 0..100 scale
+            opticalMotion = Math.min(100, meanDelta * 1.9 + activeRatio * 45);
+          }
+        } catch {
+          opticalMotion = 0;
+        }
+      }
+    }
+
+    const rawImpulse = Math.min(100, Math.max(opticalMotion, imuImpulse));
+    // Fast attack when motion rises, smooth decay when camera settles
+    const alpha = rawImpulse > this.smoothedMotion ? 0.42 : 0.14;
+    this.smoothedMotion = this.smoothedMotion * (1 - alpha) + rawImpulse * alpha;
+
+    // Hysteresis switching: drop quality immediately on high motion, wait >=550ms before restoring
+    let targetMode: SwapQualityMode = 'high';
+    if (this.smoothedMotion >= 22) {
+      targetMode = 'light';
+    } else if (this.smoothedMotion >= 9.5) {
+      targetMode = 'balanced';
+    }
+
+    const modeRank: Record<SwapQualityMode, number> = { high: 2, balanced: 1, light: 0 };
+    if (modeRank[targetMode] < modeRank[this.currentMode]) {
+      this.currentMode = targetMode;
+      this.lastModeUpgradeBlockUntil = nowMs + 550;
+    } else if (modeRank[targetMode] > modeRank[this.currentMode] && nowMs >= this.lastModeUpgradeBlockUntil) {
+      this.currentMode = targetMode;
+      this.lastModeUpgradeBlockUntil = nowMs + 350;
+    }
+
+    const motionLevel: SwapMotionLevel =
+      this.currentMode === 'light' ? 'high' : this.currentMode === 'balanced' ? 'medium' : 'low';
+
+    if (this.currentMode === 'light') {
+      return {
+        qualityMode: 'light',
+        motionLevel,
+        motionScore: Math.round(this.smoothedMotion),
+        renderScale: 0.65,
+        hairRemovalInterval: 0,
+        useFilterBlur: false,
+        useSoftLightToneBlend: false,
+        useDropShadows: false,
+      };
+    }
+
+    if (this.currentMode === 'balanced') {
+      return {
+        qualityMode: 'balanced',
+        motionLevel,
+        motionScore: Math.round(this.smoothedMotion),
+        renderScale: 0.82,
+        hairRemovalInterval: 2,
+        useFilterBlur: true,
+        useSoftLightToneBlend: false,
+        useDropShadows: false,
+      };
+    }
+
+    return {
+      qualityMode: 'high',
+      motionLevel,
+      motionScore: Math.round(this.smoothedMotion),
+      renderScale: 1.0,
+      hairRemovalInterval: 1,
+      useFilterBlur: true,
+      useSoftLightToneBlend: true,
+      useDropShadows: true,
+    };
+  }
+}
+
+export interface NormalizedFaceBox {
+  x: number; // 0..1 left
+  y: number; // 0..1 top
+  width: number; // 0..1 width
+  height: number; // 0..1 height
+  cx: number; // 0..1 center x
+  cy: number; // 0..1 center y
+}
+
+export interface LiveTrackedFaceResult {
+  box: NormalizedFaceBox;
+  detectedCount: number;
+  suddenShiftDetected: boolean;
+  refocusActiveUntil: number;
+}
+
+/**
+ * Real-time largest-face bounding-box tracker and sudden-shift detector for live camera.
+ * Scans an 80x60 downsampled frame for skin-tone face regions, locks onto the largest
+ * detected face, and triggers an immediate bounding-box re-center whenever a sudden
+ * subject shift occurs (or when manually triggered).
+ */
+export class LiveFaceBoxTracker {
+  private readonly sampleW = 80;
+  private readonly sampleH = 60;
+  private canvas: HTMLCanvasElement | null = null;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private frameCounter = 0;
+
+  private smoothedBox: NormalizedFaceBox = {
+    x: 0.33,
+    y: 0.21,
+    width: 0.34,
+    height: 0.44,
+    cx: 0.5,
+    cy: 0.43,
+  };
+  private anchorBox: NormalizedFaceBox = { ...this.smoothedBox };
+  private lastDetectedRawBox: NormalizedFaceBox = { ...this.smoothedBox };
+  private detectedCount = 1;
+  private refocusActiveUntil = 0;
+  private lastRefocusTriggerMs = 0;
+
+  private ensureContext(): CanvasRenderingContext2D | null {
+    if (typeof document === 'undefined') return null;
+    if (!this.canvas) {
+      this.canvas = document.createElement('canvas');
+      this.canvas.width = this.sampleW;
+      this.canvas.height = this.sampleH;
+      this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    }
+    return this.ctx;
+  }
+
+  private detectLargestFaceBlob(
+    video: HTMLVideoElement,
+    isMirrored: boolean
+  ): { box: NormalizedFaceBox | null; count: number } {
+    const ctx = this.ensureContext();
+    if (!ctx) return { box: null, count: 0 };
+
+    try {
+      ctx.save();
+      ctx.clearRect(0, 0, this.sampleW, this.sampleH);
+      if (isMirrored) {
+        ctx.translate(this.sampleW, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(video, 0, 0, this.sampleW, this.sampleH);
+      ctx.restore();
+
+      const data = ctx.getImageData(0, 0, this.sampleW, this.sampleH).data;
+      const total = this.sampleW * this.sampleH;
+      const skinMask = new Uint8Array(total);
+
+      for (let y = 2; y < this.sampleH - 4; y++) {
+        const row = y * this.sampleW;
+        for (let x = 4; x < this.sampleW - 4; x++) {
+          const i = (row + x) * 4;
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          // YCbCr skin-chrominance cluster
+          const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+          const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          if (lum > 45 && cb >= 77 && cb <= 129 && cr >= 132 && cr <= 176) {
+            skinMask[row + x] = 1;
+          }
+        }
+      }
+
+      // Connected-component flood fill to isolate distinct face candidates & select largest
+      const visited = new Uint8Array(total);
+      let bestArea = 0;
+      let bestBox: NormalizedFaceBox | null = null;
+      let faceCandidateCount = 0;
+      const stack = new Int32Array(total);
+
+      for (let y = 2; y < this.sampleH - 4; y++) {
+        for (let x = 4; x < this.sampleW - 4; x++) {
+          const startIdx = y * this.sampleW + x;
+          if (!skinMask[startIdx] || visited[startIdx]) continue;
+
+          let top = 0;
+          stack[top++] = startIdx;
+          visited[startIdx] = 1;
+
+          let minX = x;
+          let maxX = x;
+          let minY = y;
+          let maxY = y;
+          let area = 0;
+
+          while (top > 0) {
+            const cur = stack[--top];
+            const cy = Math.floor(cur / this.sampleW);
+            const cx = cur - cy * this.sampleW;
+            area++;
+            if (cx < minX) minX = cx;
+            if (cx > maxX) maxX = cx;
+            if (cy < minY) minY = cy;
+            if (cy > maxY) maxY = cy;
+
+            const neighbors = [cur - 1, cur + 1, cur - this.sampleW, cur + this.sampleW];
+            for (let n = 0; n < 4; n++) {
+              const ni = neighbors[n];
+              if (ni >= 0 && ni < total && skinMask[ni] && !visited[ni]) {
+                visited[ni] = 1;
+                stack[top++] = ni;
+              }
+            }
+          }
+
+          const bw = maxX - minX + 1;
+          const bh = maxY - minY + 1;
+          const aspect = bw / Math.max(1, bh);
+
+          // Filter valid face-scale blobs
+          if (area >= 42 && bw >= 8 && bh >= 10 && aspect >= 0.45 && aspect <= 1.55) {
+            faceCandidateCount++;
+            if (area > bestArea) {
+              bestArea = area;
+              const nx = minX / this.sampleW;
+              const ny = minY / this.sampleH;
+              const nw = Math.min(0.65, Math.max(0.18, bw / this.sampleW));
+              const nh = Math.min(0.8, Math.max(0.24, (bh / this.sampleH) * 1.12));
+              bestBox = {
+                x: nx,
+                y: ny,
+                width: nw,
+                height: nh,
+                cx: nx + nw / 2,
+                cy: ny + nh / 2,
+              };
+            }
+          }
+        }
+      }
+
+      return { box: bestBox, count: faceCandidateCount };
+    } catch {
+      return { box: null, count: 0 };
+    }
+  }
+
+  public update(
+    video: HTMLVideoElement | null,
+    isLiveVideoReady: boolean,
+    isMirrored: boolean,
+    autoRefocusEnabled: boolean,
+    forceRefocus: boolean,
+    nowMs: number = performance.now(),
+    motionSmoothingPercent: number = 0
+  ): LiveTrackedFaceResult {
+    this.frameCounter++;
+    let suddenShiftDetected = false;
+
+    if (isLiveVideoReady && video && (this.frameCounter % 4 === 1 || forceRefocus)) {
+      const { box, count } = this.detectLargestFaceBlob(video, isMirrored);
+      if (box) {
+        this.lastDetectedRawBox = box;
+        this.detectedCount = Math.max(1, count);
+
+        // Measure sudden positional or scale shift relative to current locked anchor
+        const shiftDist = Math.hypot(box.cx - this.anchorBox.cx, box.cy - this.anchorBox.cy);
+        const sizeDelta = Math.abs(box.width - this.anchorBox.width);
+
+        if (
+          autoRefocusEnabled &&
+          (shiftDist > 0.085 || sizeDelta > 0.08) &&
+          nowMs - this.lastRefocusTriggerMs > 450
+        ) {
+          suddenShiftDetected = true;
+          this.anchorBox = { ...box };
+          this.lastRefocusTriggerMs = nowMs;
+          this.refocusActiveUntil = nowMs + 1150;
+        }
+      }
+    }
+
+    if (forceRefocus) {
+      suddenShiftDetected = true;
+      this.anchorBox = { ...this.lastDetectedRawBox };
+      this.lastRefocusTriggerMs = nowMs;
+      this.refocusActiveUntil = nowMs + 1150;
+    }
+
+    // Target box is anchored largest face when Auto-Refocus is active, or smooth drift follow
+    const target = autoRefocusEnabled ? this.lastDetectedRawBox : this.anchorBox;
+    const smoothNorm = Math.min(1, Math.max(0, motionSmoothingPercent / 100));
+    const baseFollowLerp = 0.16 - smoothNorm * 0.115; // 0.16 down to 0.045 when max smoothing
+    const lerp =
+      nowMs < this.refocusActiveUntil
+        ? 0.34
+        : autoRefocusEnabled
+        ? baseFollowLerp
+        : 0.08 - smoothNorm * 0.04;
+
+    const nx = this.smoothedBox.x + (target.x - this.smoothedBox.x) * lerp;
+    const ny = this.smoothedBox.y + (target.y - this.smoothedBox.y) * lerp;
+    const nw = this.smoothedBox.width + (target.width - this.smoothedBox.width) * lerp;
+    const nh = this.smoothedBox.height + (target.height - this.smoothedBox.height) * lerp;
+
+    this.smoothedBox = {
+      x: nx,
+      y: ny,
+      width: nw,
+      height: nh,
+      cx: nx + nw / 2,
+      cy: ny + nh / 2,
+    };
+
+    return {
+      box: this.smoothedBox,
+      detectedCount: this.detectedCount,
+      suddenShiftDetected,
+      refocusActiveUntil: this.refocusActiveUntil,
+    };
+  }
+}
+
+export interface TemporalFacePose {
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+export interface SmoothedTemporalPose extends TemporalFacePose {
+  speedPx: number;
+}
+
+/**
+ * Temporal filter across live video frames that:
+ * 1) Applies velocity-adaptive exponential damping to face position, scale, and roll
+ *    to remove frame-to-frame detector jitter.
+ * 2) Applies motion-gated temporal pixel accumulation across the face-swap cutout
+ *    to reduce exposure/color/texture flickering without introducing motion ghosting.
+ */
+export class TemporalMotionSmoother {
+  private prevPose: TemporalFacePose | null = null;
+  private prevTimestamp = 0;
+  private prevFaceCanvas: HTMLCanvasElement | null = null;
+  private prevFaceCtx: CanvasRenderingContext2D | null = null;
+  private hasPrevFrame = false;
+
+  public reset(): void {
+    this.prevPose = null;
+    this.prevTimestamp = 0;
+    this.hasPrevFrame = false;
+  }
+
+  public smoothPose(
+    raw: TemporalFacePose,
+    motionSmoothingPercent: number,
+    snapImmediately: boolean = false,
+    nowMs: number = performance.now()
+  ): SmoothedTemporalPose {
+    if (
+      !this.prevPose ||
+      snapImmediately ||
+      motionSmoothingPercent <= 1 ||
+      nowMs - this.prevTimestamp > 500
+    ) {
+      this.prevPose = { ...raw };
+      this.prevTimestamp = nowMs;
+      return { ...raw, speedPx: 0 };
+    }
+
+    const strength = Math.min(1, Math.max(0, motionSmoothingPercent / 100));
+    const dx = raw.cx - this.prevPose.cx;
+    const dy = raw.cy - this.prevPose.cy;
+    const moveDist = Math.hypot(dx, dy);
+
+    // Dead-zone micro-jitter suppression + velocity-adaptive follow factor
+    const minAlpha = Math.max(0.08, 1 - strength * 0.88); // 1.0 at 0% -> 0.12 at 100%
+    const velocityBoost = Math.min(0.65, moveDist / 38);
+    const alpha = Math.min(1, minAlpha + velocityBoost * (1 - strength * 0.35));
+
+    const nextPose: TemporalFacePose = {
+      cx: this.prevPose.cx + dx * alpha,
+      cy: this.prevPose.cy + dy * alpha,
+      width: this.prevPose.width + (raw.width - this.prevPose.width) * alpha,
+      height: this.prevPose.height + (raw.height - this.prevPose.height) * alpha,
+      rotation: this.prevPose.rotation + (raw.rotation - this.prevPose.rotation) * alpha,
+    };
+
+    const smoothedSpeed = Math.hypot(
+      nextPose.cx - this.prevPose.cx,
+      nextPose.cy - this.prevPose.cy
+    );
+
+    this.prevPose = nextPose;
+    this.prevTimestamp = nowMs;
+
+    return {
+      ...nextPose,
+      speedPx: smoothedSpeed,
+    };
+  }
+
+  /**
+   * Motion-gated temporal IIR frame stabilization across the rendered face cutout
+   * to suppress lighting/exposure flicker and compression shimmer.
+   */
+  public stabilizeFacePatch(
+    sCtx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    motionSmoothingPercent: number,
+    poseSpeedPx: number
+  ): void {
+    if (motionSmoothingPercent <= 1 || w < 4 || h < 4 || typeof document === 'undefined') {
+      this.hasPrevFrame = false;
+      return;
+    }
+
+    if (!this.prevFaceCanvas) {
+      this.prevFaceCanvas = document.createElement('canvas');
+      this.prevFaceCtx = this.prevFaceCanvas.getContext('2d');
+    }
+
+    const prevCanvas = this.prevFaceCanvas;
+    const prevCtx = this.prevFaceCtx;
+    if (!prevCtx) return;
+
+    const sizeChanged = prevCanvas.width !== w || prevCanvas.height !== h;
+    if (sizeChanged) {
+      prevCanvas.width = w;
+      prevCanvas.height = h;
+      this.hasPrevFrame = false;
+    }
+
+    if (this.hasPrevFrame) {
+      const strength = Math.min(1, Math.max(0, motionSmoothingPercent / 100));
+      // Attenuate temporal pixel persistence during fast subject movement to avoid ghosting
+      const motionRejection = Math.exp(-Math.pow(poseSpeedPx / 7.5, 2));
+      const temporalBlend = Math.min(0.56, strength * 0.54 * motionRejection);
+
+      if (temporalBlend > 0.02) {
+        sCtx.save();
+        sCtx.globalCompositeOperation = 'source-over';
+        sCtx.globalAlpha = temporalBlend;
+        sCtx.drawImage(prevCanvas, 0, 0, w, h);
+        sCtx.restore();
+      }
+    }
+
+    // Store stabilized current frame for next video tick
+    prevCtx.clearRect(0, 0, w, h);
+    prevCtx.drawImage(sCtx.canvas, 0, 0, w, h);
+    this.hasPrevFrame = true;
+  }
+}
+
+
+

@@ -233,13 +233,19 @@ object NativeLiveArEngine {
                         val alphaPixels = IntArray(mw * mh)
                         for (i in 0 until mw * mh) {
                             val conf = buf.float
-                            val a = ((conf - 0.40f) / 0.42f * 255f).toInt().coerceIn(0, 255)
+                            val t = ((conf - 0.35f) / 0.45f).coerceIn(0f, 1f)
+                            val smooth = t * t * (3f - 2f * t)
+                            val a = (smooth * 255f).toInt().coerceIn(0, 255)
                             alphaPixels[i] = Color.argb(a, 255, 255, 255)
                         }
                         val matte = Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888)
                         matte.setHasAlpha(true)
                         matte.setPixels(alphaPixels, 0, mw, 0, 0, mw, mh)
-                        if (cont.isActive) cont.resume(matte)
+                        val down = Bitmap.createScaledBitmap(matte, max(16, mw / 2), max(16, mh / 2), true)
+                        val featheredMatte = Bitmap.createScaledBitmap(down, mw, mh, true)
+                        down.recycle()
+                        matte.recycle()
+                        if (cont.isActive) cont.resume(featheredMatte)
                     }
                     .addOnFailureListener {
                         if (cont.isActive) cont.resume(null)

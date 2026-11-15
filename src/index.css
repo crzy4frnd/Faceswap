@@ -34,8 +34,25 @@ html:not(.dark) {
   background: rgba(148, 163, 184, 0.4);
 }
 
+/* Utility to hide scrollbars cleanly on horizontal chip strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 /* Disable pull-to-refresh & tap highlights for native app feel */
 html, body {
   overscroll-behavior-y: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

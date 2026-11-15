@@ -2,8 +2,6 @@ import { FaceProfile } from '../types/face';
 import portraitSingleUrl from '../assets/images/portrait_target_single_1794415666287.jpg';
 import portraitDuoUrl from '../assets/images/portrait_target_duo_1794415666938.jpg';
 import portraitGroupUrl from '../assets/images/portrait_target_group_1794415667821.jpg';
-import sourceProfileAUrl from '../assets/images/source_face_profile_a_1794415668450.jpg';
-import sourceProfileBUrl from '../assets/images/source_face_profile_b_1794415669004.jpg';
 
 export interface SampleTarget {
   id: string;
@@ -37,44 +35,30 @@ export const SAMPLE_TARGETS: SampleTarget[] = [
   },
 ];
 
-export const INITIAL_FACE_PROFILES: FaceProfile[] = [
-  {
-    id: 'profile-elena',
-    name: 'Elena Vance',
-    avatarUrl: sourceProfileAUrl,
-    fullImageUrl: sourceProfileAUrl,
-    dateAdded: '2026-11-10',
-    isBuiltIn: true,
-    tags: ['Studio', 'Frontal', 'Soft Light'],
-    genderEstimate: 'female',
-  },
-  {
-    id: 'profile-maya',
-    name: 'Maya Lin',
-    avatarUrl: sourceProfileBUrl,
-    fullImageUrl: sourceProfileBUrl,
-    dateAdded: '2026-11-11',
-    isBuiltIn: true,
-    tags: ['High Contrast', 'Sharp Contours', 'Beauty'],
-    genderEstimate: 'female',
-  },
-];
+// No preloaded dummy faces — users add faces directly from Gallery or Camera
+export const INITIAL_FACE_PROFILES: FaceProfile[] = [];
 
 export const DEFAULT_ADJUSTMENTS = {
   swapStrength: 92,
   skinToneMatch: true,
   skinToneStrength: 85,
   featherRadius: 22,
+  edgeSoftness: 50,
   brightness: 0,
   contrast: 6,
   shadows: 4,
   temperature: 2,
   saturation: 0,
+  hue: 0,
+  vibrance: 0,
   scale: 1.0,
   rotation: 0,
+  headPitch: 0,
+  headYaw: 0,
   offsetX: 0,
   offsetY: 0,
   edgeSmoothing: 'natural' as const,
+  smartMasking: true,
   autoMaskHair: true,
   autoMaskAccessories: true,
   maskSensitivity: 70,
@@ -85,5 +69,18 @@ export const DEFAULT_ADJUSTMENTS = {
   smartBlend: true,
   smartBlendIntensity: 80,
   textureMatching: true,
+  skinSmoothing: 30,
+  skinTextureSmoothing: 25,
+  autoAmbientLight: false,
+  showFaceLandmarks: false,
   showGeometricMesh: false,
+  motionSensitivity: true,
+  lightingAdjustment: 40,
+  shadowMatcher: 50,
+  softBloom: 15,
+  autoRefocus: true,
+  antiAliasing: true,
+  genderMorph: 0,
+  edgeContrast: 0,
+  motionSmoothing: 35,
 };

@@ -5,10 +5,10 @@ import { useFaceStudio } from '../context/FaceStudioContext';
 export const AndroidFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { viewMode } = useFaceStudio();
 
-  // If user toggles to full expanded studio mode, render edge-to-edge
+  // Default full-screen adaptive studio mode
   if (viewMode === 'expanded') {
     return (
-      <div className="w-full h-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden">
+      <div className="w-full h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-hidden transition-colors">
         {children}
       </div>
     );
