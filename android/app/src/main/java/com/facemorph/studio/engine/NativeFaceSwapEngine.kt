@@ -110,7 +110,7 @@ object NativeFaceSwapEngine {
         rollDeg = 0f
     )
 
-    suspend fun detectFaces(bitmap: Bitmap, defaultProfileId: String): List<DetectedFaceData> {
+    suspend fun detectFaces(bitmap: Bitmap, defaultProfileId: String? = null): List<DetectedFaceData> {
         return suspendCancellableCoroutine { cont ->
             try {
                 val image = InputImage.fromBitmap(bitmap, 0)
@@ -169,7 +169,7 @@ object NativeFaceSwapEngine {
         }
     }
 
-    private fun fallbackCenterFace(bitmap: Bitmap, profileId: String): List<DetectedFaceData> {
+    private fun fallbackCenterFace(bitmap: Bitmap, profileId: String?): List<DetectedFaceData> {
         val w = bitmap.width.toFloat()
         val h = bitmap.height.toFloat()
         val fw = w * 0.34f
