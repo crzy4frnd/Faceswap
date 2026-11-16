@@ -33,6 +33,8 @@ import {
   loadSavedPanelUIState,
   savePanelUIState,
 } from '../utils/adjustmentStorage';
+import { DEFAULT_ADJUSTMENTS } from '../utils/sampleData';
+import { LuminanceHistogram } from './LuminanceHistogram';
 
 interface LightingPreset {
   id: string;
@@ -100,6 +102,157 @@ const LIGHTING_PRESETS: LightingPreset[] = [
   },
 ];
 
+interface QuickLookPreset {
+  id: string;
+  name: string;
+  subtitle: string;
+  swatchClass: string;
+  values: {
+    brightness: number;
+    contrast: number;
+    shadows: number;
+    temperature: number;
+    saturation: number;
+    hue: number;
+    vibrance: number;
+    skinSmoothing: number;
+    skinTextureSmoothing: number;
+    softBloom: number;
+    shadowMatcher: number;
+    lightingAdjustment: number;
+    edgeContrast: number;
+  };
+}
+
+const QUICK_LOOKS: QuickLookPreset[] = [
+  {
+    id: 'natural-studio',
+    name: 'Natural Studio',
+    subtitle: 'Clean & balanced',
+    swatchClass: 'from-slate-100 via-sky-100 to-indigo-200',
+    values: {
+      brightness: 2,
+      contrast: 6,
+      shadows: 6,
+      temperature: 2,
+      saturation: 2,
+      hue: 0,
+      vibrance: 6,
+      skinSmoothing: 28,
+      skinTextureSmoothing: 22,
+      softBloom: 14,
+      shadowMatcher: 52,
+      lightingAdjustment: 48,
+      edgeContrast: 8,
+    },
+  },
+  {
+    id: 'cinematic',
+    name: 'Cinematic',
+    subtitle: 'Filmic teal & warm',
+    swatchClass: 'from-amber-400 via-orange-600 to-cyan-900',
+    values: {
+      brightness: -4,
+      contrast: 22,
+      shadows: -10,
+      temperature: 12,
+      saturation: -8,
+      hue: -2,
+      vibrance: 16,
+      skinSmoothing: 34,
+      skinTextureSmoothing: 26,
+      softBloom: 28,
+      shadowMatcher: 72,
+      lightingAdjustment: 58,
+      edgeContrast: 18,
+    },
+  },
+  {
+    id: 'soft-glow',
+    name: 'Soft Glow',
+    subtitle: 'Silky halation',
+    swatchClass: 'from-rose-200 via-amber-100 to-orange-200',
+    values: {
+      brightness: 8,
+      contrast: -6,
+      shadows: 18,
+      temperature: 8,
+      saturation: 6,
+      hue: 2,
+      vibrance: 14,
+      skinSmoothing: 54,
+      skinTextureSmoothing: 46,
+      softBloom: 68,
+      shadowMatcher: 38,
+      lightingAdjustment: 45,
+      edgeContrast: 0,
+    },
+  },
+  {
+    id: 'high-contrast',
+    name: 'High Contrast',
+    subtitle: 'Crisp tonal punch',
+    swatchClass: 'from-slate-200 via-slate-600 to-slate-950',
+    values: {
+      brightness: 0,
+      contrast: 38,
+      shadows: -18,
+      temperature: -2,
+      saturation: 8,
+      hue: 0,
+      vibrance: 18,
+      skinSmoothing: 18,
+      skinTextureSmoothing: 14,
+      softBloom: 10,
+      shadowMatcher: 82,
+      lightingAdjustment: 55,
+      edgeContrast: 34,
+    },
+  },
+  {
+    id: 'warm-editorial',
+    name: 'Warm Editorial',
+    subtitle: 'Golden magazine',
+    swatchClass: 'from-amber-200 via-orange-300 to-rose-400',
+    values: {
+      brightness: 5,
+      contrast: 14,
+      shadows: 10,
+      temperature: 22,
+      saturation: 12,
+      hue: 0,
+      vibrance: 20,
+      skinSmoothing: 36,
+      skinTextureSmoothing: 28,
+      softBloom: 34,
+      shadowMatcher: 55,
+      lightingAdjustment: 50,
+      edgeContrast: 14,
+    },
+  },
+  {
+    id: 'bleach-noir',
+    name: 'Bleach Noir',
+    subtitle: 'Silver contrast',
+    swatchClass: 'from-zinc-100 via-zinc-500 to-zinc-900',
+    values: {
+      brightness: -6,
+      contrast: 42,
+      shadows: -20,
+      temperature: -6,
+      saturation: -50,
+      hue: 0,
+      vibrance: -50,
+      skinSmoothing: 24,
+      skinTextureSmoothing: 18,
+      softBloom: 22,
+      shadowMatcher: 85,
+      lightingAdjustment: 62,
+      edgeContrast: 28,
+    },
+  },
+];
+
 export const AdjustmentPanel: React.FC = () => {
   const {
     adjustments,
@@ -143,6 +296,54 @@ export const AdjustmentPanel: React.FC = () => {
         autoAmbientLight: false,
       },
       `Lighting Preset: ${preset.name}`
+    );
+  };
+
+  const activeQuickLook = QUICK_LOOKS.find(
+    (look) =>
+      adjustments.brightness === look.values.brightness &&
+      adjustments.contrast === look.values.contrast &&
+      adjustments.shadows === look.values.shadows &&
+      adjustments.temperature === look.values.temperature &&
+      adjustments.saturation === look.values.saturation &&
+      adjustments.hue === look.values.hue &&
+      adjustments.vibrance === look.values.vibrance &&
+      adjustments.skinSmoothing === look.values.skinSmoothing &&
+      adjustments.skinTextureSmoothing === look.values.skinTextureSmoothing &&
+      adjustments.softBloom === look.values.softBloom &&
+      adjustments.shadowMatcher === look.values.shadowMatcher &&
+      adjustments.lightingAdjustment === look.values.lightingAdjustment &&
+      adjustments.edgeContrast === look.values.edgeContrast
+  );
+
+  const applyQuickLook = (look: QuickLookPreset) => {
+    updateAdjustments(
+      {
+        ...look.values,
+        autoAmbientLight: false,
+      },
+      `Quick Look: ${look.name}`
+    );
+  };
+
+  const resetQuickLook = () => {
+    updateAdjustments(
+      {
+        brightness: DEFAULT_ADJUSTMENTS.brightness,
+        contrast: DEFAULT_ADJUSTMENTS.contrast,
+        shadows: DEFAULT_ADJUSTMENTS.shadows,
+        temperature: DEFAULT_ADJUSTMENTS.temperature,
+        saturation: DEFAULT_ADJUSTMENTS.saturation,
+        hue: DEFAULT_ADJUSTMENTS.hue,
+        vibrance: DEFAULT_ADJUSTMENTS.vibrance,
+        skinSmoothing: DEFAULT_ADJUSTMENTS.skinSmoothing,
+        skinTextureSmoothing: DEFAULT_ADJUSTMENTS.skinTextureSmoothing,
+        softBloom: DEFAULT_ADJUSTMENTS.softBloom,
+        shadowMatcher: DEFAULT_ADJUSTMENTS.shadowMatcher,
+        lightingAdjustment: DEFAULT_ADJUSTMENTS.lightingAdjustment,
+        edgeContrast: DEFAULT_ADJUSTMENTS.edgeContrast,
+      },
+      'Quick Look: Default'
     );
   };
 
@@ -267,6 +468,71 @@ export const AdjustmentPanel: React.FC = () => {
           </span>
         </div>
       )}
+
+      {/* Quick Looks One-Click Photo Presets */}
+      <div className="px-3 py-2 bg-slate-50/70 dark:bg-slate-950/45 border-b border-slate-100 dark:border-slate-800/70 shrink-0 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Wand2 className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <span className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+              Quick Looks
+            </span>
+            <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate">
+              · {activeQuickLook ? activeQuickLook.name : 'One-click presets'}
+            </span>
+          </div>
+
+          {activeQuickLook && (
+            <button
+              type="button"
+              onClick={resetQuickLook}
+              className="text-[10px] font-medium text-slate-500 hover:text-rose-500 dark:text-slate-400 dark:hover:text-rose-400 whitespace-nowrap shrink-0 transition-colors"
+            >
+              Clear Look
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-stretch gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          {QUICK_LOOKS.map((look) => {
+            const isActive = activeQuickLook?.id === look.id;
+            return (
+              <button
+                key={look.id}
+                type="button"
+                onClick={() => applyQuickLook(look)}
+                aria-pressed={isActive}
+                title={`Apply ${look.name}: ${look.subtitle}`}
+                className={`group flex items-center gap-2 px-2 py-1.5 rounded-lg border text-left transition-all shrink-0 ${
+                  isActive
+                    ? 'border-indigo-500 bg-indigo-50/90 dark:bg-indigo-950/60'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <div
+                  className={`w-6 h-6 rounded-md bg-gradient-to-br ${look.swatchClass} border border-black/10 dark:border-white/15 shrink-0 flex items-center justify-center`}
+                >
+                  {isActive && <Check className="w-3 h-3 text-slate-900 drop-shadow-xs" />}
+                </div>
+                <div className="min-w-0 pr-0.5">
+                  <span
+                    className={`block text-[11px] font-semibold leading-tight whitespace-nowrap ${
+                      isActive
+                        ? 'text-indigo-700 dark:text-indigo-300'
+                        : 'text-slate-800 dark:text-slate-100'
+                    }`}
+                  >
+                    {look.name}
+                  </span>
+                  <span className="block text-[9px] text-slate-500 dark:text-slate-400 leading-tight whitespace-nowrap mt-0.5">
+                    {look.subtitle}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Sliders & Tools Container */}
       <div className="p-3 space-y-3 flex-1 min-h-0 max-h-[240px] lg:max-h-none overflow-y-auto">
@@ -953,6 +1219,9 @@ export const AdjustmentPanel: React.FC = () => {
                 )}
               </div>
             </div>
+
+            {/* Real-Time Luminance Histogram */}
+            <LuminanceHistogram />
 
             {/* Real-Time Lighting Adjustment Slider */}
             <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-1.5">

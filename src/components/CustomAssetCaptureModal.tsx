@@ -19,12 +19,15 @@ import {
   Package,
   Glasses,
   Tag,
+  Wand2,
+  Undo2,
 } from 'lucide-react';
 import { useFaceStudio } from '../context/FaceStudioContext';
 import { WardrobeAsset, WardrobeCategory } from '../types/body';
 import {
   segmentAssetDetailed,
   applyBrushToCanvas,
+  applyMagicWandRemoval,
   exportTransparentAssetDataUrl,
   SegmentationOptions,
   SegmentationResult,
@@ -98,10 +101,12 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
 
   // Segmentation options & brush tools
   const [segOptions, setSegOptions] = useState<SegmentationOptions>(DEFAULT_SEGMENTATION_OPTIONS);
-  const [brushMode, setBrushMode] = useState<'none' | 'erase' | 'restore' | 'eyedropper'>('none');
+  const [brushMode, setBrushMode] = useState<'none' | 'wand' | 'erase' | 'restore' | 'eyedropper'>('none');
   const [brushRadius, setBrushRadius] = useState<number>(22);
   const [isDrawing, setIsDrawing] = useState(false);
   const [canvasBgPreview, setCanvasBgPreview] = useState<'checker' | 'dark' | 'light'>('checker');
+  const undoStackRef = useRef<ImageData[]>([]);
+  const [undoCount, setUndoCount] = useState(0);
 
   // Asset Metadata & Physics configuration
   const [assetName, setAssetName] = useState('Custom Shirt');
@@ -144,6 +149,8 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
       setCutoutDimensions(null);
       rawImageRef.current = null;
       segResultRef.current = null;
+      undoStackRef.current = [];
+      setUndoCount(0);
     } else {
       stopActiveStream();
     }
@@ -255,6 +262,8 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
 
       const result = segmentAssetDetailed(offCanvas, opts);
       segResultRef.current = result;
+      undoStackRef.current = [];
+      setUndoCount(0);
       syncCanvasFromSegResult(result);
     },
     [syncCanvasFromSegResult]
@@ -342,7 +351,37 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     }
   };
 
-  // Canvas interaction: manual brush or eyedropper background pick
+  const pushUndoSnapshot = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    try {
+      const snap = ctx.getImageData(0, 0, w, h);
+      undoStackRef.current = [...undoStackRef.current.slice(-11), snap];
+      setUndoCount(undoStackRef.current.length);
+    } catch {
+      // Ignore if canvas cannot be read
+    }
+  }, []);
+
+  const handleUndoBrush = useCallback(() => {
+    const canvas = segmentCanvasRef.current;
+    if (!canvas || undoStackRef.current.length === 0) return;
+    const prev = undoStackRef.current.pop();
+    setUndoCount(undoStackRef.current.length);
+    if (!prev) return;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.putImageData(prev, 0, 0);
+    const seg = segResultRef.current;
+    if (seg) {
+      const sctx = seg.canvas.getContext('2d');
+      if (sctx) {
+        sctx.clearRect(0, 0, seg.canvas.width, seg.canvas.height);
+        sctx.drawImage(canvas, 0, 0);
+      }
+    }
+    setPreviewDataUrl(canvas.toDataURL('image/png'));
+  }, []);
+
+  // Canvas interaction: manual brush, magic wand hole/object removal, or eyedropper background pick
   const applyPointerOnCanvas = (e: React.PointerEvent<HTMLCanvasElement>, isClickStart: boolean) => {
     const canvas = segmentCanvasRef.current;
     if (!canvas) return;
@@ -371,7 +410,27 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
       return;
     }
 
+    if (brushMode === 'wand' && isClickStart) {
+      pushUndoSnapshot(ctx, canvas.width, canvas.height);
+      const removed = applyMagicWandRemoval(ctx, x, y, segOptions.tolerance);
+      if (removed) {
+        const seg = segResultRef.current;
+        if (seg) {
+          const sctx = seg.canvas.getContext('2d');
+          if (sctx) {
+            sctx.clearRect(0, 0, seg.canvas.width, seg.canvas.height);
+            sctx.drawImage(canvas, 0, 0);
+          }
+        }
+        setPreviewDataUrl(canvas.toDataURL('image/png'));
+      }
+      return;
+    }
+
     if ((brushMode === 'erase' || brushMode === 'restore') && (isDrawing || isClickStart)) {
+      if (isClickStart) {
+        pushUndoSnapshot(ctx, canvas.width, canvas.height);
+      }
       const seg = segResultRef.current;
       applyBrushToCanvas(
         ctx,
@@ -1018,6 +1077,15 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                 {/* Segmentation Behavior Toggles */}
                 <div className="space-y-1.5 pt-1 border-t border-slate-100 dark:border-slate-800">
                   <label className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer">
+                    <span>Remove Stray Objects</span>
+                    <input
+                      type="checkbox"
+                      checked={segOptions.removeExtraneousObjects ?? true}
+                      onChange={(e) => updateSegOptionsAndRun({ removeExtraneousObjects: e.target.checked })}
+                      className="accent-indigo-600 rounded"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer">
                     <span>Protect Inner White / Details</span>
                     <input
                       type="checkbox"
@@ -1037,43 +1105,57 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                   </label>
                 </div>
 
-                {/* Eyedropper + Manual Brushes */}
+                {/* Eyedropper + Magic Wand + Manual Brushes */}
                 <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
-                  <button
-                    onClick={() => setBrushMode((prev) => (prev === 'eyedropper' ? 'none' : 'eyedropper'))}
-                    className={`w-full py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-                      brushMode === 'eyedropper'
-                        ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-300 ring-2 ring-amber-500/20'
-                        : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-amber-400'
-                    }`}
-                  >
-                    <Pipette className="w-3.5 h-3.5" />
-                    {brushMode === 'eyedropper' ? 'Click Background Color on Canvas...' : 'Pick Background Color'}
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setBrushMode((prev) => (prev === 'wand' ? 'none' : 'wand'))}
+                      className={`py-2 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
+                        brushMode === 'wand'
+                          ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-300 ring-2 ring-indigo-500/20'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
+                      }`}
+                    >
+                      <Wand2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>{brushMode === 'wand' ? 'Tap Region...' : 'Tap Remove'}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setBrushMode((prev) => (prev === 'eyedropper' ? 'none' : 'eyedropper'))}
+                      className={`py-2 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
+                        brushMode === 'eyedropper'
+                          ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-300 ring-2 ring-amber-500/20'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-amber-400'
+                      }`}
+                    >
+                      <Pipette className="w-3.5 h-3.5 shrink-0" />
+                      <span>{brushMode === 'eyedropper' ? 'Tap Color...' : 'Pick BG Color'}</span>
+                    </button>
+                  </div>
 
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={() => setBrushMode((prev) => (prev === 'erase' ? 'none' : 'erase'))}
-                      className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                      className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
                         brushMode === 'erase'
                           ? 'border-rose-500 bg-rose-50/70 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 ring-2 ring-rose-500/20'
                           : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                       }`}
                     >
-                      <Eraser className="w-3.5 h-3.5" />
-                      Erase Stray
+                      <Eraser className="w-3.5 h-3.5 shrink-0" />
+                      <span>Erase Stray</span>
                     </button>
 
                     <button
                       onClick={() => setBrushMode((prev) => (prev === 'restore' ? 'none' : 'restore'))}
-                      className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                      className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
                         brushMode === 'restore'
                           ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 ring-2 ring-emerald-500/20'
                           : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                       }`}
                     >
-                      <Paintbrush className="w-3.5 h-3.5" />
-                      Restore Detail
+                      <Paintbrush className="w-3.5 h-3.5 shrink-0" />
+                      <span>Restore Detail</span>
                     </button>
                   </div>
 
@@ -1081,7 +1163,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                     <div className="space-y-1 pt-1">
                       <div className="flex items-center justify-between text-[11px] text-slate-500">
                         <span>Brush Radius</span>
-                        <span className="font-mono text-indigo-400">{brushRadius}px</span>
+                        <span className="font-mono text-indigo-400 tabular-nums">{brushRadius}px</span>
                       </div>
                       <input
                         type="range"
@@ -1096,17 +1178,30 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                   )}
                 </div>
 
-                <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+                  <button
+                    onClick={handleUndoBrush}
+                    disabled={undoCount === 0}
+                    className={`text-[11px] flex items-center gap-1 whitespace-nowrap ${
+                      undoCount > 0
+                        ? 'text-slate-600 dark:text-slate-300 hover:text-indigo-500'
+                        : 'text-slate-300 dark:text-slate-700 cursor-not-allowed'
+                    }`}
+                  >
+                    <Undo2 className="w-3 h-3" />
+                    <span>Undo Edit{undoCount > 0 ? ` (${undoCount})` : ''}</span>
+                  </button>
+
                   <button
                     onClick={() => {
                       setSegOptions(DEFAULT_SEGMENTATION_OPTIONS);
                       setBrushMode('none');
                       if (rawImageRef.current) processSegmentation(rawImageRef.current, DEFAULT_SEGMENTATION_OPTIONS);
                     }}
-                    className="text-[11px] text-slate-500 hover:text-indigo-400 flex items-center gap-1"
+                    className="text-[11px] text-slate-500 hover:text-indigo-400 flex items-center gap-1 whitespace-nowrap"
                   >
                     <RefreshCw className="w-3 h-3" />
-                    Reset Cutout
+                    <span>Reset Cutout</span>
                   </button>
                 </div>
               </div>

@@ -1,16 +1,17 @@
 /**
  * Custom Clothing, Jewelry & Object Asset Segmenter
- * Client-side edge-seeded background removal, inner-loop cutout support,
- * despeckle cleanup, anti-aliased alpha feathering, color de-fringing,
- * and tight bounding-box extraction for glitch-free body fitting.
+ * Multi-cluster border palette extraction, Sobel edge-barrier geodesic flood fill,
+ * foreground core saliency separation, disconnected stray object removal,
+ * interactive magic-wand region zap, anti-aliased edge feathering, and color defringing.
  */
 
 export interface SegmentationOptions {
-  tolerance: number; // 10 - 90 (perceptual color threshold)
+  tolerance: number; // 8 - 90 (perceptual color threshold)
   featherRadius: number; // 0 - 8 px edge softness
-  sampleCorners: boolean; // auto-sample image border for background color
+  sampleCorners: boolean; // auto-sample multi-cluster image border for background
   customBgColor?: { r: number; g: number; b: number };
-  preserveInnerHoles: boolean; // true = protect white/bright interior details; false = also cut matching enclosed holes (e.g. necklace/arm loops)
+  preserveInnerHoles: boolean; // true = keep interior details; false = cut enclosed loops matching background clusters
+  removeExtraneousObjects?: boolean; // true = isolate centered primary asset and strip peripheral stray objects
   cropToBoundingBox: boolean;
   defringeStrength?: number; // 0 - 100
 }
@@ -31,13 +32,21 @@ export interface SegmentationResult {
 }
 
 export const DEFAULT_SEGMENTATION_OPTIONS: SegmentationOptions = {
-  tolerance: 34,
+  tolerance: 36,
   featherRadius: 2,
   sampleCorners: true,
-  preserveInnerHoles: true,
+  preserveInnerHoles: false,
+  removeExtraneousObjects: true,
   cropToBoundingBox: true,
-  defringeStrength: 85,
+  defringeStrength: 88,
 };
+
+interface BgCluster {
+  r: number;
+  g: number;
+  b: number;
+  count: number;
+}
 
 /**
  * Normalizes an input image/canvas to a crisp working resolution (<= 880px max side)
@@ -75,55 +84,6 @@ export function createNormalizedWorkingCanvas(
 }
 
 /**
- * Samples pixels along the entire outer border (top, bottom, left, right)
- * using trimmed median estimation to resist shadows or small border objects.
- */
-export function sampleDominantBackgroundColor(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number
-): { r: number; g: number; b: number } {
-  const data = ctx.getImageData(0, 0, width, height).data;
-  const rs: number[] = [];
-  const gs: number[] = [];
-  const bs: number[] = [];
-
-  const stepX = Math.max(1, Math.floor(width / 24));
-  const stepY = Math.max(1, Math.floor(height / 24));
-
-  const pushPx = (x: number, y: number) => {
-    const idx = (y * width + x) * 4;
-    if (data[idx + 3] > 20) {
-      rs.push(data[idx]);
-      gs.push(data[idx + 1]);
-      bs.push(data[idx + 2]);
-    }
-  };
-
-  for (let x = 2; x < width - 2; x += stepX) {
-    pushPx(x, 2);
-    pushPx(x, Math.max(2, height - 3));
-  }
-  for (let y = 2; y < height - 2; y += stepY) {
-    pushPx(2, y);
-    pushPx(Math.max(2, width - 3), y);
-  }
-
-  if (rs.length === 0) return { r: 255, g: 255, b: 255 };
-
-  rs.sort((a, b) => a - b);
-  gs.sort((a, b) => a - b);
-  bs.sort((a, b) => a - b);
-  const mid = Math.floor(rs.length / 2);
-
-  return {
-    r: rs[mid],
-    g: gs[mid],
-    b: bs[mid],
-  };
-}
-
-/**
  * Weighted perceptual color distance squared (emphasizing luminance + chroma balance)
  */
 function perceptualDistSq(
@@ -145,9 +105,113 @@ function perceptualDistSq(
 }
 
 /**
- * Full-precision client-side asset segmentation with edge flood-fill,
- * despeckle cleanup, anti-aliased edge feathering, background color decontamination,
- * and tight bounding-box extraction.
+ * Samples pixels along a multi-pixel perimeter ribbon and clusters them into
+ * representative background swatches so uneven lighting, shadows, gradients,
+ * and multi-tone backgrounds strip cleanly without stalling on a single median color.
+ */
+function extractBorderBackgroundClusters(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  maxClusters: number = 10
+): BgCluster[] {
+  const samples: { r: number; g: number; b: number }[] = [];
+  const ribbon = Math.max(2, Math.min(6, Math.round(Math.min(width, height) * 0.015)));
+  const stepX = Math.max(2, Math.floor(width / 36));
+  const stepY = Math.max(2, Math.floor(height / 36));
+
+  const pushSample = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    const idx = (y * width + x) * 4;
+    if (data[idx + 3] > 25) {
+      samples.push({ r: data[idx], g: data[idx + 1], b: data[idx + 2] });
+    }
+  };
+
+  for (let d = 1; d <= ribbon; d += 2) {
+    for (let x = 1; x < width - 1; x += stepX) {
+      pushSample(x, d);
+      pushSample(x, height - 1 - d);
+    }
+    for (let y = 1; y < height - 1; y += stepY) {
+      pushSample(d, y);
+      pushSample(width - 1 - d, y);
+    }
+  }
+
+  if (samples.length === 0) return [{ r: 255, g: 255, b: 255, count: 1 }];
+
+  // Greedy quantized clustering (merge samples within perceptual distance ~24 RGB)
+  const mergeThreshSq = 24 * 24 * 2.4;
+  const clusters: { rSum: number; gSum: number; bSum: number; count: number; r: number; g: number; b: number }[] = [];
+
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let c = 0; c < clusters.length; c++) {
+      const cl = clusters[c];
+      const d = perceptualDistSq(s.r, s.g, s.b, cl.r, cl.g, cl.b);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = c;
+      }
+    }
+
+    if (bestIdx !== -1 && bestDist <= mergeThreshSq) {
+      const cl = clusters[bestIdx];
+      cl.rSum += s.r;
+      cl.gSum += s.g;
+      cl.bSum += s.b;
+      cl.count += 1;
+      cl.r = Math.round(cl.rSum / cl.count);
+      cl.g = Math.round(cl.gSum / cl.count);
+      cl.b = Math.round(cl.bSum / cl.count);
+    } else if (clusters.length < maxClusters * 2) {
+      clusters.push({
+        rSum: s.r,
+        gSum: s.g,
+        bSum: s.b,
+        count: 1,
+        r: s.r,
+        g: s.g,
+        b: s.b,
+      });
+    }
+  }
+
+  clusters.sort((a, b) => b.count - a.count);
+  const minSignificant = Math.max(2, Math.floor(samples.length * 0.025));
+  const filtered = clusters
+    .filter((c, idx) => idx === 0 || c.count >= minSignificant)
+    .slice(0, maxClusters)
+    .map((c) => ({ r: c.r, g: c.g, b: c.b, count: c.count }));
+
+  return filtered.length > 0 ? filtered : [{ r: 255, g: 255, b: 255, count: 1 }];
+}
+
+/**
+ * Samples dominant background color along the outer border (median representative).
+ */
+export function sampleDominantBackgroundColor(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number
+): { r: number; g: number; b: number } {
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const clusters = extractBorderBackgroundClusters(data, width, height, 6);
+  const primary = clusters[0];
+  return { r: primary.r, g: primary.g, b: primary.b };
+}
+
+/**
+ * Full-precision client-side asset segmentation with:
+ * 1. Multi-cluster border palette modeling (handles uneven lighting, gradients & complex surfaces)
+ * 2. Sobel luminance+chroma edge barrier map (stops bleed at sharp item outlines)
+ * 3. Geodesic edge-aware exterior flood fill + shadow/gradient traversal
+ * 4. Smart enclosed-loop hole cutting using center-foreground vs border-cluster comparison
+ * 5. Connected-component extraneous object filtering (removes stray background objects)
+ * 6. Despeckle, anti-aliased edge feathering, multi-cluster color defringing & tight cropping
  */
 export function segmentAssetDetailed(
   sourceCanvas: HTMLCanvasElement,
@@ -191,11 +255,28 @@ export function segmentAssetDetailed(
     if (data[(sy * width + sx) * 4 + 3] < 40) transparentBorderCount++;
   });
 
-  const bg =
-    opts.customBgColor ||
-    (opts.sampleCorners
-      ? sampleDominantBackgroundColor(ctx, width, height)
-      : { r: 255, g: 255, b: 255 });
+  const borderClusters = opts.sampleCorners
+    ? extractBorderBackgroundClusters(data, width, height, 10)
+    : [{ r: 255, g: 255, b: 255, count: 1 }];
+
+  const bgClusters: BgCluster[] = opts.customBgColor
+    ? [{ r: opts.customBgColor.r, g: opts.customBgColor.g, b: opts.customBgColor.b, count: 9999 }, ...borderClusters.slice(0, 4)]
+    : borderClusters;
+  const bg = { r: bgClusters[0].r, g: bgClusters[0].g, b: bgClusters[0].b };
+
+  const nearestBgClusterDistSq = (r: number, g: number, b: number) => {
+    let minD = Infinity;
+    let bestCluster = bgClusters[0];
+    for (let c = 0; c < bgClusters.length; c++) {
+      const cl = bgClusters[c];
+      const d = perceptualDistSq(r, g, b, cl.r, cl.g, cl.b);
+      if (d < minD) {
+        minD = d;
+        bestCluster = cl;
+      }
+    }
+    return { distSq: minD, cluster: bestCluster };
+  };
 
   // Skip destructive bg removal if image already has transparent corners and no custom bg picker was forced
   const alreadyTransparent = transparentBorderCount >= 3 && !opts.customBgColor;
@@ -203,10 +284,59 @@ export function segmentAssetDetailed(
   if (!alreadyTransparent) {
     const tol = Math.max(6, Math.min(95, opts.tolerance));
     const hardDistSq = (tol * 2.15) * (tol * 2.15);
-    const softDistSq = (tol * 2.95) * (tol * 2.95);
-    const localStepMaxSq = (tol * 1.45) * (tol * 1.45);
+    const softDistSq = (tol * 3.15) * (tol * 3.15);
+    const extendedGradientDistSq = (tol * 4.4) * (tol * 4.4);
+    const localStepMaxSq = (tol * 1.55) * (tol * 1.55);
+    const smoothStepMaxSq = (tol * 0.72) * (tol * 0.72);
 
-    // 1. Edge-seeded flood fill to isolate exterior background while protecting interior bright details
+    // 1. Precompute Sobel luminance + chroma edge magnitude to protect real object outlines
+    const lum = new Float32Array(totalPx);
+    for (let i = 0; i < totalPx; i++) {
+      const p = i * 4;
+      lum[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+    }
+
+    const edgeMag = new Float32Array(totalPx);
+    for (let y = 1; y < height - 1; y++) {
+      const row = y * width;
+      for (let x = 1; x < width - 1; x++) {
+        const i = row + x;
+        const gx =
+          -lum[i - width - 1] +
+          lum[i - width + 1] -
+          2 * lum[i - 1] +
+          2 * lum[i + 1] -
+          lum[i + width - 1] +
+          lum[i + width + 1];
+        const gy =
+          -lum[i - width - 1] -
+          2 * lum[i - width] -
+          lum[i - width + 1] +
+          lum[i + width - 1] +
+          2 * lum[i + width] +
+          lum[i + width + 1];
+        const lumEdge = Math.hypot(gx, gy) * 0.25;
+
+        const pL = (i - 1) * 4;
+        const pR = (i + 1) * 4;
+        const pU = (i - width) * 4;
+        const pD = (i + width) * 4;
+        const cX =
+          Math.abs(data[pR] - data[pL]) +
+          Math.abs(data[pR + 1] - data[pL + 1]) +
+          Math.abs(data[pR + 2] - data[pL + 2]);
+        const cY =
+          Math.abs(data[pD] - data[pU]) +
+          Math.abs(data[pD + 1] - data[pU + 1]) +
+          Math.abs(data[pD + 2] - data[pU + 2]);
+        const chromaEdge = Math.hypot(cX, cY) * 0.14;
+        edgeMag[i] = Math.min(255, lumEdge * 0.68 + chromaEdge * 0.32);
+      }
+    }
+
+    const edgeBarrier = Math.max(20, 44 - tol * 0.25);
+
+    // 2. Edge-seeded multi-cluster + gradient-aware geodesic flood fill
     const bgMask = new Uint8Array(totalPx); // 1 = background, 0 = foreground
     const visited = new Uint8Array(totalPx);
     const queue = new Int32Array(totalPx);
@@ -222,10 +352,13 @@ export function segmentAssetDetailed(
         queue[qTail++] = idx;
         return;
       }
-      const dSq = perceptualDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2], bg.r, bg.g, bg.b);
-      if (dSq <= softDistSq) {
-        bgMask[idx] = 1;
-        queue[qTail++] = idx;
+      const { distSq } = nearestBgClusterDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2]);
+      if (distSq <= softDistSq || opts.sampleCorners) {
+        // Perimeter edge seeds anchor background stripping even on cluttered or shadowed borders
+        if (distSq <= extendedGradientDistSq || edgeMag[idx] < edgeBarrier) {
+          bgMask[idx] = 1;
+          queue[qTail++] = idx;
+        }
       }
     };
 
@@ -256,10 +389,10 @@ export function segmentAssetDetailed(
 
         const nxt = cur + dirs[d];
         if (visited[nxt]) continue;
-        visited[nxt] = 1;
 
         const np = nxt * 4;
         if (data[np + 3] < 20) {
+          visited[nxt] = 1;
           bgMask[nxt] = 1;
           queue[qTail++] = nxt;
           continue;
@@ -268,41 +401,215 @@ export function segmentAssetDetailed(
         const nr = data[np];
         const ng = data[np + 1];
         const nb = data[np + 2];
-        const distBg = perceptualDistSq(nr, ng, nb, bg.r, bg.g, bg.b);
+        const { distSq: distBg } = nearestBgClusterDistSq(nr, ng, nb);
         const distNeighbor = perceptualDistSq(nr, ng, nb, cr, cg, cb);
+        const nEdge = edgeMag[nxt];
 
-        if (distBg <= hardDistSq || (distBg <= softDistSq && distNeighbor <= localStepMaxSq)) {
+        const matchesClusterHard = distBg <= hardDistSq && (nEdge < edgeBarrier * 1.45 || distBg <= hardDistSq * 0.55);
+        const matchesClusterSoft = distBg <= softDistSq && distNeighbor <= localStepMaxSq && nEdge < edgeBarrier;
+        // Smooth illumination/shadow/surface walk: strips tabletops, shadowed walls & gradients until hitting an object edge
+        const isSmoothGradientSurface =
+          nEdge < edgeBarrier * 0.65 &&
+          distNeighbor <= smoothStepMaxSq &&
+          distBg <= extendedGradientDistSq;
+
+        if (matchesClusterHard || matchesClusterSoft || isSmoothGradientSurface) {
+          visited[nxt] = 1;
           bgMask[nxt] = 1;
           queue[qTail++] = nxt;
         }
       }
     }
 
-    // 2. Optional enclosed hole removal (e.g. gap between sleeves/waist or inside necklace chain)
-    if (!opts.preserveInnerHoles) {
-      const innerHardSq = (tol * 1.65) * (tol * 1.65);
-      for (let i = 0; i < totalPx; i++) {
-        if (bgMask[i]) continue;
-        const pIdx = i * 4;
-        if (data[pIdx + 3] < 20) {
-          bgMask[i] = 1;
-          continue;
+    // 3. Build foreground core palette (inner 36% x 44%) to prevent cutting real interior bright clothes/prints
+    const fgClusters: { r: number; g: number; b: number }[] = [];
+    const fgSamples: { r: number; g: number; b: number }[] = [];
+    const cx0 = Math.floor(width * 0.32);
+    const cx1 = Math.ceil(width * 0.68);
+    const cy0 = Math.floor(height * 0.28);
+    const cy1 = Math.ceil(height * 0.72);
+    for (let y = cy0; y < cy1; y += 3) {
+      for (let x = cx0; x < cx1; x += 3) {
+        const idx = y * width + x;
+        if (bgMask[idx]) continue;
+        const pIdx = idx * 4;
+        if (data[pIdx + 3] > 60) {
+          fgSamples.push({ r: data[pIdx], g: data[pIdx + 1], b: data[pIdx + 2] });
         }
-        const dSq = perceptualDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2], bg.r, bg.g, bg.b);
-        if (dSq <= innerHardSq) {
-          bgMask[i] = 1;
+      }
+    }
+    for (let i = 0; i < fgSamples.length && fgClusters.length < 8; i++) {
+      const s = fgSamples[i];
+      if (!fgClusters.some((fc) => perceptualDistSq(s.r, s.g, s.b, fc.r, fc.g, fc.b) < 28 * 28 * 2.4)) {
+        fgClusters.push(s);
+      }
+    }
+
+    // 4. Smart interior enclosed-loop removal (armholes, collar loops, necklaces, ring/bag gaps)
+    if (!opts.preserveInnerHoles) {
+      const holeVisited = new Uint8Array(totalPx);
+      const holeQueue = new Int32Array(totalPx);
+      const innerHardSq = (tol * 1.85) * (tol * 1.85);
+
+      for (let i = 0; i < totalPx; i++) {
+        if (bgMask[i] || holeVisited[i]) continue;
+        const pIdx = i * 4;
+        const { distSq: dBg } = nearestBgClusterDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2]);
+        if (dBg > innerHardSq) continue;
+
+        // Connected component of bg-colored interior pocket
+        let hHead = 0;
+        let hTail = 0;
+        holeQueue[hTail++] = i;
+        holeVisited[i] = 1;
+        let sumR = 0, sumG = 0, sumB = 0;
+        let touchesOuterBg = false;
+
+        while (hHead < hTail) {
+          const cur = holeQueue[hHead++];
+          const cp = cur * 4;
+          sumR += data[cp];
+          sumG += data[cp + 1];
+          sumB += data[cp + 2];
+
+          const hx = cur % width;
+          const hy = Math.floor(cur / width);
+          for (let d = 0; d < 4; d++) {
+            if (d === 0 && hx === 0) { touchesOuterBg = true; continue; }
+            if (d === 1 && hx === width - 1) { touchesOuterBg = true; continue; }
+            if (d === 2 && hy === 0) { touchesOuterBg = true; continue; }
+            if (d === 3 && hy === height - 1) { touchesOuterBg = true; continue; }
+
+            const nxt = cur + dirs[d];
+            if (bgMask[nxt]) {
+              touchesOuterBg = true;
+              continue;
+            }
+            if (holeVisited[nxt]) continue;
+            const np = nxt * 4;
+            const { distSq: ndBg } = nearestBgClusterDistSq(data[np], data[np + 1], data[np + 2]);
+            if (ndBg <= innerHardSq && edgeMag[nxt] < edgeBarrier * 1.2) {
+              holeVisited[nxt] = 1;
+              holeQueue[hTail++] = nxt;
+            }
+          }
+        }
+
+        // Compute mean pocket color and remove if it aligns closely with background vs core foreground
+        const count = hTail;
+        if (count >= 16) {
+          const mr = sumR / count;
+          const mg = sumG / count;
+          const mb = sumB / count;
+          const { distSq: pocketBgDist } = nearestBgClusterDistSq(mr, mg, mb);
+          let pocketFgDist = Infinity;
+          for (let f = 0; f < fgClusters.length; f++) {
+            const fd = perceptualDistSq(mr, mg, mb, fgClusters[f].r, fgClusters[f].g, fgClusters[f].b);
+            if (fd < pocketFgDist) pocketFgDist = fd;
+          }
+
+          // Clear enclosed background pocket if enclosed or clearly matching border background
+          if (pocketBgDist <= innerHardSq && (touchesOuterBg || pocketBgDist < pocketFgDist * 0.72 || count < totalPx * 0.08)) {
+            for (let k = 0; k < hTail; k++) {
+              bgMask[holeQueue[k]] = 1;
+            }
+          }
         }
       }
     }
 
-    // 3. Morphological despeckle: remove 1-2px isolated speckles & fill 1px pinholes
+    // 5. Extraneous / Disconnected Stray Object Filtering (removes corner clutter, hands, props)
+    if (opts.removeExtraneousObjects !== false) {
+      const compLabel = new Int32Array(totalPx); // 0 = bg / unvisited
+      const compAreas: number[] = [0];
+      const compCenterScore: number[] = [0];
+      const compQueue = new Int32Array(totalPx);
+      let labelId = 0;
+
+      const centerX = width * 0.5;
+      const centerY = height * 0.5;
+      const normInvX = 1 / (width * 0.5 || 1);
+      const normInvY = 1 / (height * 0.5 || 1);
+
+      for (let i = 0; i < totalPx; i++) {
+        if (bgMask[i] || compLabel[i] !== 0) continue;
+        labelId++;
+        let cHead = 0;
+        let cTail = 0;
+        compQueue[cTail++] = i;
+        compLabel[i] = labelId;
+
+        let sumX = 0;
+        let sumY = 0;
+        let touchesCenterBox = 0;
+
+        while (cHead < cTail) {
+          const cur = compQueue[cHead++];
+          const px = cur % width;
+          const py = Math.floor(cur / width);
+          sumX += px;
+          sumY += py;
+          if (px >= width * 0.25 && px <= width * 0.75 && py >= height * 0.2 && py <= height * 0.8) {
+            touchesCenterBox++;
+          }
+
+          for (let d = 0; d < 4; d++) {
+            if (d === 0 && px === 0) continue;
+            if (d === 1 && px === width - 1) continue;
+            if (d === 2 && py === 0) continue;
+            if (d === 3 && py === height - 1) continue;
+            const nxt = cur + dirs[d];
+            if (!bgMask[nxt] && compLabel[nxt] === 0) {
+              compLabel[nxt] = labelId;
+              compQueue[cTail++] = nxt;
+            }
+          }
+        }
+
+        const area = cTail;
+        const meanX = sumX / area;
+        const meanY = sumY / area;
+        const distNorm = Math.hypot((meanX - centerX) * normInvX, (meanY - centerY) * normInvY);
+        const centerWeight = (1 + (touchesCenterBox / area) * 1.8) * Math.exp(-distNorm * distNorm * 0.9);
+        compAreas[labelId] = area;
+        compCenterScore[labelId] = area * centerWeight;
+      }
+
+      if (labelId > 1) {
+        let bestLabel = 1;
+        for (let l = 2; l <= labelId; l++) {
+          if (compCenterScore[l] > compCenterScore[bestLabel]) {
+            bestLabel = l;
+          }
+        }
+        const primaryArea = compAreas[bestLabel];
+        // Keep primary centered component + large twin elements (e.g. pair of earrings >= 20% of primary) inside center zone
+        const keep = new Uint8Array(labelId + 1);
+        keep[bestLabel] = 1;
+        for (let l = 1; l <= labelId; l++) {
+          if (l === bestLabel) continue;
+          if (compAreas[l] >= primaryArea * 0.2 && compCenterScore[l] >= compCenterScore[bestLabel] * 0.16) {
+            keep[l] = 1;
+          }
+        }
+
+        for (let i = 0; i < totalPx; i++) {
+          const lbl = compLabel[i];
+          if (lbl > 0 && !keep[lbl]) {
+            bgMask[i] = 1;
+          }
+        }
+      }
+    }
+
+    // 6. Soft boundary alpha transition + morphological despeckle
     const alphaRaw = new Uint8Array(totalPx);
     for (let i = 0; i < totalPx; i++) {
       if (bgMask[i]) {
         alphaRaw[i] = 0;
       } else {
         const pIdx = i * 4;
-        const distBg = perceptualDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2], bg.r, bg.g, bg.b);
+        const { distSq: distBg } = nearestBgClusterDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2]);
         if (distBg < softDistSq && distBg > hardDistSq) {
           const t = (distBg - hardDistSq) / Math.max(1, softDistSq - hardDistSq);
           alphaRaw[i] = Math.round(255 * Math.min(1, Math.max(0, t)));
@@ -331,7 +638,7 @@ export function segmentAssetDetailed(
       }
     }
 
-    // 4. Boundary-only anti-aliased feathering (keeps interior 100% solid & crisp)
+    // 7. Boundary-only anti-aliased feathering (keeps interior 100% solid & crisp)
     const featherPx = Math.max(0, Math.min(8, Math.round(opts.featherRadius ?? 2)));
     const alphaFinal = new Uint8Array(alphaClean);
     if (featherPx > 0) {
@@ -340,7 +647,6 @@ export function segmentAssetDetailed(
         for (let x = r; x < width - r; x++) {
           const idx = y * width + x;
           const selfA = alphaClean[idx];
-          // Check if pixel lies on the foreground/background boundary band
           let hasTransNeighbor = false;
           let hasSolidNeighbor = false;
           for (let dy = -r; dy <= r; dy++) {
@@ -366,26 +672,27 @@ export function segmentAssetDetailed(
       }
     }
 
-    // 5. Apply final alpha + background color decontamination (removes halo fringes)
-    const defringe = Math.max(0, Math.min(1, (opts.defringeStrength ?? 85) / 100));
+    // 8. Apply final alpha + nearest-cluster background color decontamination (eliminates edge halo)
+    const defringe = Math.max(0, Math.min(1, (opts.defringeStrength ?? 88) / 100));
     for (let i = 0; i < totalPx; i++) {
       const pIdx = i * 4;
       const a = alphaFinal[i];
       data[pIdx + 3] = a;
-      if (a > 8 && a < 245 && defringe > 0.05) {
+      if (a > 6 && a < 245 && defringe > 0.05) {
+        const { cluster: nearBg } = nearestBgClusterDistSq(data[pIdx], data[pIdx + 1], data[pIdx + 2]);
         const alphaNorm = a / 255;
-        const blend = (1 - alphaNorm) * defringe * 0.72;
-        const inv = 1 / Math.max(0.28, 1 - blend);
-        data[pIdx] = Math.max(0, Math.min(255, Math.round((data[pIdx] - bg.r * blend) * inv)));
-        data[pIdx + 1] = Math.max(0, Math.min(255, Math.round((data[pIdx + 1] - bg.g * blend) * inv)));
-        data[pIdx + 2] = Math.max(0, Math.min(255, Math.round((data[pIdx + 2] - bg.b * blend) * inv)));
+        const blend = (1 - alphaNorm) * defringe * 0.78;
+        const inv = 1 / Math.max(0.22, 1 - blend);
+        data[pIdx] = Math.max(0, Math.min(255, Math.round((data[pIdx] - nearBg.r * blend) * inv)));
+        data[pIdx + 1] = Math.max(0, Math.min(255, Math.round((data[pIdx + 1] - nearBg.g * blend) * inv)));
+        data[pIdx + 2] = Math.max(0, Math.min(255, Math.round((data[pIdx + 2] - nearBg.b * blend) * inv)));
       }
     }
 
     ctx.putImageData(imgData, 0, 0);
   }
 
-  // 6. Compute tight foreground bounding box (alpha > 24 so faint feather doesn't bloat size)
+  // 9. Compute tight foreground bounding box (alpha > 24 so faint feather doesn't bloat size)
   let minX = width;
   let minY = height;
   let maxX = -1;
@@ -432,6 +739,104 @@ export function segmentAssetDetailed(
     backgroundColor: bg,
     alreadyTransparent,
   };
+}
+
+/**
+ * Click-to-remove (Magic Wand) flood fill on the segmented cutout canvas:
+ * removes any unwanted connected region (extra object, hand, interior gap) matching the tapped pixel.
+ */
+export function applyMagicWandRemoval(
+  ctx: CanvasRenderingContext2D,
+  startX: number,
+  startY: number,
+  tolerance: number = 32
+): boolean {
+  const width = ctx.canvas.width;
+  const height = ctx.canvas.height;
+  const sx = Math.max(0, Math.min(width - 1, Math.round(startX)));
+  const sy = Math.max(0, Math.min(height - 1, Math.round(startY)));
+
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+  const startIdx = sy * width + sx;
+  const sp = startIdx * 4;
+  if (data[sp + 3] < 15) return false;
+
+  const targetR = data[sp];
+  const targetG = data[sp + 1];
+  const targetB = data[sp + 2];
+  const maxDistSq = (tolerance * 2.25) * (tolerance * 2.25);
+  const stepDistSq = (tolerance * 1.45) * (tolerance * 1.45);
+
+  const totalPx = width * height;
+  const visited = new Uint8Array(totalPx);
+  const queue = new Int32Array(totalPx);
+  const removed = new Uint8Array(totalPx);
+
+  let qHead = 0;
+  let qTail = 0;
+  visited[startIdx] = 1;
+  removed[startIdx] = 1;
+  queue[qTail++] = startIdx;
+
+  const dirs = [-1, 1, -width, width];
+  while (qHead < qTail) {
+    const cur = queue[qHead++];
+    const cx = cur % width;
+    const cy = Math.floor(cur / width);
+    const cp = cur * 4;
+    const cr = data[cp];
+    const cg = data[cp + 1];
+    const cb = data[cp + 2];
+
+    for (let d = 0; d < 4; d++) {
+      if (d === 0 && cx === 0) continue;
+      if (d === 1 && cx === width - 1) continue;
+      if (d === 2 && cy === 0) continue;
+      if (d === 3 && cy === height - 1) continue;
+      const nxt = cur + dirs[d];
+      if (visited[nxt]) continue;
+      const np = nxt * 4;
+      if (data[np + 3] < 15) continue;
+
+      const nr = data[np];
+      const ng = data[np + 1];
+      const nb = data[np + 2];
+      const dTarget = perceptualDistSq(nr, ng, nb, targetR, targetG, targetB);
+      const dStep = perceptualDistSq(nr, ng, nb, cr, cg, cb);
+
+      if (dTarget <= maxDistSq || dStep <= stepDistSq * 0.65) {
+        visited[nxt] = 1;
+        removed[nxt] = 1;
+        queue[qTail++] = nxt;
+      }
+    }
+  }
+
+  for (let i = 0; i < totalPx; i++) {
+    if (removed[i]) {
+      data[i * 4 + 3] = 0;
+    }
+  }
+
+  // Soften 1px seam around removed wand boundary
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+      if (removed[idx] || data[idx * 4 + 3] < 40) continue;
+      if (
+        removed[idx - 1] ||
+        removed[idx + 1] ||
+        removed[idx - width] ||
+        removed[idx + width]
+      ) {
+        data[idx * 4 + 3] = Math.round(data[idx * 4 + 3] * 0.55);
+      }
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+  return true;
 }
 
 /**

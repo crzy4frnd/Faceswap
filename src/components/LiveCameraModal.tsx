@@ -28,8 +28,18 @@ import {
 import { useFaceStudio } from '../context/FaceStudioContext';
 import { loadImage, drawTFLiteLandmarkMesh } from '../utils/faceEngine';
 import { LiveCameraConfig, LiveTrackingState } from '../types/face';
+import { BodyLandmarks } from '../types/body';
 import { getAssetClothingTagId } from '../utils/bodyAssets';
 import { WebcamCaptureDialog } from './WebcamCaptureDialog';
+import {
+  ClothMeshState,
+  DEFAULT_CLOTH_CONFIG,
+  buildBodyCollisionMesh,
+  createClothGrid,
+  getDefaultMaterialSurface,
+  renderClothMesh,
+  stepClothMesh,
+} from '../utils/clothPhysicsEngine';
 import {
   VIRTUAL_BACKGROUNDS,
   VirtualBackground,
@@ -40,6 +50,8 @@ import {
   getStaticHighQualityProfile,
   AdaptiveSwapQualityProfile,
   LiveFaceBoxTracker,
+  LiveBodyTracker,
+  NormalizedFaceBox,
   TemporalMotionSmoother,
 } from '../utils/liveCameraEngine';
 
@@ -71,6 +83,13 @@ export const LiveCameraModal: React.FC = () => {
   const faceGalleryInputRef = useRef<HTMLInputElement | null>(null);
   const motionAnalyzerRef = useRef<CameraMotionAnalyzer | null>(null);
   const faceBoxTrackerRef = useRef<LiveFaceBoxTracker | null>(null);
+  const bodyTrackerRef = useRef<LiveBodyTracker | null>(null);
+  const lastTrackedBoxRef = useRef<NormalizedFaceBox | undefined>(undefined);
+  const liveClothMeshRef = useRef<{
+    assetId: string;
+    anchorMode: 'shoulders' | 'chest' | 'waist';
+    mesh: ClothMeshState;
+  } | null>(null);
   const temporalSmootherRef = useRef<TemporalMotionSmoother | null>(null);
   const aaScratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const aaMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -102,6 +121,17 @@ export const LiveCameraModal: React.FC = () => {
   const [activeDrawer, setActiveDrawer] = useState<'none' | 'alignment' | 'background' | 'beauty' | 'wardrobe'>('none');
   const [liveClothTagFilter, setLiveClothTagFilter] = useState<string>('all');
   const [showFaceCamDialog, setShowFaceCamDialog] = useState(false);
+
+  // Live garment fit & stretch calibration controls
+  const [clothFitStretch, setClothFitStretch] = useState<number>(1.0);
+  const [clothCollarOffset, setClothCollarOffset] = useState<number>(0);
+  const [clothFitTightness, setClothFitTightness] = useState<number>(42);
+  const clothFitRef = useRef({ stretch: 1.0, collarOffset: 0, tightness: 42 });
+  clothFitRef.current = {
+    stretch: clothFitStretch,
+    collarOffset: clothCollarOffset,
+    tightness: clothFitTightness,
+  };
 
   // Video recording state
   const recorderRef = useRef<CanvasVideoRecorder | null>(null);
@@ -385,7 +415,16 @@ export const LiveCameraModal: React.FC = () => {
             }
 
             if (isLiveVideoReady && video) {
-              renderLiveSegmentedBackground(ctx, video, vw, vh, activeBgImg, bgColor, isMirrored);
+              renderLiveSegmentedBackground(
+                ctx,
+                video,
+                vw,
+                vh,
+                activeBgImg,
+                bgColor,
+                isMirrored,
+                lastTrackedBoxRef.current
+              );
             } else {
               // Simulated feed with background replacement
               if (activeBgImg) {
@@ -459,6 +498,7 @@ export const LiveCameraModal: React.FC = () => {
             timestamp,
             motionSmoothingVal
           );
+          lastTrackedBoxRef.current = trackedFace.box;
 
           const useTrackedBox = autoRefocusEnabled && isLiveVideoReady;
           const rawFaceW = useTrackedBox
@@ -491,6 +531,24 @@ export const LiveCameraModal: React.FC = () => {
           const cx = smoothedPose.cx;
           const cy = smoothedPose.cy;
           const smoothedRotation = smoothedPose.rotation;
+
+          // Live anthropometric torso & shoulder tracking below chin
+          if (!bodyTrackerRef.current) {
+            bodyTrackerRef.current = new LiveBodyTracker();
+          }
+          const bodyTrack = bodyTrackerRef.current.update(
+            video,
+            isLiveVideoReady,
+            isMirrored,
+            trackedFace.box,
+            cx,
+            cy,
+            baseFaceW,
+            baseFaceH,
+            smoothedRotation,
+            timestamp
+          );
+          const liveLandmarks: BodyLandmarks = bodyTrack.landmarks;
 
           // 2. LIVE FACIAL & BODY UNWANTED HAIR / BLEMISH REMOVAL (Motion-Adaptive Throttling)
           const shouldRunHairPass =
@@ -592,9 +650,9 @@ export const LiveCameraModal: React.FC = () => {
             );
             const filterHue = config.hue ?? adjustments.hue ?? 0;
             const blurSoftPx = qualityProfile.useFilterBlur
-              ? ((config.skinSmoothing ?? 0) / 100) * 1.4 * renderScale
+              ? ((config.skinSmoothing ?? 0) / 100) * 0.85 * renderScale
               : 0;
-            const liveColorFilter = `brightness(${filterBrightness.toFixed(2)}) contrast(${filterContrast.toFixed(2)}) saturate(${filterSaturate.toFixed(2)})${Math.abs(filterHue) >= 0.5 ? ` hue-rotate(${filterHue.toFixed(1)}deg)` : ''}${blurSoftPx > 0.05 ? ` blur(${blurSoftPx.toFixed(2)}px)` : ''}`;
+            const liveColorFilter = `brightness(${filterBrightness.toFixed(2)}) contrast(${(filterContrast * 1.04).toFixed(2)}) saturate(${filterSaturate.toFixed(2)})${Math.abs(filterHue) >= 0.5 ? ` hue-rotate(${filterHue.toFixed(1)}deg)` : ''}${blurSoftPx > 0.05 ? ` blur(${blurSoftPx.toFixed(2)}px)` : ''}`;
 
             const expressionFactor = config.expressionWarp / 100;
             const smileExpand = expressionFactor * 0.14;
@@ -825,12 +883,13 @@ export const LiveCameraModal: React.FC = () => {
                   Math.min(0.45, (config.featherRadius / 50) * (0.35 + softNorm * 0.85))
                 );
                 if (antiAliasingEnabled || softNorm > 0.02) {
-                  const rInner = Math.max(2, rOuter * (1 - featherNorm));
-                  const aaGrad = mCtx.createRadialGradient(0, 0, rInner, 0, 0, rOuter);
+                  const rInner = Math.max(2, rOuter * (1 - featherNorm * 0.88));
+                  const aaGrad = mCtx.createRadialGradient(0, 0, rInner * 0.65, 0, 0, rOuter);
                   aaGrad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+                  aaGrad.addColorStop(0.55, 'rgba(255, 255, 255, 1)');
                   aaGrad.addColorStop(
-                    0.6,
-                    `rgba(255, 255, 255, ${(0.92 - softNorm * 0.18).toFixed(2)})`
+                    0.82,
+                    `rgba(255, 255, 255, ${(0.84 - softNorm * 0.16).toFixed(2)})`
                   );
                   aaGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
                   mCtx.fillStyle = aaGrad;
@@ -957,46 +1016,183 @@ export const LiveCameraModal: React.FC = () => {
             ctx.restore();
           }
 
-          // 4. LIVE CLOTHING & GARMENT PLACEMENT (Anchor-Aware Mesh Sway & Dynamic Aspect Ratio)
+          // 4. LIVE BODY-FITTED CLOTHING & STRETCHING VERLET CLOTH MESH
           if (config.wearClothes) {
-            const clothingAsset = wardrobeAssets.find((a) => a.id === config.selectedClothingId) || wardrobeAssets.find((a) => a.category === 'clothing');
+            const clothingAsset =
+              wardrobeAssets.find((a) => a.id === config.selectedClothingId) ||
+              wardrobeAssets.find((a) => a.category === 'clothing');
             const clothingImg = clothingAsset ? cachedWardrobeImages[clothingAsset.id] : null;
 
             if (clothingImg && clothingAsset) {
               ctx.save();
+              const fit = clothFitRef.current;
               const liveTime = timestamp / 1000;
-              const liveBreathing = Math.sin(liveTime * 1.8) * 3 * renderScale;
-              const liveHemSway = Math.sin(liveTime * 2.3) * (clothingAsset.fabricType === 'silk' ? 4.5 : 2.0) * renderScale;
               const cImgW = clothingImg.naturalWidth || clothingImg.width || 1;
               const cImgH = clothingImg.naturalHeight || clothingImg.height || 1;
-
               const scaleMultiplier = clothingAsset.defaultScale || 1.0;
-              const isChestTop = clothingAsset.anchorPoint === 'chest';
-              const isWaistGarment = clothingAsset.anchorPoint === 'waist';
-              const garmentW = baseFaceW * (isChestTop ? 1.85 : isWaistGarment ? 2.1 : 2.35) * scaleMultiplier;
-              const garmentH = garmentW * (cImgH / cImgW);
-              const garmentX = cx + liveHemSway * 0.5;
-              const garmentY = isWaistGarment
-                ? cy + baseFaceH * 1.35 + liveBreathing * 0.4
-                : isChestTop
-                ? cy + baseFaceH * 0.72 + liveBreathing * 0.5
-                : cy + baseFaceH * 0.42 + liveBreathing * 0.5;
 
-              ctx.translate(garmentX, garmentY);
-              ctx.rotate(((config.rotation * 0.4 + (liveHemSway / (renderScale || 1)) * 0.3) * Math.PI) / 180);
+              const tagId = String(clothingAsset.clothingTag || clothingAsset.subCategory || 'shirt').toLowerCase();
+              const anchorMode: 'shoulders' | 'chest' | 'waist' =
+                clothingAsset.anchorPoint === 'waist' || tagId === 'skirt' || tagId === 'pants'
+                  ? 'waist'
+                  : clothingAsset.anchorPoint === 'chest' || tagId === 'bikini'
+                  ? 'chest'
+                  : 'shoulders';
 
-              if (qualityProfile.useDropShadows) {
-                ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-                ctx.shadowBlur = 16 * renderScale;
-                ctx.shadowOffsetY = 8 * renderScale;
+              const baseAnchorL =
+                anchorMode === 'waist'
+                  ? liveLandmarks.leftWaist
+                  : anchorMode === 'chest'
+                  ? liveLandmarks.leftChest
+                  : liveLandmarks.leftShoulder;
+              const baseAnchorR =
+                anchorMode === 'waist'
+                  ? liveLandmarks.rightWaist
+                  : anchorMode === 'chest'
+                  ? liveLandmarks.rightChest
+                  : liveLandmarks.rightShoulder;
+
+              const anchorVecX = baseAnchorR.x - baseAnchorL.x;
+              const anchorVecY = baseAnchorR.y - baseAnchorL.y;
+              const rawSpan = Math.max(24, Math.hypot(anchorVecX, anchorVecY));
+              const ux = anchorVecX / rawSpan;
+              const uy = anchorVecY / rawSpan;
+
+              const widthMult =
+                anchorMode === 'waist' ? 1.32 : anchorMode === 'chest' ? 1.18 : 1.36;
+              const targetGarmentW = rawSpan * widthMult * scaleMultiplier * fit.stretch;
+              const targetGarmentH = Math.min(vh * 0.9, targetGarmentW * (cImgH / cImgW));
+
+              const midX = (baseAnchorL.x + baseAnchorR.x) * 0.5;
+              const midY = (baseAnchorL.y + baseAnchorR.y) * 0.5 + fit.collarOffset * renderScale;
+              const halfSpanScaled = rawSpan * 0.5 * scaleMultiplier * fit.stretch;
+              const adjustedAnchorL = {
+                x: midX - ux * halfSpanScaled,
+                y: midY - uy * halfSpanScaled,
+              };
+              const adjustedAnchorR = {
+                x: midX + ux * halfSpanScaled,
+                y: midY + uy * halfSpanScaled,
+              };
+
+              const cols = qualityProfile.qualityMode === 'light' ? 6 : 8;
+              const rows = qualityProfile.qualityMode === 'light' ? 7 : 9;
+              const existing = liveClothMeshRef.current;
+              const needsRebuild =
+                !existing ||
+                existing.assetId !== clothingAsset.id ||
+                existing.anchorMode !== anchorMode ||
+                Math.abs(existing.mesh.fitTightness - fit.tightness) > 3 ||
+                Math.abs(existing.mesh.width - targetGarmentW) > targetGarmentW * 0.25 ||
+                Math.abs(existing.mesh.height - targetGarmentH) > targetGarmentH * 0.25;
+
+              let activeMesh: ClothMeshState;
+              if (needsRebuild || !existing) {
+                const startY =
+                  anchorMode === 'waist'
+                    ? midY - targetGarmentH * 0.04
+                    : anchorMode === 'chest'
+                    ? midY - targetGarmentH * 0.14
+                    : midY;
+                activeMesh = createClothGrid(
+                  midX,
+                  startY,
+                  targetGarmentW,
+                  targetGarmentH,
+                  cols,
+                  rows,
+                  halfSpanScaled * 2,
+                  tagId,
+                  fit.tightness,
+                  anchorMode
+                );
+                liveClothMeshRef.current = {
+                  assetId: clothingAsset.id,
+                  anchorMode,
+                  mesh: activeMesh,
+                };
+              } else {
+                // Smoothly stretch rest dimensions & horizontal spring spans as user moves closer/farther
+                const prevW = existing.mesh.width || targetGarmentW;
+                const nextW = prevW * 0.8 + targetGarmentW * 0.2;
+                const scaleW = nextW / prevW;
+                if (Math.abs(scaleW - 1) > 0.002) {
+                  for (let s = 0; s < existing.mesh.springs.length; s++) {
+                    const sp = existing.mesh.springs[s];
+                    const p1 = existing.mesh.particles[sp.p1];
+                    const p2 = existing.mesh.particles[sp.p2];
+                    if (Math.abs(p1.u - p2.u) > 0.01 && Math.abs(p1.v - p2.v) < 0.01) {
+                      sp.restLength *= scaleW;
+                    }
+                  }
+                }
+                existing.mesh.width = nextW;
+                existing.mesh.height = existing.mesh.height * 0.8 + targetGarmentH * 0.2;
+                activeMesh = existing.mesh;
+              }
+              const liveWind = {
+                x: Math.sin(liveTime * 1.45) * 0.45,
+                y: Math.cos(liveTime * 1.8) * 0.12,
+              };
+              const liveColliders = buildBodyCollisionMesh(
+                liveLandmarks,
+                bodyTrack.breathingChestPx
+              );
+
+              stepClothMesh(
+                activeMesh,
+                {
+                  ...DEFAULT_CLOTH_CONFIG,
+                  fabricType: clothingAsset.fabricType || 'cotton',
+                  gravity: anchorMode === 'waist' ? 0.62 : 0.48,
+                  windStrength: 0.6,
+                  windTurbulence: 0.25,
+                  stiffness: 5,
+                  damping: 0.92,
+                  postureTurn: bodyTrack.torsoTurnDeg,
+                  chestExpansion: bodyTrack.breathingChestPx,
+                },
+                adjustedAnchorL,
+                adjustedAnchorR,
+                liveLandmarks,
+                liveWind,
+                bodyTrack.breathingChestPx,
+                liveColliders
+              );
+
+              // Enforce clean chin & neck cutout clearance so shoulder garments wear naturally below the jaw
+              if (anchorMode !== 'waist') {
+                ctx.beginPath();
+                ctx.rect(0, 0, vw, vh);
+                ctx.ellipse(
+                  cx,
+                  cy + baseFaceH * 0.05,
+                  baseFaceW * 0.52,
+                  baseFaceH * 0.56,
+                  (smoothedRotation * Math.PI) / 180,
+                  0,
+                  Math.PI * 2
+                );
+                ctx.clip('evenodd');
               }
 
-              ctx.drawImage(clothingImg, -garmentW / 2, 0, garmentW, garmentH);
+              if (qualityProfile.useDropShadows) {
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.38)';
+                ctx.shadowBlur = 12 * renderScale;
+                ctx.shadowOffsetY = 5 * renderScale;
+              }
+
+              const materialSurface =
+                qualityProfile.qualityMode === 'high'
+                  ? getDefaultMaterialSurface(clothingAsset.fabricType || 'cotton')
+                  : undefined;
+
+              renderClothMesh(ctx, clothingImg, activeMesh, false, false, materialSurface);
               ctx.restore();
             }
           }
 
-          // 5. LIVE JEWELRY, OBJECT & ACCESSORY PLACEMENT (Pendulum Swing & Landmark Anchoring)
+          // 5. LIVE JEWELRY, OBJECT & ACCESSORY PLACEMENT (Pendulum Swing & Anatomical Landmark Anchoring)
           if (config.wearJewelry) {
             const jewelryAsset =
               wardrobeAssets.find((a) => a.id === config.selectedJewelryId) ||
@@ -1025,7 +1221,9 @@ export const LiveCameraModal: React.FC = () => {
               } else if (jewelryAsset.anchorPoint === 'wrist') {
                 const wristW = baseFaceW * 0.6 * scaleMultiplier;
                 const wristH = wristW * (jImgH / jImgW);
-                ctx.translate(cx - baseFaceW * 0.85, cy + baseFaceH * 0.9);
+                const wristX = Math.max(wristW * 0.4, liveLandmarks.leftWrist.x);
+                const wristY = Math.min(vh - wristH * 0.35, liveLandmarks.leftWrist.y);
+                ctx.translate(wristX, wristY);
                 ctx.drawImage(jewelryImg, -wristW / 2, -wristH / 2, wristW, wristH);
               } else if (jewelryAsset.anchorPoint === 'ears') {
                 const earW = baseFaceW * 0.25 * scaleMultiplier;
@@ -1033,12 +1231,12 @@ export const LiveCameraModal: React.FC = () => {
                 ctx.drawImage(jewelryImg, cx - baseFaceW * 0.56 - earW / 2, cy + baseFaceH * 0.04, earW, earH);
                 ctx.drawImage(jewelryImg, cx + baseFaceW * 0.56 - earW / 2, cy + baseFaceH * 0.04, earW, earH);
               } else {
-                // Neck / Collarbone with dynamic pendulum physics swing
-                const jewelryW = baseFaceW * 0.95 * scaleMultiplier;
+                // Collarbone / Throat anchor (below chin) with subtle pendulum sway
+                const jewelryW = baseFaceW * 0.92 * scaleMultiplier;
                 const jewelryH = jewelryW * (jImgH / jImgW);
-                const pendSwing = Math.sin(liveTime * 3.2) * 0.04;
-                const jewelryX = cx + Math.sin(liveTime * 3.2) * 3 * renderScale;
-                const jewelryY = cy + baseFaceH * 0.47;
+                const pendSwing = Math.sin(liveTime * 3.0) * 0.03;
+                const jewelryX = liveLandmarks.throat.x + Math.sin(liveTime * 3.0) * 2.5 * renderScale;
+                const jewelryY = liveLandmarks.throat.y;
 
                 ctx.translate(jewelryX, jewelryY);
                 ctx.rotate(((config.rotation * 0.2) * Math.PI) / 180 + pendSwing);
@@ -1788,6 +1986,71 @@ export const LiveCameraModal: React.FC = () => {
                       </button>
                     );
                   })}
+              </div>
+            </div>
+
+            {/* Body Fit & Stretch Calibration */}
+            <div className="pt-2 border-t border-slate-800/80 space-y-2">
+              <div className="flex items-center justify-between text-[11px] text-slate-300">
+                <span className="font-semibold">Live Body Fit &amp; Stretch</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClothFitStretch(1.0);
+                    setClothCollarOffset(0);
+                    setClothFitTightness(42);
+                  }}
+                  className="text-[10px] text-indigo-400 hover:text-indigo-300 whitespace-nowrap"
+                >
+                  Reset Fit
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-0.5">
+                    <span>Width Fit</span>
+                    <span className="font-mono text-purple-300 tabular-nums">{Math.round(clothFitStretch * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.78"
+                    max="1.32"
+                    step="0.02"
+                    value={clothFitStretch}
+                    onChange={(e) => setClothFitStretch(Number(e.target.value))}
+                    className="w-full accent-purple-500 h-1 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-0.5">
+                    <span>Collar Drop</span>
+                    <span className="font-mono text-purple-300 tabular-nums">{clothCollarOffset > 0 ? `+${clothCollarOffset}` : clothCollarOffset}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="-24"
+                    max="28"
+                    step="2"
+                    value={clothCollarOffset}
+                    onChange={(e) => setClothCollarOffset(Number(e.target.value))}
+                    className="w-full accent-purple-500 h-1 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-0.5">
+                    <span>Body Hug</span>
+                    <span className="font-mono text-purple-300 tabular-nums">{clothFitTightness}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="12"
+                    max="88"
+                    step="2"
+                    value={clothFitTightness}
+                    onChange={(e) => setClothFitTightness(Number(e.target.value))}
+                    className="w-full accent-purple-500 h-1 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
               </div>
             </div>
           </div>

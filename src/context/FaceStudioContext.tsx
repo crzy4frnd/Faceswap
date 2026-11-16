@@ -74,6 +74,8 @@ interface FaceStudioContextType {
   addFaceProfile: (profile: FaceProfile) => void;
   addFaceFromDataUrl: (dataUrl: string, customName?: string, sourceTag?: string) => Promise<FaceProfile | null>;
   removeFaceProfile: (id: string) => void;
+  getProfileImage: (profileId: string) => HTMLImageElement | null;
+  profileImagesVersion: number;
 
   // Adjustments & Engine
   adjustments: FaceAdjustments;
@@ -185,6 +187,12 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   // Cached profile HTMLImageElements for fast real-time canvas rendering
   const profileImagesCacheRef = useRef<Record<string, HTMLImageElement>>({});
+  const [profileImagesVersion, setProfileImagesVersion] = useState(0);
+
+  const getProfileImage = useCallback(
+    (profileId: string) => profileImagesCacheRef.current[profileId] || null,
+    []
+  );
 
   useEffect(() => {
     try {
@@ -198,6 +206,7 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         loadImage(p.fullImageUrl)
           .then((img) => {
             profileImagesCacheRef.current[p.id] = img;
+            setProfileImagesVersion((v) => v + 1);
           })
           .catch(() => {});
       }
@@ -340,6 +349,7 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           if (prof) {
             const img = await loadImage(prof.fullImageUrl);
             profileImagesCacheRef.current[face.assignedProfileId] = img;
+            setProfileImagesVersion((v) => v + 1);
           }
         } catch {
           // ignore
@@ -536,6 +546,7 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         };
 
         profileImagesCacheRef.current[newProfile.id] = img;
+        setProfileImagesVersion((v) => v + 1);
         setProfiles((prev) => [newProfile, ...prev]);
         setActiveProfileId(newProfile.id);
 
@@ -727,6 +738,7 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         try {
           sourceImg = await loadImage(profile.fullImageUrl);
           profileImagesCacheRef.current[profile.id] = sourceImg;
+          setProfileImagesVersion((v) => v + 1);
         } catch {
           return null;
         }
@@ -790,6 +802,7 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         try {
           sourceImg = await loadImage(profile.fullImageUrl);
           profileImagesCacheRef.current[profile.id] = sourceImg;
+          setProfileImagesVersion((v) => v + 1);
         } catch {
           return null;
         }
@@ -1333,6 +1346,8 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         addFaceProfile,
         addFaceFromDataUrl,
         removeFaceProfile,
+        getProfileImage,
+        profileImagesVersion,
         adjustments,
         updateAdjustments,
         resetAdjustments,

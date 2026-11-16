@@ -1,6 +1,8 @@
 import loftBgUrl from '../assets/images/bg_studio_loft_1794418283525.jpg';
 import neonBgUrl from '../assets/images/bg_cyberpunk_neon_1794418296547.jpg';
 import sunsetBgUrl from '../assets/images/bg_sunset_terrace_1794418316494.jpg';
+import { BodyLandmarks } from '../types/body';
+import { Point } from '../types/face';
 
 export interface VirtualBackground {
   id: 'studio' | 'neon' | 'sunset' | 'green' | 'none';
@@ -53,7 +55,8 @@ export function renderLiveSegmentedBackground(
   vh: number,
   bgImg: HTMLImageElement | null,
   bgColor?: string,
-  isMirrored: boolean = false
+  isMirrored: boolean = false,
+  trackedBox?: NormalizedFaceBox
 ) {
   // 1. Draw Virtual Background first
   if (bgImg && bgImg.complete && bgImg.naturalWidth > 0) {
@@ -67,24 +70,29 @@ export function renderLiveSegmentedBackground(
     ctx.fillRect(0, 0, vw, vh);
   }
 
-  // 2. Offscreen Matte / Mask for human subject (Head + Neck + Torso)
-  // Human body follows an anatomical silhouette centered horizontally
+  // 2. Offscreen Matte / Mask for human subject (Tracked Head + Neck + Shoulders/Torso)
   ctx.save();
 
-  // Create human body silhouette clipping mask
-  const headW = vw * 0.36;
-  const headH = headW * 1.35;
-  const headCX = vw / 2;
-  const headCY = vh * 0.38;
+  const headW = trackedBox
+    ? Math.max(vw * 0.24, vw * trackedBox.width * 1.18)
+    : vw * 0.36;
+  const headH = trackedBox
+    ? Math.max(headW * 1.28, vh * trackedBox.height * 1.14)
+    : headW * 1.35;
+  const headCX = trackedBox ? vw * trackedBox.cx : vw / 2;
+  const headCY = trackedBox ? vh * trackedBox.cy : vh * 0.38;
 
-  const shoulderW = vw * 0.82;
-  const shoulderH = vh * 0.65;
-  const shoulderCX = vw / 2;
-  const shoulderCY = vh * 0.88;
+  const chinY = headCY + headH * 0.45;
+  const shoulderW = Math.min(vw * 0.96, Math.max(vw * 0.56, headW * 2.55));
+  const shoulderH = Math.max(vh * 0.55, (vh - chinY) * 1.18);
+  const shoulderCX = headCX;
+  const shoulderCY = chinY + shoulderH * 0.46;
 
   ctx.beginPath();
-  // Torso / Shoulders mass
+  // Torso / Shoulders mass anchored dynamically under tracked head
   ctx.ellipse(shoulderCX, shoulderCY, shoulderW / 2, shoulderH / 2, 0, 0, Math.PI * 2);
+  // Neck column bridge
+  ctx.rect(headCX - headW * 0.22, headCY, headW * 0.44, chinY - headCY + headH * 0.26);
   // Head & Neck mass
   ctx.ellipse(headCX, headCY, headW / 2, headH / 2, 0, 0, Math.PI * 2);
   ctx.clip();
@@ -104,14 +112,14 @@ export function renderLiveSegmentedBackground(
   ctx.save();
   const edgeGradient = ctx.createRadialGradient(
     headCX,
-    headCY + 40,
-    headW * 0.55,
+    headCY + headH * 0.2,
+    headW * 0.58,
     headCX,
-    headCY + 40,
-    headW * 1.15
+    headCY + headH * 0.2,
+    headW * 1.25
   );
   edgeGradient.addColorStop(0, 'rgba(0,0,0,0)');
-  edgeGradient.addColorStop(1, 'rgba(0,0,0,0.18)');
+  edgeGradient.addColorStop(1, 'rgba(0,0,0,0.16)');
   ctx.fillStyle = edgeGradient;
   ctx.fillRect(0, 0, vw, vh);
   ctx.restore();
@@ -843,6 +851,299 @@ export class TemporalMotionSmoother {
     this.hasPrevFrame = true;
   }
 }
+
+export interface LiveBodyTrackingResult {
+  landmarks: BodyLandmarks;
+  shoulderSpan: number;
+  torsoTurnDeg: number;
+  breathingChestPx: number;
+}
+
+/**
+ * Real-time anthropometric & optical torso/shoulder contour tracker for Live Camera AR wardrobe fitting.
+ * Samples the live camera feed below the tracked face box to measure left/right shoulder edges,
+ * neck clearance below chin, torso center shift, and 2.5D yaw asymmetry so garments fit the body
+ * below the collarbone/shoulders and stretch dynamically as the user moves or leans.
+ */
+export class LiveBodyTracker {
+  private readonly sampleW = 80;
+  private readonly sampleH = 60;
+  private canvas: HTMLCanvasElement | null = null;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private frameCount = 0;
+
+  // Exponentially smoothed anthropometric state (normalized relative to face width/height)
+  private leftShoulderRatio = 1.14; // half-span / faceW
+  private rightShoulderRatio = 1.14;
+  private neckDropRatio = 0.34; // vertical drop from chin to shoulder seam / faceH
+  private torsoOffsetRatio = 0; // horizontal offset from head cx / faceW
+  private smoothRollDeg = 0;
+
+  private ensureContext(): CanvasRenderingContext2D | null {
+    if (typeof document === 'undefined') return null;
+    if (!this.canvas) {
+      this.canvas = document.createElement('canvas');
+      this.canvas.width = this.sampleW;
+      this.canvas.height = this.sampleH;
+      this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    }
+    return this.ctx;
+  }
+
+  public reset(): void {
+    this.leftShoulderRatio = 1.14;
+    this.rightShoulderRatio = 1.14;
+    this.neckDropRatio = 0.34;
+    this.torsoOffsetRatio = 0;
+    this.smoothRollDeg = 0;
+    this.frameCount = 0;
+  }
+
+  private sampleLiveShoulders(
+    video: HTMLVideoElement,
+    isMirrored: boolean,
+    faceBox: NormalizedFaceBox
+  ): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    try {
+      ctx.save();
+      ctx.clearRect(0, 0, this.sampleW, this.sampleH);
+      if (isMirrored) {
+        ctx.translate(this.sampleW, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(video, 0, 0, this.sampleW, this.sampleH);
+      ctx.restore();
+
+      const data = ctx.getImageData(0, 0, this.sampleW, this.sampleH).data;
+      const w = this.sampleW;
+      const h = this.sampleH;
+
+      const fCx = faceBox.cx * w;
+      const fW = Math.max(8, faceBox.width * w);
+      const fH = Math.max(10, faceBox.height * h);
+      const chinY = faceBox.cy * h + fH * 0.46;
+
+      if (chinY >= h - 4) return;
+
+      // Estimate top-corner background swatch on the left and right edges
+      const samplePatchAvg = (x0: number, y0: number, pw: number, ph: number) => {
+        let sr = 0;
+        let sg = 0;
+        let sb = 0;
+        let cnt = 0;
+        for (let yy = y0; yy < Math.min(h, y0 + ph); yy++) {
+          for (let xx = x0; xx < Math.min(w, x0 + pw); xx++) {
+            const i = (yy * w + xx) * 4;
+            sr += data[i];
+            sg += data[i + 1];
+            sb += data[i + 2];
+            cnt++;
+          }
+        }
+        return cnt > 0 ? [sr / cnt, sg / cnt, sb / cnt] : [128, 128, 128];
+      };
+
+      const bgLeft = samplePatchAvg(1, 2, 5, 8);
+      const bgRight = samplePatchAvg(w - 6, 2, 5, 8);
+
+      // 1. Scan vertical column down the center below chin to locate skin-neck -> garment collar transition
+      const cxInt = Math.max(2, Math.min(w - 3, Math.round(fCx)));
+      let neckDropPx = fH * 0.34;
+      const maxNeckScanY = Math.min(h - 2, Math.round(chinY + fH * 0.58));
+      const minNeckScanY = Math.max(0, Math.round(chinY + fH * 0.16));
+
+      for (let y = minNeckScanY; y <= maxNeckScanY; y++) {
+        let skinHits = 0;
+        for (let dx = -1; dx <= 1; dx++) {
+          const idx = (y * w + (cxInt + dx)) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+          const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+          if (r > 50 && cb >= 75 && cb <= 130 && cr >= 132 && cr <= 178) {
+            skinHits++;
+          }
+        }
+        // As soon as vertical scan leaves bare throat into clothing collar/chest edge
+        if (skinHits === 0) {
+          neckDropPx = Math.max(fH * 0.28, y - chinY);
+          break;
+        }
+      }
+
+      const rawNeckDrop = Math.max(0.28, Math.min(0.46, neckDropPx / fH));
+      this.neckDropRatio = this.neckDropRatio * 0.8 + rawNeckDrop * 0.2;
+
+      // 2. Scan outward left & right along shoulder seam & upper chest to measure true shoulder width
+      const seamY1 = Math.min(h - 2, Math.max(0, Math.round(chinY + this.neckDropRatio * fH)));
+      const seamY2 = Math.min(h - 2, Math.max(0, Math.round(seamY1 + fH * 0.12)));
+
+      const scanShoulderEdge = (dir: -1 | 1, bgColor: number[]) => {
+        const startX = Math.max(1, Math.min(w - 2, cxInt));
+        const maxSteps = Math.round(fW * 1.55);
+        const minSteps = Math.round(fW * 0.85);
+        let bestEdge = fW * 1.12;
+
+        // Reference core torso color slightly below collar
+        const refIdx = (seamY2 * w + startX) * 4;
+        const refR = data[refIdx];
+        const refG = data[refIdx + 1];
+        const refB = data[refIdx + 2];
+
+        for (let step = minSteps; step <= maxSteps; step++) {
+          const sx = startX + dir * step;
+          if (sx <= 1 || sx >= w - 2) {
+            bestEdge = step;
+            break;
+          }
+          const idx1 = (seamY1 * w + sx) * 4;
+          const idxPrev = (seamY1 * w + (sx - dir)) * 4;
+
+          const bgDist = Math.hypot(
+            data[idx1] - bgColor[0],
+            data[idx1 + 1] - bgColor[1],
+            data[idx1 + 2] - bgColor[2]
+          );
+          const torsoDist = Math.hypot(
+            data[idx1] - refR,
+            data[idx1 + 1] - refG,
+            data[idx1 + 2] - refB
+          );
+          const edgeJump =
+            Math.abs(data[idx1] - data[idxPrev]) +
+            Math.abs(data[idx1 + 1] - data[idxPrev + 1]) +
+            Math.abs(data[idx1 + 2] - data[idxPrev + 2]);
+
+          // Silhouette transition: pixel matches corner background closely OR strong vertical outer contour gradient
+          if ((bgDist < 34 && torsoDist > 26) || (edgeJump > 52 && step >= fW * 0.96)) {
+            bestEdge = step;
+            break;
+          }
+        }
+        return Math.max(0.9, Math.min(1.48, bestEdge / fW));
+      };
+
+      const measuredL = scanShoulderEdge(-1, bgLeft);
+      const measuredR = scanShoulderEdge(1, bgRight);
+
+      // Gentle exponential damping so shoulders stretch fluidly without micro-twitch
+      this.leftShoulderRatio = this.leftShoulderRatio * 0.82 + measuredL * 0.18;
+      this.rightShoulderRatio = this.rightShoulderRatio * 0.82 + measuredR * 0.18;
+
+      const asym = (this.rightShoulderRatio - this.leftShoulderRatio) * 0.5;
+      this.torsoOffsetRatio = this.torsoOffsetRatio * 0.84 + asym * 0.16;
+    } catch {
+      // Fallback smoothly to previous ratios
+    }
+  }
+
+  public update(
+    video: HTMLVideoElement | null,
+    isLiveVideoReady: boolean,
+    isMirrored: boolean,
+    faceBox: NormalizedFaceBox,
+    cx: number,
+    cy: number,
+    faceW: number,
+    faceH: number,
+    headRollDeg: number,
+    timestampMs: number
+  ): LiveBodyTrackingResult {
+    this.frameCount++;
+    if (isLiveVideoReady && video && this.frameCount % 3 === 1) {
+      this.sampleLiveShoulders(video, isMirrored, faceBox);
+    }
+
+    // Dampen head roll into subtle shoulder roll (shoulders tilt ~38% of head tilt naturally)
+    const targetRoll = headRollDeg * 0.38;
+    this.smoothRollDeg = this.smoothRollDeg * 0.78 + targetRoll * 0.22;
+    const rollRad = (this.smoothRollDeg * Math.PI) / 180;
+    const cosR = Math.cos(rollRad);
+    const sinR = Math.sin(rollRad);
+
+    // Subtle breathing phase (0..1 cycle)
+    const tSec = timestampMs / 1000;
+    const breatheSin = Math.sin(tSec * 1.75);
+    const breathingChestPx = (breatheSin * 0.5 + 0.5) * Math.max(2, faceW * 0.032);
+
+    // Core anatomical coordinates strictly anchored below chin so clothes NEVER cover neck/chin
+    const chinY = cy + faceH * 0.48;
+    const neckY = chinY + faceH * 0.13;
+    const throatY = chinY + faceH * 0.23;
+
+    // Shoulder seam drops below chin by anatomical neck proportion
+    const shoulderMidX = cx + this.torsoOffsetRatio * faceW;
+    const shoulderMidY = chinY + faceH * this.neckDropRatio;
+
+    const halfLeft = faceW * this.leftShoulderRatio;
+    const halfRight = faceW * this.rightShoulderRatio;
+    const shoulderSpan = halfLeft + halfRight;
+    const waistHalfSpan = shoulderSpan * 0.41;
+    const chestHalfSpan = shoulderSpan * 0.45 + breathingChestPx * 0.35;
+    const hipHalfSpan = shoulderSpan * 0.46;
+
+    const rotateFromShoulder = (dx: number, dy: number): Point => ({
+      x: shoulderMidX + dx * cosR - dy * sinR,
+      y: shoulderMidY + dx * sinR + dy * cosR,
+    });
+
+    // Slight natural downward trapezius slope from neck to acromion tip
+    const trapDrop = shoulderSpan * 0.045;
+    const sternumDrop = shoulderSpan * 0.24;
+    const chestDrop = shoulderSpan * 0.28;
+    const waistDrop = shoulderSpan * 0.72;
+    const navelDrop = shoulderSpan * 0.76;
+    const hipDrop = shoulderSpan * 1.05;
+    const elbowDrop = shoulderSpan * 0.56;
+    const wristDrop = shoulderSpan * 0.98;
+
+    const leftShoulder = rotateFromShoulder(-halfLeft, trapDrop);
+    const rightShoulder = rotateFromShoulder(halfRight, trapDrop);
+    const leftChest = rotateFromShoulder(-chestHalfSpan, chestDrop);
+    const rightChest = rotateFromShoulder(chestHalfSpan, chestDrop);
+    const leftWaist = rotateFromShoulder(-waistHalfSpan, waistDrop);
+    const rightWaist = rotateFromShoulder(waistHalfSpan, waistDrop);
+    const leftHip = rotateFromShoulder(-hipHalfSpan, hipDrop);
+    const rightHip = rotateFromShoulder(hipHalfSpan, hipDrop);
+
+    const torsoTurnDeg = Math.max(
+      -18,
+      Math.min(18, (this.rightShoulderRatio - this.leftShoulderRatio) * 32)
+    );
+
+    const landmarks: BodyLandmarks = {
+      nose: { x: cx, y: cy + faceH * 0.05 },
+      neck: { x: cx + this.torsoOffsetRatio * faceW * 0.35, y: neckY },
+      throat: { x: cx + this.torsoOffsetRatio * faceW * 0.6, y: throatY },
+      leftShoulder,
+      rightShoulder,
+      sternum: rotateFromShoulder(0, sternumDrop),
+      leftChest,
+      rightChest,
+      leftWaist,
+      rightWaist,
+      navel: rotateFromShoulder(0, navelDrop),
+      leftHip,
+      rightHip,
+      leftElbow: rotateFromShoulder(-halfLeft * 1.12, elbowDrop),
+      rightElbow: rotateFromShoulder(halfRight * 1.12, elbowDrop),
+      leftWrist: rotateFromShoulder(-halfLeft * 1.18, wristDrop),
+      rightWrist: rotateFromShoulder(halfRight * 1.18, wristDrop),
+    };
+
+    return {
+      landmarks,
+      shoulderSpan,
+      torsoTurnDeg,
+      breathingChestPx,
+    };
+  }
+}
+
 
 
 

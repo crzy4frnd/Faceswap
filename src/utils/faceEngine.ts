@@ -665,69 +665,101 @@ export function applySkinToneColorMatch(
 ): ImageData {
   const sData = sourceImageData.data;
   const tData = targetImageData.data;
+  const w = sourceImageData.width;
+  const h = sourceImageData.height;
+  const tw = targetImageData.width;
+  const th = targetImageData.height;
 
-  // Calculate mean and std dev for target
-  let tRSum = 0, tGSum = 0, tBSum = 0;
-  let tCount = 0;
-  for (let i = 0; i < tData.length; i += 4) {
-    if (tData[i + 3] > 60) {
-      tRSum += tData[i];
-      tGSum += tData[i + 1];
-      tBSum += tData[i + 2];
-      tCount++;
+  const isInnerSkin = (data: Uint8ClampedArray, pxW: number, pxH: number, strictSkin: boolean) => {
+    const halfW = pxW * 0.5 || 1;
+    const halfH = pxH * 0.5 || 1;
+    let rSum = 0, gSum = 0, bSum = 0, count = 0;
+    for (let y = 0; y < pxH; y += 2) {
+      const dy = (y - halfH) / halfH;
+      for (let x = 0; x < pxW; x += 2) {
+        const dx = (x - halfW) / halfW;
+        // Focus stats inside the central facial oval (excludes hair, collar, backdrop)
+        if (dx * dx + dy * dy > 0.52) continue;
+        const i = (y * pxW + x) * 4;
+        if (data[i + 3] <= 60) continue;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        if (strictSkin) {
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          if (lum < 38 || lum > 246 || r < g * 0.92 || r < b) continue;
+        }
+        rSum += r;
+        gSum += g;
+        bSum += b;
+        count++;
+      }
+    }
+    return { rSum, gSum, bSum, count };
+  };
+
+  let tStats = isInnerSkin(tData, tw, th, true);
+  if (tStats.count < 40) tStats = isInnerSkin(tData, tw, th, false);
+  if (tStats.count === 0) return sourceImageData;
+
+  const tRMean = tStats.rSum / tStats.count;
+  const tGMean = tStats.gSum / tStats.count;
+  const tBMean = tStats.bSum / tStats.count;
+
+  let tRVar = 0, tGVar = 0, tBVar = 0, tVarCnt = 0;
+  const tHalfW = tw * 0.5 || 1;
+  const tHalfH = th * 0.5 || 1;
+  for (let y = 0; y < th; y += 2) {
+    const dy = (y - tHalfH) / tHalfH;
+    for (let x = 0; x < tw; x += 2) {
+      const dx = (x - tHalfW) / tHalfW;
+      if (dx * dx + dy * dy > 0.52) continue;
+      const i = (y * tw + x) * 4;
+      if (tData[i + 3] > 60) {
+        tRVar += Math.pow(tData[i] - tRMean, 2);
+        tGVar += Math.pow(tData[i + 1] - tGMean, 2);
+        tBVar += Math.pow(tData[i + 2] - tBMean, 2);
+        tVarCnt++;
+      }
     }
   }
-  if (tCount === 0) return sourceImageData;
+  const tRStd = Math.sqrt(tRVar / (tVarCnt || 1)) || 1;
+  const tGStd = Math.sqrt(tGVar / (tVarCnt || 1)) || 1;
+  const tBStd = Math.sqrt(tBVar / (tVarCnt || 1)) || 1;
 
-  const tRMean = tRSum / tCount;
-  const tGMean = tGSum / tCount;
-  const tBMean = tBSum / tCount;
+  let sStats = isInnerSkin(sData, w, h, true);
+  if (sStats.count < 40) sStats = isInnerSkin(sData, w, h, false);
+  if (sStats.count === 0) return sourceImageData;
 
-  let tRVar = 0, tGVar = 0, tBVar = 0;
-  for (let i = 0; i < tData.length; i += 4) {
-    if (tData[i + 3] > 60) {
-      tRVar += Math.pow(tData[i] - tRMean, 2);
-      tGVar += Math.pow(tData[i + 1] - tGMean, 2);
-      tBVar += Math.pow(tData[i + 2] - tBMean, 2);
+  const sRMean = sStats.rSum / sStats.count;
+  const sGMean = sStats.gSum / sStats.count;
+  const sBMean = sStats.bSum / sStats.count;
+
+  let sRVar = 0, sGVar = 0, sBVar = 0, sVarCnt = 0;
+  const sHalfW = w * 0.5 || 1;
+  const sHalfH = h * 0.5 || 1;
+  for (let y = 0; y < h; y += 2) {
+    const dy = (y - sHalfH) / sHalfH;
+    for (let x = 0; x < w; x += 2) {
+      const dx = (x - sHalfW) / sHalfW;
+      if (dx * dx + dy * dy > 0.52) continue;
+      const i = (y * w + x) * 4;
+      if (sData[i + 3] > 60) {
+        sRVar += Math.pow(sData[i] - sRMean, 2);
+        sGVar += Math.pow(sData[i + 1] - sGMean, 2);
+        sBVar += Math.pow(sData[i + 2] - sBMean, 2);
+        sVarCnt++;
+      }
     }
   }
-  const tRStd = Math.sqrt(tRVar / tCount) || 1;
-  const tGStd = Math.sqrt(tGVar / tCount) || 1;
-  const tBStd = Math.sqrt(tBVar / tCount) || 1;
+  const sRStd = Math.sqrt(sRVar / (sVarCnt || 1)) || 1;
+  const sGStd = Math.sqrt(sGVar / (sVarCnt || 1)) || 1;
+  const sBStd = Math.sqrt(sBVar / (sVarCnt || 1)) || 1;
 
-  // Calculate mean and std dev for source
-  let sRSum = 0, sGSum = 0, sBSum = 0;
-  let sCount = 0;
-  for (let i = 0; i < sData.length; i += 4) {
-    if (sData[i + 3] > 60) {
-      sRSum += sData[i];
-      sGSum += sData[i + 1];
-      sBSum += sData[i + 2];
-      sCount++;
-    }
-  }
-  if (sCount === 0) return sourceImageData;
-
-  const sRMean = sRSum / sCount;
-  const sGMean = sGSum / sCount;
-  const sBMean = sBSum / sCount;
-
-  let sRVar = 0, sGVar = 0, sBVar = 0;
-  for (let i = 0; i < sData.length; i += 4) {
-    if (sData[i + 3] > 60) {
-      sRVar += Math.pow(sData[i] - sRMean, 2);
-      sGVar += Math.pow(sData[i + 1] - sGMean, 2);
-      sBVar += Math.pow(sData[i + 2] - sBMean, 2);
-    }
-  }
-  const sRStd = Math.sqrt(sRVar / sCount) || 1;
-  const sGStd = Math.sqrt(sGVar / sCount) || 1;
-  const sBStd = Math.sqrt(sBVar / sCount) || 1;
-
-  // Adjust source pixels toward target tone
-  const rScale = tRStd / sRStd;
-  const gScale = tGStd / sGStd;
-  const bScale = tBStd / sBStd;
+  // Clamp scale factors so source eye/lip/cheek contrast never collapses flat
+  const rScale = Math.max(0.76, Math.min(1.34, tRStd / sRStd));
+  const gScale = Math.max(0.76, Math.min(1.34, tGStd / sGStd));
+  const bScale = Math.max(0.76, Math.min(1.34, tBStd / sBStd));
 
   for (let i = 0; i < sData.length; i += 4) {
     if (sData[i + 3] > 0) {
@@ -739,7 +771,6 @@ export function applySkinToneColorMatch(
       const matchG = (origG - sGMean) * gScale + tGMean;
       const matchB = (origB - sBMean) * bScale + tBMean;
 
-      // Linear interpolation by strength
       sData[i] = Math.min(255, Math.max(0, origR * (1 - strength) + matchR * strength));
       sData[i + 1] = Math.min(255, Math.max(0, origG * (1 - strength) + matchG * strength));
       sData[i + 2] = Math.min(255, Math.max(0, origB * (1 - strength) + matchB * strength));
@@ -839,58 +870,56 @@ export function applyBackgroundLightingMatch(
   const tData = targetPatchData.data;
   const w = sourceImageData.width;
   const h = sourceImageData.height;
+  const halfW = w / 2 || 1;
+  const halfH = h / 2 || 1;
 
-  // 1. Source face luminance mean & contrast
+  // 1. Inner facial oval luminance mean & contrast (exclude hair/backdrop corners)
   let sSum = 0;
   let sSqSum = 0;
   let sCount = 0;
-  for (let i = 0; i < sData.length; i += 4) {
-    if (sData[i + 3] > 40) {
-      const lum = 0.299 * sData[i] + 0.587 * sData[i + 1] + 0.114 * sData[i + 2];
-      sSum += lum;
-      sSqSum += lum * lum;
-      sCount++;
+  let fSum = 0;
+  let fSqSum = 0;
+  let fCount = 0;
+  for (let y = 0; y < h; y += 2) {
+    const dy = (y - halfH) / halfH;
+    for (let x = 0; x < w; x += 2) {
+      const dx = (x - halfW) / halfW;
+      if (dx * dx + dy * dy > 0.54) continue;
+      const i = (y * w + x) * 4;
+      if (sData[i + 3] > 40) {
+        const sLum = 0.299 * sData[i] + 0.587 * sData[i + 1] + 0.114 * sData[i + 2];
+        sSum += sLum;
+        sSqSum += sLum * sLum;
+        sCount++;
+      }
+      if (tData[i + 3] > 40) {
+        const tLum = 0.299 * tData[i] + 0.587 * tData[i + 1] + 0.114 * tData[i + 2];
+        fSum += tLum;
+        fSqSum += tLum * tLum;
+        fCount++;
+      }
     }
   }
   if (sCount === 0) return;
 
   const sMean = sSum / sCount;
   const sVar = Math.max(0, sSqSum / sCount - sMean * sMean);
-  const sStd = Math.max(12, Math.sqrt(sVar));
+  const sStd = Math.max(14, Math.sqrt(sVar));
 
-  // 2. Blend global target background stats with local surrounding face perimeter
-  let pSum = 0;
-  let pSqSum = 0;
-  let pCount = 0;
-  const halfW = w / 2;
-  const halfH = h / 2;
-  for (let y = 0; y < h; y += 2) {
-    const dy = (y - halfH) / (halfH || 1);
-    for (let x = 0; x < w; x += 2) {
-      const dx = (x - halfW) / (halfW || 1);
-      if (dx * dx + dy * dy >= 0.52) {
-        const i = (y * w + x) * 4;
-        const lum = 0.299 * tData[i] + 0.587 * tData[i + 1] + 0.114 * tData[i + 2];
-        pSum += lum;
-        pSqSum += lum * lum;
-        pCount++;
-      }
-    }
-  }
-
+  // 2. Anchor lighting primarily to actual target face illumination + gentle ambient backdrop blend (22%)
   let targetMean = bgStats.meanLum;
   let targetStd = bgStats.stdLum;
-  if (pCount > 24) {
-    const pMean = pSum / pCount;
-    const pStd = Math.max(12, Math.sqrt(Math.max(0, pSqSum / pCount - pMean * pMean)));
-    targetMean = bgStats.meanLum * 0.65 + pMean * 0.35;
-    targetStd = bgStats.stdLum * 0.65 + pStd * 0.35;
+  if (fCount > 24) {
+    const fMean = fSum / fCount;
+    const fStd = Math.max(14, Math.sqrt(Math.max(0, fSqSum / fCount - fMean * fMean)));
+    targetMean = fMean * 0.78 + bgStats.meanLum * 0.22;
+    targetStd = Math.max(sStd * 0.88, fStd * 0.78 + bgStats.stdLum * 0.22);
   }
 
-  // 3. Apply smooth luminance & contrast matching preserving skin hue fidelity
-  const rawContrastRatio = Math.max(0.58, Math.min(1.68, targetStd / sStd));
+  // 3. Apply natural luminance & contrast match without crushing brightness into dark backdrops
+  const rawContrastRatio = Math.max(0.86, Math.min(1.48, targetStd / sStd));
   const effectiveContrast = 1 + (rawContrastRatio - 1) * strength;
-  const effectiveShift = (targetMean - sMean) * strength;
+  const clampedShift = Math.max(-36, Math.min(36, (targetMean - sMean) * strength * 0.78));
 
   for (let i = 0; i < sData.length; i += 4) {
     if (sData[i + 3] === 0) continue;
@@ -902,12 +931,11 @@ export function applyBackgroundLightingMatch(
 
     const targetLum = Math.min(
       252,
-      Math.max(3, (lum - sMean) * effectiveContrast + sMean + effectiveShift)
+      Math.max(4, (lum - sMean) * effectiveContrast + sMean + clampedShift)
     );
     const deltaLum = targetLum - lum;
     const scale = lum > 10 ? targetLum / lum : 1;
 
-    // Combine proportional scaling & gentle additive lift so tones match naturally
     const nr = r * scale * 0.65 + (r + deltaLum) * 0.35;
     const ng = g * scale * 0.65 + (g + deltaLum) * 0.35;
     const nb = b * scale * 0.65 + (b + deltaLum) * 0.35;
@@ -1012,16 +1040,15 @@ export function applyShadowMatcher(
     shadowTintB = Math.min(105, (sumTintB / darkWeightSum) * 0.45);
   }
 
-  // Build desired shadow depth multiplier per grid cell combining target shadow profile & scene darkness
-  const bgDarkness = bgStats ? Math.max(0, Math.min(0.42, (132 - bgStats.meanLum) / 220)) : 0;
+  // Build desired shadow depth multiplier per grid cell without flattening well-lit facial centers
+  const bgDarkness = bgStats ? Math.max(0, Math.min(0.24, (116 - bgStats.meanLum) / 260)) : 0;
   const depthGrid = new Float32Array(G * G);
   for (let c = 0; c < G * G; c++) {
-    const tRatio = Math.max(0.28, Math.min(1.0, tLumGrid[c] / (tKeyLum || 1)));
-    const sRatio = Math.max(0.35, Math.min(1.0, sLumGrid[c] / (sKeyLum || 1)));
-    // How much deeper the target scene shadow is relative to the source face cell
-    const relShadow = Math.max(0.3, Math.min(1.08, tRatio / (sRatio * 0.85 + 0.15)));
-    const combinedDepth = relShadow * (1 - bgDarkness * 0.45);
-    depthGrid[c] = Math.max(0.28, Math.min(1.0, combinedDepth));
+    const tRatio = Math.max(0.45, Math.min(1.0, tLumGrid[c] / (tKeyLum || 1)));
+    const sRatio = Math.max(0.45, Math.min(1.0, sLumGrid[c] / (sKeyLum || 1)));
+    const relShadow = Math.max(0.52, Math.min(1.04, tRatio / (sRatio * 0.85 + 0.15)));
+    const combinedDepth = relShadow * (1 - bgDarkness * 0.28);
+    depthGrid[c] = Math.max(0.52, Math.min(1.0, combinedDepth));
   }
 
   // Smooth the 8x8 shadow grid with a 3x3 box pass to avoid any blockiness
@@ -1072,7 +1099,7 @@ export function applyShadowMatcher(
       const shadowAmount = Math.max(0, 1 - cellDepth) * strength;
       if (shadowAmount <= 0.002) continue;
 
-      const overlayOpacity = Math.min(0.72, shadowAmount * 0.92);
+      const overlayOpacity = Math.min(0.46, shadowAmount * 0.72);
       const mult = 1 - overlayOpacity;
 
       sData[idx] = Math.max(0, Math.min(255, Math.round(sData[idx] * mult + shadowTintR * overlayOpacity * 0.45)));
@@ -1889,7 +1916,7 @@ export function applyBilateralSkinFilter(
     rangeLut[d] = Math.exp(-(d * d) / twoSigmaRangeSq);
   }
 
-  const grainStrength = 0.2 * norm;
+  const grainStrength = 0.16 * norm;
 
   for (let y = 0; y < h; y++) {
     const yRow = y * w;
@@ -1898,7 +1925,24 @@ export function applyBilateralSkinFilter(
       const cIdx = cPos * 4;
       if (orig[cIdx + 3] === 0) continue;
 
+      // Protect sharp facial features (irises, eyelashes, brows, lip contours) from bilateral blur
+      const r0 = orig[cIdx];
+      const g0 = orig[cIdx + 1];
+      const b0 = orig[cIdx + 2];
       const cLum = lumBuf[cPos];
+      let featureProtect = 1.0;
+      if (x > 0 && x < w - 1 && y > 0 && y < h - 1) {
+        const edgeX = Math.abs(lumBuf[cPos + 1] - lumBuf[cPos - 1]);
+        const edgeY = Math.abs(lumBuf[cPos + w] - lumBuf[cPos - w]);
+        const localEdge = (edgeX + edgeY) * 0.5;
+        // Eyes/lashes/brows/lip dark lines carry high edge or low luminance
+        const nonSkinWeight = r0 > 50 && r0 >= g0 * 0.94 && r0 >= b0 && r0 - b0 > 6 ? 1.0 : 0.28;
+        const edgeKeep = Math.max(0.08, 1 - Math.max(0, localEdge - 7) / 18);
+        featureProtect = nonSkinWeight * edgeKeep;
+      }
+      const localNorm = norm * featureProtect;
+      if (localNorm <= 0.02) continue;
+
       let sumR = 0;
       let sumG = 0;
       let sumB = 0;
@@ -1937,9 +1981,9 @@ export function applyBilateralSkinFilter(
         const filtG = sumG * invW;
         const filtB = sumB * invW;
 
-        let outR = orig[cIdx] * (1 - norm) + filtR * norm;
-        let outG = orig[cIdx + 1] * (1 - norm) + filtG * norm;
-        let outB = orig[cIdx + 2] * (1 - norm) + filtB * norm;
+        let outR = orig[cIdx] * (1 - localNorm) + filtR * localNorm;
+        let outG = orig[cIdx + 1] * (1 - localNorm) + filtG * localNorm;
+        let outB = orig[cIdx + 2] * (1 - localNorm) + filtB * localNorm;
 
         // Subtle high-frequency target skin texture match to prevent waxy smoothing
         if (targetLumBuf && x > 0 && x < w - 1 && y > 0 && y < h - 1) {
@@ -1949,7 +1993,7 @@ export function applyBilateralSkinFilter(
               targetLumBuf[cPos + 1] +
               targetLumBuf[cPos - w] +
               targetLumBuf[cPos + w]);
-          const detail = Math.max(-10, Math.min(10, targetLumBuf[cPos] - localMean)) * grainStrength;
+          const detail = Math.max(-8, Math.min(8, targetLumBuf[cPos] - localMean)) * grainStrength * featureProtect;
           outR += detail;
           outG += detail;
           outB += detail;
@@ -1959,6 +2003,57 @@ export function applyBilateralSkinFilter(
         data[cIdx + 1] = Math.min(255, Math.max(0, outG));
         data[cIdx + 2] = Math.min(255, Math.max(0, outB));
       }
+    }
+  }
+}
+
+/**
+ * Edge-aware Luminance Clarity / Unsharp Detail Restoration.
+ * Restores crisp eyes, lashes, brows, lips, and micro-contrast lost during
+ * scaling/resampling & warping without adding noise halos.
+ */
+export function applyFaceClaritySharpening(
+  imageData: ImageData,
+  clarityAmount: number = 0.38
+): void {
+  if (clarityAmount <= 0.01) return;
+  const w = imageData.width;
+  const h = imageData.height;
+  if (w < 4 || h < 4) return;
+
+  const data = imageData.data;
+  const total = w * h;
+  const lum = new Float32Array(total);
+  for (let p = 0, i = 0; p < total; p++, i += 4) {
+    lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+
+  for (let y = 1; y < h - 1; y++) {
+    const row = y * w;
+    for (let x = 1; x < w - 1; x++) {
+      const p = row + x;
+      const idx = p * 4;
+      if (data[idx + 3] < 20) continue;
+
+      const centerL = lum[p];
+      // 3x3 Gaussian-weighted local mean
+      const blurL =
+        (centerL * 4 +
+          (lum[p - 1] + lum[p + 1] + lum[p - w] + lum[p + w]) * 2 +
+          lum[p - w - 1] +
+          lum[p - w + 1] +
+          lum[p + w - 1] +
+          lum[p + w + 1]) /
+        16;
+
+      const detail = centerL - blurL;
+      // Coring threshold suppresses sensor grain while sharpening structural detail
+      if (Math.abs(detail) < 1.2) continue;
+
+      const delta = Math.max(-20, Math.min(20, detail * clarityAmount * 1.45));
+      data[idx] = Math.min(255, Math.max(0, Math.round(data[idx] + delta)));
+      data[idx + 1] = Math.min(255, Math.max(0, Math.round(data[idx + 1] + delta)));
+      data[idx + 2] = Math.min(255, Math.max(0, Math.round(data[idx + 2] + delta)));
     }
   }
 }
@@ -1985,7 +2080,7 @@ export function applyBlurMaskTextureSmoothing(
   const orig = new Uint8ClampedArray(data);
   const totalPixels = w * h;
 
-  // 1. Precompute luminance & skin-tone mask weight
+  // 1. Precompute luminance & strict skin-tone mask weight (protect eyes/lashes/brows/lips)
   const lum = new Float32Array(totalPixels);
   const skinMask = new Float32Array(totalPixels);
   for (let p = 0, i = 0; p < totalPixels; p++, i += 4) {
@@ -1995,10 +2090,9 @@ export function applyBlurMaskTextureSmoothing(
     const b = orig[i + 2];
     lum[p] = 0.299 * r + 0.587 * g + 0.114 * b;
 
-    // Soft chrominance weighting so eyebrows/lashes/pupils/hair strands receive less blur
     const warmSkinDiff = r - b;
-    const isSkinLike = r > 40 && g > 28 && r >= g * 0.92 && warmSkinDiff > -6;
-    skinMask[p] = isSkinLike ? 1.0 : 0.35;
+    const isSkinLike = lum[p] > 48 && r > 55 && g > 38 && r >= g * 0.94 && warmSkinDiff > 4;
+    skinMask[p] = isSkinLike ? 1.0 : 0.12;
   }
 
   // 2. Sobel edge-magnitude pass to detect structural edges (eyes, brows, nostrils, lips)
@@ -2022,26 +2116,25 @@ export function applyBlurMaskTextureSmoothing(
     }
   }
 
-  // Soft 3x3 max/average dilation on the edge mask so thin lash/lip borders stay cleanly protected
+  // Tighter edge protection so eyes/brows/lips stay razor-sharp
   const edgeMask = new Float32Array(totalPixels);
-  const edgeThresholdLow = 10;
-  const edgeThresholdHigh = 34;
+  const edgeThresholdLow = 6;
+  const edgeThresholdHigh = 22;
   for (let y = 1; y < h - 1; y++) {
     const row = y * w;
     for (let x = 1; x < w - 1; x++) {
       const p = row + x;
       const peak = Math.max(
         edgeRaw[p],
-        edgeRaw[p - 1] * 0.78,
-        edgeRaw[p + 1] * 0.78,
-        edgeRaw[p - w] * 0.78,
-        edgeRaw[p + w] * 0.78
+        edgeRaw[p - 1] * 0.82,
+        edgeRaw[p + 1] * 0.82,
+        edgeRaw[p - w] * 0.82,
+        edgeRaw[p + w] * 0.82
       );
       const t = Math.min(
         1,
         Math.max(0, (peak - edgeThresholdLow) / (edgeThresholdHigh - edgeThresholdLow))
       );
-      // Smoothstep curve for seamless edge transition without halos
       edgeMask[p] = t * t * (3 - 2 * t);
     }
   }
@@ -2308,10 +2401,10 @@ export function applySmartTopologyBlend(
 
       const effectiveScale = 1 + (topoFactor - 1) * intensityFactor;
 
-      // In the boundary falloff zone
-      if (dist > 0.65 && dist < 1.3) {
-        const innerR = Math.max(0.3, 1.0 - (featherRadius * effectiveScale) / (mrx || 1));
-        const outerR = 1.0 + (featherRadius * effectiveScale * 0.4) / (mrx || 1);
+      // Keep inner facial features (eyes/nose/mouth/cheeks up to dist 0.76) at 100% solid opacity
+      if (dist > 0.76 && dist < 1.28) {
+        const innerR = Math.max(0.74, 1.0 - (featherRadius * effectiveScale * 0.78) / (mrx || 1));
+        const outerR = 1.0 + (featherRadius * effectiveScale * 0.35) / (mrx || 1);
 
         let alphaNorm = 1.0;
         if (dist >= outerR) {
@@ -2329,11 +2422,11 @@ export function applySmartTopologyBlend(
           const b = targetPatchData.data[tIdx + 2];
           // Local micro-texture variation
           const localVar = ((r * 13 + g * 19 + b * 29) % 23 - 11) / 255;
-          alphaNorm = Math.max(0, Math.min(1, alphaNorm + localVar * 0.07));
+          alphaNorm = Math.max(0, Math.min(1, alphaNorm + localVar * 0.05));
         }
 
         mData[pIdx + 3] = Math.round(alphaNorm * 255);
-      } else if (dist >= 1.3) {
+      } else if (dist >= 1.28) {
         mData[pIdx + 3] = 0;
       }
     }
@@ -3266,6 +3359,9 @@ export async function renderFaceSwap(
       if (adjustments.softBloom > 0) {
         applySoftBloomEffect(sourceFaceData, adjustments.softBloom);
       }
+      // Restore crisp micro-contrast & sharp detail (eyes, lashes, brows, lips) after resizing/warping
+      const clarityStrength = adjustments.textureMatching ? 0.42 : 0.28;
+      applyFaceClaritySharpening(sourceFaceData, clarityStrength);
       fCtx.putImageData(sourceFaceData, 0, 0);
     }
 
@@ -3282,21 +3378,22 @@ export async function renderFaceSwap(
       const mrx = ((faceW * 0.35 * targetBox.width) / (faceW || 1)) * Math.max(0.8, Math.cos(yawRad));
       const mry = ((faceH * 0.42 * targetBox.height) / (faceH || 1)) * Math.max(0.8, Math.cos(pitchRad));
 
-      // Radial feather gradient modulated by Edge Softness intensity (0 - 100%)
+      // Keep facial core 100% opaque so target face never ghosts through cheeks/eyes; feather only perimeter
       const edgeSoftness = Math.max(0, Math.min(100, adjustments.edgeSoftness ?? 50));
-      const softnessFactor = 0.4 + (edgeSoftness / 100) * 1.2;
+      const softnessFactor = 0.35 + (edgeSoftness / 100) * 0.9;
       const featherPx = Math.max(2, adjustments.featherRadius * softnessFactor);
-      const midAlpha = Math.max(0.55, Math.min(0.95, 0.92 - (edgeSoftness / 100) * 0.25));
+      const outerR = Math.max(20, Math.max(mrx, mry));
+      const innerCoreR = Math.max(8, Math.min(mrx, mry) - featherPx * 0.85);
       const grad = mCtx.createRadialGradient(
         mcx,
         mcy,
-        Math.max(8, Math.min(mrx, mry) - featherPx),
+        innerCoreR,
         mcx,
         mcy,
-        Math.max(20, Math.max(mrx, mry))
+        outerR
       );
       grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-      grad.addColorStop(0.7, `rgba(255, 255, 255, ${midAlpha.toFixed(2)})`);
+      grad.addColorStop(0.55, 'rgba(255, 255, 255, 0.98)');
       grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
 
       mCtx.save();
