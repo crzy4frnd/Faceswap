@@ -28,7 +28,6 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -458,14 +457,16 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                 }
 
                 // Visual 'Performance Warning' overlay shown only when device thermals cause dropped frames during real-time face swap
-                AnimatedVisibility(
-                    visible = thermalWarning.showPerformanceWarning && config.faceSwapEnabled,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
+                Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(horizontal = 12.dp, vertical = 10.dp)
                 ) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = thermalWarning.showPerformanceWarning && config.faceSwapEnabled,
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
                     val severe = thermalWarning.isSevereThrottling
                     val borderTint = if (severe) Color(0xFFEF4444) else Color(0xFFF59E0B)
                     val accentTint = if (severe) Color(0xFFFCA5A5) else Color(0xFFFDE68A)
@@ -526,6 +527,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                 .size(18.dp)
                                 .clickable { thermalMonitor.dismissWarningTemporarily() }
                         )
+                    }
                     }
                 }
             }

@@ -286,7 +286,8 @@ export function computeRealTimeLuminanceHistogram(
     applySkinToneColorMatch(
       adjustedPatch,
       cached.targetPatch,
-      adjustments.skinToneStrength / 100
+      adjustments.skinToneStrength / 100,
+      adjustments.skinReference
     );
   }
   if (adjustments.lightingAdjustment > 0) {

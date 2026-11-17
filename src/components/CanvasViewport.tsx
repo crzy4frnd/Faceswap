@@ -21,6 +21,9 @@ import {
   MoreVertical,
   Trash2,
   ImagePlus,
+  Move,
+  RotateCw,
+  Pipette,
 } from 'lucide-react';
 import { useFaceStudio } from '../context/FaceStudioContext';
 import { FaceLandmarks } from '../types/face';
@@ -71,6 +74,10 @@ export const CanvasViewport: React.FC = () => {
     resetFaceLandmarks,
     rescanFaces,
     refocusSignal,
+    isSkinSamplingMode,
+    setIsSkinSamplingMode,
+    sampleSkinReferenceAt,
+    clearSkinReference,
   } = useFaceStudio();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -106,14 +113,41 @@ export const CanvasViewport: React.FC = () => {
   const [showToolsMenu, setShowToolsMenu] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
 
+  // Interactive Swapped Face Transform Gesture state (pinch-to-scale, 2-finger rotate, 1-finger drag)
+  const [faceTransformMode, setFaceTransformMode] = useState(false);
+  const [activeFaceGestureHud, setActiveFaceGestureHud] = useState<{
+    scale: number;
+    rotation: number;
+  } | null>(null);
+  const faceGestureRef = useRef<{
+    mode: 'drag' | 'pinch-rotate';
+    startMidX: number;
+    startMidY: number;
+    startDist: number;
+    prevAngleRad: number;
+    accumulatedAngleDeg: number;
+    startScale: number;
+    startRotation: number;
+    startOffsetX: number;
+    startOffsetY: number;
+    pxPerScreenX: number;
+    pxPerScreenY: number;
+    didModify: boolean;
+  } | null>(null);
+
+  // Real-time Target-Body Skin Reference Sampling state
+  const isSamplingSkinDragRef = useRef(false);
+  const lastSkinSampleNormRef = useRef<{ normX: number; normY: number } | null>(null);
+
   // Geometric Mesh & Manual Landmark Nudge state
   const [selectedLandmarkKey, setSelectedLandmarkKey] = useState<string | null>('nose');
   const [draggingLandmarkKey, setDraggingLandmarkKey] = useState<string | null>(null);
   const [nudgeStep, setNudgeStep] = useState<number>(2);
 
-  // Currently active face for landmark mesh overlay
+  // Currently active face for landmark mesh & transform overlays
   const activeFace =
     detectedFaces.find((f) => f.id === selectedFaceId) || detectedFaces[0] || null;
+  const hasSwappedFace = detectedFaces.some((f) => f.enabled && Boolean(f.assignedProfileId));
 
   // 1. Paint onto manual mask canvas
   const handleBrushStroke = (clientX: number, clientY: number) => {
@@ -177,7 +211,19 @@ export const CanvasViewport: React.FC = () => {
 
   useEffect(() => {
     resetView();
+    setFaceTransformMode(false);
   }, [targetImageUrl, resetView]);
+
+  useEffect(() => {
+    if (
+      adjustments.brushMode !== 'none' ||
+      adjustments.showGeometricMesh ||
+      !hasSwappedFace ||
+      isSkinSamplingMode
+    ) {
+      setFaceTransformMode(false);
+    }
+  }, [adjustments.brushMode, adjustments.showGeometricMesh, hasSwappedFace, isSkinSamplingMode]);
 
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -308,19 +354,150 @@ export const CanvasViewport: React.FC = () => {
     return () => el.removeEventListener('wheel', handleWheel);
   }, [clampPan, targetImageElement]);
 
+  const findSwappedFaceAtClientPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      const canvas = outputCanvasRef.current;
+      if (!canvas || canvas.width <= 0 || canvas.height <= 0) return null;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+
+      const imgX = ((clientX - rect.left) / rect.width) * canvas.width;
+      const imgY = ((clientY - rect.top) / rect.height) * canvas.height;
+
+      const swappedFaces = detectedFaces.filter((f) => f.enabled && Boolean(f.assignedProfileId));
+      if (swappedFaces.length === 0) return null;
+
+      // Prefer selected face if hit, otherwise any matching swapped face
+      const ordered = activeFace
+        ? [activeFace, ...swappedFaces.filter((f) => f.id !== activeFace.id)]
+        : swappedFaces;
+
+      for (const face of ordered) {
+        if (!face.enabled || !face.assignedProfileId) continue;
+        const padX = face.box.width * 0.28;
+        const padY = face.box.height * 0.28;
+        const left = face.box.x + adjustments.offsetX - padX;
+        const right = face.box.x + face.box.width + adjustments.offsetX + padX;
+        const top = face.box.y + adjustments.offsetY - padY;
+        const bottom = face.box.y + face.box.height + adjustments.offsetY + padY;
+        if (imgX >= left && imgX <= right && imgY >= top && imgY <= bottom) {
+          return face;
+        }
+      }
+      return null;
+    },
+    [activeFace, adjustments.offsetX, adjustments.offsetY, detectedFaces, outputCanvasRef]
+  );
+
+  const getCanvasPxPerScreenPx = useCallback(() => {
+    const canvas = outputCanvasRef.current;
+    if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+      return { x: 1, y: 1 };
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return { x: 1, y: 1 };
+    }
+    return {
+      x: canvas.width / rect.width,
+      y: canvas.height / rect.height,
+    };
+  }, [outputCanvasRef]);
+
+  const sampleSkinAtClientPoint = useCallback(
+    (clientX: number, clientY: number, requireInsideCanvas: boolean, commitHistory: boolean) => {
+      const canvas = outputCanvasRef.current;
+      if (!canvas || canvas.width <= 0 || canvas.height <= 0) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      if (
+        requireInsideCanvas &&
+        (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom)
+      ) {
+        return;
+      }
+
+      const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+      lastSkinSampleNormRef.current = { normX, normY };
+      sampleSkinReferenceAt(
+        normX,
+        normY,
+        adjustments.skinReference?.radiusRatio,
+        commitHistory
+      );
+    },
+    [adjustments.skinReference?.radiusRatio, outputCanvasRef, sampleSkinReferenceAt]
+  );
+
   const handlePointerDown = (e: React.PointerEvent) => {
     if (!targetImageElement) return;
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (activePointersRef.current.size === 2) {
+      isSamplingSkinDragRef.current = false;
       setIsPainting(false);
       setIsDraggingSplit(false);
-      setIsPanning(true);
+      setIsPanning(false);
+      didPanDragRef.current = true;
       panStartRef.current = null;
+      faceGestureRef.current = null;
+      setActiveFaceGestureHud(null);
+
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
       const midX = (pts[0].x + pts[1].x) / 2;
       const midY = (pts[0].y + pts[1].y) / 2;
+      const angleRad = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+
+      // Determine whether two-finger pinch/rotate targets the swapped face transform or viewport zoom/pan
+      const canEditFaceTransform =
+        hasSwappedFace &&
+        !isSkinSamplingMode &&
+        adjustments.brushMode === 'none' &&
+        !adjustments.showGeometricMesh;
+      const hitSwappedFace =
+        canEditFaceTransform && !faceTransformMode && zoom <= 1.15
+          ? findSwappedFaceAtClientPoint(midX, midY)
+          : null;
+
+      if (canEditFaceTransform && (faceTransformMode || hitSwappedFace)) {
+        if (hitSwappedFace && hitSwappedFace.id !== selectedFaceId) {
+          setSelectedFaceId(hitSwappedFace.id);
+        }
+        const pxRatio = getCanvasPxPerScreenPx();
+        pinchStartRef.current = null;
+        faceGestureRef.current = {
+          mode: 'pinch-rotate',
+          startMidX: midX,
+          startMidY: midY,
+          startDist: Math.max(12, dist),
+          prevAngleRad: angleRad,
+          accumulatedAngleDeg: 0,
+          startScale: adjustments.scale,
+          startRotation: adjustments.rotation,
+          startOffsetX: adjustments.offsetX,
+          startOffsetY: adjustments.offsetY,
+          pxPerScreenX: pxRatio.x,
+          pxPerScreenY: pxRatio.y,
+          didModify: false,
+        };
+        setActiveFaceGestureHud({
+          scale: adjustments.scale,
+          rotation: adjustments.rotation,
+        });
+        for (const pid of activePointersRef.current.keys()) {
+          try {
+            (e.currentTarget as HTMLElement).setPointerCapture(pid);
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
+
+      setIsPanning(true);
       pinchStartRef.current = {
         dist: Math.max(10, dist),
         zoom,
@@ -329,12 +506,60 @@ export const CanvasViewport: React.FC = () => {
         panX: pan.x,
         panY: pan.y,
       };
+      for (const pid of activePointersRef.current.keys()) {
+        try {
+          (e.currentTarget as HTMLElement).setPointerCapture(pid);
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
+
+    if (isSkinSamplingMode) {
+      isSamplingSkinDragRef.current = true;
+      sampleSkinAtClientPoint(e.clientX, e.clientY, true, false);
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
       return;
     }
 
     if (adjustments.brushMode !== 'none') {
       setIsPainting(true);
       handleBrushStroke(e.clientX, e.clientY);
+      return;
+    }
+
+    if (
+      faceTransformMode &&
+      hasSwappedFace &&
+      !adjustments.showGeometricMesh &&
+      compareMode === 'off'
+    ) {
+      const pxRatio = getCanvasPxPerScreenPx();
+      faceGestureRef.current = {
+        mode: 'drag',
+        startMidX: e.clientX,
+        startMidY: e.clientY,
+        startDist: 1,
+        prevAngleRad: 0,
+        accumulatedAngleDeg: 0,
+        startScale: adjustments.scale,
+        startRotation: adjustments.rotation,
+        startOffsetX: adjustments.offsetX,
+        startOffsetY: adjustments.offsetY,
+        pxPerScreenX: pxRatio.x,
+        pxPerScreenY: pxRatio.y,
+        didModify: false,
+      };
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
       return;
     }
 
@@ -370,6 +595,47 @@ export const CanvasViewport: React.FC = () => {
       activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     }
 
+    if (
+      activePointersRef.current.size === 2 &&
+      faceGestureRef.current &&
+      faceGestureRef.current.mode === 'pinch-rotate'
+    ) {
+      const pts = Array.from(activePointersRef.current.values());
+      const curDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const curMidX = (pts[0].x + pts[1].x) / 2;
+      const curMidY = (pts[0].y + pts[1].y) / 2;
+      const curAngleRad = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+
+      const g = faceGestureRef.current;
+      let deltaRad = curAngleRad - g.prevAngleRad;
+      while (deltaRad > Math.PI) deltaRad -= Math.PI * 2;
+      while (deltaRad < -Math.PI) deltaRad += Math.PI * 2;
+      g.prevAngleRad = curAngleRad;
+      g.accumulatedAngleDeg += (deltaRad * 180) / Math.PI;
+
+      const scaleFactor = curDist / g.startDist;
+      const rawScale = g.startScale * scaleFactor;
+      const nextScale = Math.round(Math.max(0.75, Math.min(1.45, rawScale)) * 100) / 100;
+      const nextRotation = Math.round(
+        Math.max(-45, Math.min(45, g.startRotation + g.accumulatedAngleDeg))
+      );
+
+      const dxCanvas = (curMidX - g.startMidX) * g.pxPerScreenX;
+      const dyCanvas = (curMidY - g.startMidY) * g.pxPerScreenY;
+      const nextOffsetX = Math.round(Math.max(-120, Math.min(120, g.startOffsetX + dxCanvas)));
+      const nextOffsetY = Math.round(Math.max(-120, Math.min(120, g.startOffsetY + dyCanvas)));
+
+      g.didModify = true;
+      setActiveFaceGestureHud({ scale: nextScale, rotation: nextRotation });
+      updateAdjustments({
+        scale: nextScale,
+        rotation: nextRotation,
+        offsetX: nextOffsetX,
+        offsetY: nextOffsetY,
+      });
+      return;
+    }
+
     if (activePointersRef.current.size === 2 && pinchStartRef.current && containerRef.current) {
       const pts = Array.from(activePointersRef.current.values());
       const curDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
@@ -394,6 +660,11 @@ export const CanvasViewport: React.FC = () => {
       return;
     }
 
+    if (isSamplingSkinDragRef.current && isSkinSamplingMode) {
+      sampleSkinAtClientPoint(e.clientX, e.clientY, false, false);
+      return;
+    }
+
     if (adjustments.brushMode !== 'none') {
       const container = containerRef.current;
       if (container) {
@@ -407,6 +678,23 @@ export const CanvasViewport: React.FC = () => {
       if (isPainting) {
         handleBrushStroke(e.clientX, e.clientY);
       }
+      return;
+    }
+
+    if (faceGestureRef.current && faceGestureRef.current.mode === 'drag') {
+      const g = faceGestureRef.current;
+      const dxScreen = e.clientX - g.startMidX;
+      const dyScreen = e.clientY - g.startMidY;
+      if (Math.hypot(dxScreen, dyScreen) > 2) {
+        g.didModify = true;
+      }
+      const nextOffsetX = Math.round(
+        Math.max(-120, Math.min(120, g.startOffsetX + dxScreen * g.pxPerScreenX))
+      );
+      const nextOffsetY = Math.round(
+        Math.max(-120, Math.min(120, g.startOffsetY + dyScreen * g.pxPerScreenY))
+      );
+      updateAdjustments({ offsetX: nextOffsetX, offsetY: nextOffsetY });
       return;
     }
 
@@ -431,10 +719,39 @@ export const CanvasViewport: React.FC = () => {
 
   const handlePointerUp = (e: React.PointerEvent) => {
     activePointersRef.current.delete(e.pointerId);
+
+    if (activePointersRef.current.size < 2 && faceGestureRef.current?.mode === 'pinch-rotate') {
+      if (faceGestureRef.current.didModify) {
+        updateAdjustments({}, 'Face Transform Gesture');
+      }
+      faceGestureRef.current = null;
+      setActiveFaceGestureHud(null);
+    }
+
     if (activePointersRef.current.size < 2) {
       pinchStartRef.current = null;
     }
+
     if (activePointersRef.current.size === 0) {
+      if (isSamplingSkinDragRef.current) {
+        isSamplingSkinDragRef.current = false;
+        const lastNorm = lastSkinSampleNormRef.current;
+        if (lastNorm) {
+          sampleSkinReferenceAt(
+            lastNorm.normX,
+            lastNorm.normY,
+            adjustments.skinReference?.radiusRatio,
+            true
+          );
+        }
+      }
+      if (faceGestureRef.current) {
+        if (faceGestureRef.current.didModify) {
+          updateAdjustments({}, 'Move Swapped Face');
+        }
+        faceGestureRef.current = null;
+      }
+      setActiveFaceGestureHud(null);
       setIsPainting(false);
       setIsDraggingSplit(false);
       setIsPanning(false);
@@ -622,6 +939,57 @@ export const CanvasViewport: React.FC = () => {
                 <span className="hidden xl:inline text-[11px]">Mesh</span>
               </button>
 
+              {hasSwappedFace && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !faceTransformMode;
+                    setFaceTransformMode(next);
+                    if (next) {
+                      if (compareMode !== 'off') setCompareMode('off');
+                      if (adjustments.showGeometricMesh || adjustments.brushMode !== 'none') {
+                        updateAdjustments({ showGeometricMesh: false, brushMode: 'none' });
+                      }
+                    }
+                  }}
+                  className={`p-1.5 sm:px-2 rounded text-xs flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 ${
+                    faceTransformMode
+                      ? 'bg-violet-600 text-white font-semibold'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                  title="Touch Gesture Transform (Pinch Scale, Two-Finger Rotate & Drag Face)"
+                >
+                  <Move className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden xl:inline text-[11px]">Transform</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !isSkinSamplingMode;
+                  setIsSkinSamplingMode(next);
+                  if (next) {
+                    setFaceTransformMode(false);
+                    if (compareMode !== 'off') setCompareMode('off');
+                    if (adjustments.showGeometricMesh || adjustments.brushMode !== 'none') {
+                      updateAdjustments({ showGeometricMesh: false, brushMode: 'none' });
+                    }
+                  }
+                }}
+                className={`p-1.5 sm:px-2 rounded text-xs flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 ${
+                  isSkinSamplingMode
+                    ? 'bg-amber-500 text-slate-950 font-semibold'
+                    : adjustments.skinReference
+                    ? 'bg-indigo-600/80 text-white font-semibold'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+                title="Pick Skin Reference from Target Body"
+              >
+                <Pipette className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden xl:inline text-[11px]">Skin Ref</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => updateAdjustments({ showMaskOverlay: !adjustments.showMaskOverlay })}
@@ -738,6 +1106,106 @@ export const CanvasViewport: React.FC = () => {
         </div>
       </div>
 
+      {/* Floating Skin Reference Sampling Banner */}
+      {isSkinSamplingMode && targetImageUrl && (
+        <div className="mx-3 mb-1 px-3 py-1.5 rounded-xl bg-slate-900/95 border border-amber-500/60 backdrop-blur-md flex items-center justify-between text-xs z-30 shadow-lg gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {adjustments.skinReference ? (
+              <span
+                className="w-4 h-4 rounded-full border border-white shrink-0 shadow-xs"
+                style={{
+                  backgroundColor: `rgb(${Math.round(adjustments.skinReference.r)}, ${Math.round(
+                    adjustments.skinReference.g
+                  )}, ${Math.round(adjustments.skinReference.b)})`,
+                }}
+              />
+            ) : (
+              <Pipette className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            )}
+            <span className="font-semibold text-slate-100 whitespace-nowrap">
+              Skin Reference
+            </span>
+            <span className="text-slate-400 text-[11px] truncate">
+              {adjustments.skinReference
+                ? `Baseline #${[
+                    adjustments.skinReference.r,
+                    adjustments.skinReference.g,
+                    adjustments.skinReference.b,
+                  ]
+                    .map((v) => Math.round(v).toString(16).padStart(2, '0'))
+                    .join('')
+                    .toUpperCase()} · Touch or drag body to adjust`
+                : 'Touch or drag anywhere on the target body to pick skin tone'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {adjustments.skinReference && (
+              <button
+                type="button"
+                onClick={clearSkinReference}
+                className="px-2 py-0.5 rounded text-[11px] text-rose-400 hover:bg-rose-950/60 font-medium transition-colors"
+              >
+                Clear
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsSkinSamplingMode(false)}
+              className="px-2.5 py-0.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-[11px] transition-colors"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Face Transform Gesture Banner */}
+      {faceTransformMode && hasSwappedFace && (
+        <div className="mx-3 mb-1 px-3 py-1.5 rounded-xl bg-slate-900/95 border border-violet-500/50 backdrop-blur-md flex items-center justify-between text-xs z-30 shadow-lg gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <RotateCw className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+            <span className="font-semibold text-slate-100 whitespace-nowrap">
+              Face Transform
+            </span>
+            <span className="text-slate-400 text-[11px] hidden sm:inline truncate">
+              · Drag to move · Pinch to scale · 2-finger rotate
+            </span>
+            <span className="text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded bg-violet-950/80 border border-violet-500/30 text-violet-200 whitespace-nowrap">
+              {Math.round(adjustments.scale * 100)}% · {adjustments.rotation > 0 ? `+${adjustments.rotation}` : adjustments.rotation}°
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {(adjustments.scale !== 1 ||
+              adjustments.rotation !== 0 ||
+              adjustments.offsetX !== 0 ||
+              adjustments.offsetY !== 0) && (
+              <button
+                type="button"
+                onClick={() =>
+                  updateAdjustments(
+                    { scale: 1, rotation: 0, offsetX: 0, offsetY: 0 },
+                    'Reset Face Transform'
+                  )
+                }
+                className="px-2 py-0.5 rounded text-[11px] text-amber-400 hover:bg-amber-950/60 font-medium transition-colors flex items-center gap-1"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setFaceTransformMode(false)}
+              className="px-2.5 py-0.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-[11px] transition-colors"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Floating Geometric Landmark Mesh Active Banner */}
       {adjustments.showGeometricMesh && activeFace && (
         <div className="mx-3 mb-1 px-3 py-1.5 rounded-xl bg-slate-900/95 border border-cyan-500/50 backdrop-blur-md flex items-center justify-between text-xs z-30 shadow-lg">
@@ -825,7 +1293,12 @@ export const CanvasViewport: React.FC = () => {
           setBrushHover((prev) => ({ ...prev, visible: false }));
         }}
         onDoubleClick={() => {
-          if (targetImageElement && adjustments.brushMode === 'none') {
+          if (
+            targetImageElement &&
+            adjustments.brushMode === 'none' &&
+            !faceTransformMode &&
+            !isSkinSamplingMode
+          ) {
             if (zoom > 1.05) {
               resetView();
             } else {
@@ -834,8 +1307,10 @@ export const CanvasViewport: React.FC = () => {
           }
         }}
         className={`flex-1 relative flex items-center justify-center p-2 sm:p-4 overflow-hidden touch-none min-h-0 ${
-          adjustments.brushMode !== 'none'
+          adjustments.brushMode !== 'none' || isSkinSamplingMode
             ? 'cursor-crosshair'
+            : faceTransformMode
+            ? 'cursor-move'
             : zoom > 1.02
             ? isPanning
               ? 'cursor-grabbing'
@@ -843,6 +1318,17 @@ export const CanvasViewport: React.FC = () => {
             : ''
         }`}
       >
+        {/* Live Two-Finger Pinch/Rotate Transform HUD Pill */}
+        {activeFaceGestureHud && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 px-3 py-1 rounded-full bg-slate-950/90 border border-violet-400/60 text-violet-100 text-[11px] font-mono tabular-nums shadow-xl pointer-events-none flex items-center gap-2">
+            <RotateCw className="w-3 h-3 text-violet-400" />
+            <span>Scale {Math.round(activeFaceGestureHud.scale * 100)}%</span>
+            <span className="text-slate-500">·</span>
+            <span>
+              Tilt {activeFaceGestureHud.rotation > 0 ? `+${activeFaceGestureHud.rotation}` : activeFaceGestureHud.rotation}°
+            </span>
+          </div>
+        )}
         {/* Drag-and-drop highlight */}
         {isDragOver && (
           <div className="absolute inset-3 z-40 rounded-2xl border-2 border-dashed border-indigo-400 bg-indigo-950/60 backdrop-blur-sm flex items-center justify-center text-sm font-semibold text-indigo-100 pointer-events-none">
@@ -1341,10 +1827,128 @@ export const CanvasViewport: React.FC = () => {
               </div>
             )}
 
+            {/* Active Swapped Face Transform Guide Ring */}
+            {(faceTransformMode || activeFaceGestureHud) &&
+              activeFace &&
+              activeFace.enabled &&
+              activeFace.assignedProfileId &&
+              outputCanvasRef.current && (
+                <svg
+                  className="absolute inset-0 w-full h-full pointer-events-none z-20"
+                  viewBox={`0 0 ${canvasW} ${canvasH}`}
+                  preserveAspectRatio="none"
+                >
+                  {(() => {
+                    const u = Math.max(1, canvasW / 700);
+                    const cx = activeFace.box.x + activeFace.box.width / 2 + adjustments.offsetX;
+                    const cy = activeFace.box.y + activeFace.box.height / 2 + adjustments.offsetY;
+                    const rx = activeFace.box.width * 0.54 * adjustments.scale;
+                    const ry = activeFace.box.height * 0.62 * adjustments.scale;
+                    return (
+                      <g transform={`rotate(${adjustments.rotation} ${cx} ${cy})`}>
+                        <ellipse
+                          cx={cx}
+                          cy={cy}
+                          rx={rx}
+                          ry={ry}
+                          fill="rgba(139, 92, 246, 0.06)"
+                          stroke="rgba(167, 139, 250, 0.9)"
+                          strokeWidth={1.8 * u}
+                          strokeDasharray={`${5 * u} ${3 * u}`}
+                        />
+                        <line
+                          x1={cx}
+                          y1={cy - ry}
+                          x2={cx}
+                          y2={cy - ry - 12 * u}
+                          stroke="rgba(167, 139, 250, 0.9)"
+                          strokeWidth={1.5 * u}
+                        />
+                        <circle
+                          cx={cx}
+                          cy={cy - ry - 12 * u}
+                          r={3.5 * u}
+                          fill="#8b5cf6"
+                          stroke="#ffffff"
+                          strokeWidth={1.1 * u}
+                        />
+                      </g>
+                    );
+                  })()}
+                </svg>
+              )}
+
+            {/* Skin Reference Target Reticle & Live Color Loupe */}
+            {isSkinSamplingMode && adjustments.skinReference && outputCanvasRef.current && (
+              <svg
+                className="absolute inset-0 w-full h-full pointer-events-none z-30"
+                viewBox={`0 0 ${canvasW} ${canvasH}`}
+                preserveAspectRatio="none"
+              >
+                {(() => {
+                  const ref = adjustments.skinReference;
+                  const u = Math.max(1, canvasW / 700);
+                  const px = ref.normX * canvasW;
+                  const py = ref.normY * canvasH;
+                  const rad = Math.max(10 * u, ref.radiusRatio * Math.min(canvasW, canvasH));
+                  const rgbCss = `rgb(${Math.round(ref.r)}, ${Math.round(ref.g)}, ${Math.round(ref.b)})`;
+                  const loupeY = Math.max(22 * u, py - rad - 22 * u);
+                  return (
+                    <g>
+                      <circle cx={px} cy={py} r={rad} fill={rgbCss} fillOpacity={0.22} />
+                      <circle
+                        cx={px}
+                        cy={py}
+                        r={rad}
+                        fill="none"
+                        stroke="rgba(2, 6, 23, 0.85)"
+                        strokeWidth={3 * u}
+                      />
+                      <circle
+                        cx={px}
+                        cy={py}
+                        r={rad}
+                        fill="none"
+                        stroke="#fbbf24"
+                        strokeWidth={1.6 * u}
+                      />
+                      <line
+                        x1={px - 6 * u}
+                        y1={py}
+                        x2={px + 6 * u}
+                        y2={py}
+                        stroke="#ffffff"
+                        strokeWidth={1.4 * u}
+                      />
+                      <line
+                        x1={px}
+                        y1={py - 6 * u}
+                        x2={px}
+                        y2={py + 6 * u}
+                        stroke="#ffffff"
+                        strokeWidth={1.4 * u}
+                      />
+                      <circle cx={px} cy={loupeY} r={11 * u} fill="rgba(2, 6, 23, 0.9)" />
+                      <circle
+                        cx={px}
+                        cy={loupeY}
+                        r={8.5 * u}
+                        fill={rgbCss}
+                        stroke="#fbbf24"
+                        strokeWidth={1.6 * u}
+                      />
+                    </g>
+                  );
+                })()}
+              </svg>
+            )}
+
             {/* Standard Interactive Detected Face Overlays */}
             {compareMode === 'off' &&
               adjustments.brushMode === 'none' &&
               !adjustments.showGeometricMesh &&
+              !faceTransformMode &&
+              !isSkinSamplingMode &&
               !isPeekingOriginal &&
               outputCanvasRef.current &&
               detectedFaces.map((face, index) => {

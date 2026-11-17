@@ -52,10 +52,23 @@ export interface FaceProfile {
   genderEstimate?: 'female' | 'male' | 'neutral';
 }
 
+export interface SkinReferenceSample {
+  normX: number; // 0..1 normalized target image X coordinate
+  normY: number; // 0..1 normalized target image Y coordinate
+  radiusRatio: number; // sampling circle radius ratio relative to min(width, height)
+  r: number; // baseline sampled RGB (0..255)
+  g: number;
+  b: number;
+  stdR: number;
+  stdG: number;
+  stdB: number;
+}
+
 export interface FaceAdjustments {
   swapStrength: number; // 0 - 100
   skinToneMatch: boolean; // auto skin tone color matching
   skinToneStrength: number; // 0 - 100
+  skinReference?: SkinReferenceSample | null; // manual target-body baseline color reference
   featherRadius: number; // 2 - 50 px
   edgeSoftness: number; // 0 - 100% feathering intensity of the face mask
   brightness: number; // -100 to +100

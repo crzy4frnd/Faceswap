@@ -1,4 +1,12 @@
-import { DetectedFace, FaceAdjustments, FaceLandmarks, FaceProfile, Point, Rect } from '../types/face';
+import {
+  DetectedFace,
+  FaceAdjustments,
+  FaceLandmarks,
+  FaceProfile,
+  Point,
+  Rect,
+  SkinReferenceSample,
+} from '../types/face';
 
 /**
  * Fast client-side image loader
@@ -654,14 +662,137 @@ export async function createFaceCutout(
   return canvas.toDataURL('image/png');
 }
 
+const targetSkinBufferCache = new WeakMap<
+  HTMLImageElement,
+  { width: number; height: number; data: Uint8ClampedArray }
+>();
+
+/**
+ * Samples a circular skin patch on any region of the target body image
+ * (neck, chest, arm, forehead, cheek) to serve as the color-grading baseline.
+ */
+export function sampleTargetSkinReference(
+  targetImage: HTMLImageElement,
+  normX: number,
+  normY: number,
+  radiusRatio: number = 0.032
+): SkinReferenceSample | null {
+  const natW = targetImage.naturalWidth || targetImage.width;
+  const natH = targetImage.naturalHeight || targetImage.height;
+  if (natW <= 0 || natH <= 0) return null;
+
+  let cached = targetSkinBufferCache.get(targetImage);
+  if (!cached) {
+    const maxDim = 640;
+    const scale = Math.min(1, maxDim / Math.max(natW, natH));
+    const sw = Math.max(16, Math.round(natW * scale));
+    const sh = Math.max(16, Math.round(natH * scale));
+    const c = document.createElement('canvas');
+    c.width = sw;
+    c.height = sh;
+    const ctx = c.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(targetImage, 0, 0, sw, sh);
+    cached = {
+      width: sw,
+      height: sh,
+      data: ctx.getImageData(0, 0, sw, sh).data,
+    };
+    targetSkinBufferCache.set(targetImage, cached);
+  }
+
+  const { width: sw, height: sh, data } = cached;
+  const clampedX = Math.max(0, Math.min(1, normX));
+  const clampedY = Math.max(0, Math.min(1, normY));
+  const clampedRadius = Math.max(0.012, Math.min(0.085, radiusRatio));
+
+  const cx = clampedX * (sw - 1);
+  const cy = clampedY * (sh - 1);
+  const radPx = Math.max(4, Math.min(sw, sh) * clampedRadius);
+  const radSq = radPx * radPx;
+
+  const x0 = Math.max(0, Math.floor(cx - radPx));
+  const x1 = Math.min(sw - 1, Math.ceil(cx + radPx));
+  const y0 = Math.max(0, Math.floor(cy - radPx));
+  const y1 = Math.min(sh - 1, Math.ceil(cy + radPx));
+
+  const collect = (filterExtremes: boolean) => {
+    let rSum = 0;
+    let gSum = 0;
+    let bSum = 0;
+    let count = 0;
+    const rs: number[] = [];
+    const gs: number[] = [];
+    const bs: number[] = [];
+
+    for (let y = y0; y <= y1; y++) {
+      const dy = y - cy;
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx;
+        if (dx * dx + dy * dy > radSq) continue;
+        const idx = (y * sw + x) * 4;
+        if (data[idx + 3] < 40) continue;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        if (filterExtremes) {
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          if (lum < 22 || lum > 246) continue;
+        }
+        rSum += r;
+        gSum += g;
+        bSum += b;
+        rs.push(r);
+        gs.push(g);
+        bs.push(b);
+        count++;
+      }
+    }
+    return { rSum, gSum, bSum, count, rs, gs, bs };
+  };
+
+  let res = collect(true);
+  if (res.count < 8) {
+    res = collect(false);
+  }
+  if (res.count === 0) return null;
+
+  const meanR = res.rSum / res.count;
+  const meanG = res.gSum / res.count;
+  const meanB = res.bSum / res.count;
+
+  let varR = 0;
+  let varG = 0;
+  let varB = 0;
+  for (let i = 0; i < res.count; i++) {
+    varR += Math.pow(res.rs[i] - meanR, 2);
+    varG += Math.pow(res.gs[i] - meanG, 2);
+    varB += Math.pow(res.bs[i] - meanB, 2);
+  }
+
+  return {
+    normX: clampedX,
+    normY: clampedY,
+    radiusRatio: clampedRadius,
+    r: Math.round(meanR * 10) / 10,
+    g: Math.round(meanG * 10) / 10,
+    b: Math.round(meanB * 10) / 10,
+    stdR: Math.max(10, Math.min(48, Math.sqrt(varR / res.count) * 1.15)),
+    stdG: Math.max(10, Math.min(48, Math.sqrt(varG / res.count) * 1.15)),
+    stdB: Math.max(10, Math.min(48, Math.sqrt(varB / res.count) * 1.15)),
+  };
+}
+
 /**
  * Reinhard Statistical Skin Tone / Color Matching.
- * Matches mean and standard deviation of RGB channels between source and target faces.
+ * Matches mean and standard deviation of RGB channels between source and target faces,
+ * or locks onto a user-sampled target-body SkinReferenceSample baseline when provided.
  */
 export function applySkinToneColorMatch(
   sourceImageData: ImageData,
   targetImageData: ImageData,
-  strength: number = 0.85
+  strength: number = 0.85,
+  skinReference?: SkinReferenceSample | null
 ): ImageData {
   const sData = sourceImageData.data;
   const tData = targetImageData.data;
@@ -698,34 +829,81 @@ export function applySkinToneColorMatch(
     return { rSum, gSum, bSum, count };
   };
 
+  let tRMean: number;
+  let tGMean: number;
+  let tBMean: number;
+  let tRStd: number;
+  let tGStd: number;
+  let tBStd: number;
+
   let tStats = isInnerSkin(tData, tw, th, true);
   if (tStats.count < 40) tStats = isInnerSkin(tData, tw, th, false);
-  if (tStats.count === 0) return sourceImageData;
 
-  const tRMean = tStats.rSum / tStats.count;
-  const tGMean = tStats.gSum / tStats.count;
-  const tBMean = tStats.bSum / tStats.count;
+  if (skinReference) {
+    // Use the touched body patch RGB as the authoritative color grading baseline
+    tRMean = skinReference.r;
+    tGMean = skinReference.g;
+    tBMean = skinReference.b;
+    if (tStats.count > 0) {
+      const localRMean = tStats.rSum / tStats.count;
+      const localGMean = tStats.gSum / tStats.count;
+      const localBMean = tStats.bSum / tStats.count;
+      let tRVar = 0, tGVar = 0, tBVar = 0, tVarCnt = 0;
+      const tHalfW = tw * 0.5 || 1;
+      const tHalfH = th * 0.5 || 1;
+      for (let y = 0; y < th; y += 2) {
+        const dy = (y - tHalfH) / tHalfH;
+        for (let x = 0; x < tw; x += 2) {
+          const dx = (x - tHalfW) / tHalfW;
+          if (dx * dx + dy * dy > 0.52) continue;
+          const i = (y * tw + x) * 4;
+          if (tData[i + 3] > 60) {
+            tRVar += Math.pow(tData[i] - localRMean, 2);
+            tGVar += Math.pow(tData[i + 1] - localGMean, 2);
+            tBVar += Math.pow(tData[i + 2] - localBMean, 2);
+            tVarCnt++;
+          }
+        }
+      }
+      const localRStd = Math.sqrt(tRVar / (tVarCnt || 1)) || 12;
+      const localGStd = Math.sqrt(tGVar / (tVarCnt || 1)) || 12;
+      const localBStd = Math.sqrt(tBVar / (tVarCnt || 1)) || 12;
+      tRStd = Math.max(10, skinReference.stdR * 0.55 + localRStd * 0.45);
+      tGStd = Math.max(10, skinReference.stdG * 0.55 + localGStd * 0.45);
+      tBStd = Math.max(10, skinReference.stdB * 0.55 + localBStd * 0.45);
+    } else {
+      tRStd = Math.max(12, skinReference.stdR);
+      tGStd = Math.max(12, skinReference.stdG);
+      tBStd = Math.max(12, skinReference.stdB);
+    }
+  } else {
+    if (tStats.count === 0) return sourceImageData;
 
-  let tRVar = 0, tGVar = 0, tBVar = 0, tVarCnt = 0;
-  const tHalfW = tw * 0.5 || 1;
-  const tHalfH = th * 0.5 || 1;
-  for (let y = 0; y < th; y += 2) {
-    const dy = (y - tHalfH) / tHalfH;
-    for (let x = 0; x < tw; x += 2) {
-      const dx = (x - tHalfW) / tHalfW;
-      if (dx * dx + dy * dy > 0.52) continue;
-      const i = (y * tw + x) * 4;
-      if (tData[i + 3] > 60) {
-        tRVar += Math.pow(tData[i] - tRMean, 2);
-        tGVar += Math.pow(tData[i + 1] - tGMean, 2);
-        tBVar += Math.pow(tData[i + 2] - tBMean, 2);
-        tVarCnt++;
+    tRMean = tStats.rSum / tStats.count;
+    tGMean = tStats.gSum / tStats.count;
+    tBMean = tStats.bSum / tStats.count;
+
+    let tRVar = 0, tGVar = 0, tBVar = 0, tVarCnt = 0;
+    const tHalfW = tw * 0.5 || 1;
+    const tHalfH = th * 0.5 || 1;
+    for (let y = 0; y < th; y += 2) {
+      const dy = (y - tHalfH) / tHalfH;
+      for (let x = 0; x < tw; x += 2) {
+        const dx = (x - tHalfW) / tHalfW;
+        if (dx * dx + dy * dy > 0.52) continue;
+        const i = (y * tw + x) * 4;
+        if (tData[i + 3] > 60) {
+          tRVar += Math.pow(tData[i] - tRMean, 2);
+          tGVar += Math.pow(tData[i + 1] - tGMean, 2);
+          tBVar += Math.pow(tData[i + 2] - tBMean, 2);
+          tVarCnt++;
+        }
       }
     }
+    tRStd = Math.sqrt(tRVar / (tVarCnt || 1)) || 1;
+    tGStd = Math.sqrt(tGVar / (tVarCnt || 1)) || 1;
+    tBStd = Math.sqrt(tBVar / (tVarCnt || 1)) || 1;
   }
-  const tRStd = Math.sqrt(tRVar / (tVarCnt || 1)) || 1;
-  const tGStd = Math.sqrt(tGVar / (tVarCnt || 1)) || 1;
-  const tBStd = Math.sqrt(tBVar / (tVarCnt || 1)) || 1;
 
   let sStats = isInnerSkin(sData, w, h, true);
   if (sStats.count < 40) sStats = isInnerSkin(sData, w, h, false);
@@ -3326,7 +3504,8 @@ export async function renderFaceSwap(
         applySkinToneColorMatch(
           sourceFaceData,
           targetPatchData,
-          adjustments.skinToneStrength / 100
+          adjustments.skinToneStrength / 100,
+          adjustments.skinReference
         );
       }
       if (adjustments.lightingAdjustment > 0 && targetPatchData && bgLightingStats) {

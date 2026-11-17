@@ -99,6 +99,29 @@ export function loadSavedAdjustments(): FaceAdjustments {
         continue;
       }
 
+      if (key === 'skinReference') {
+        if (candidate && typeof candidate === 'object') {
+          const s = candidate as Record<string, unknown>;
+          const nums = [s.normX, s.normY, s.radiusRatio, s.r, s.g, s.b, s.stdR, s.stdG, s.stdB];
+          if (nums.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+            restored[key] = {
+              normX: clamp(s.normX as number, 0, 1),
+              normY: clamp(s.normY as number, 0, 1),
+              radiusRatio: clamp(s.radiusRatio as number, 0.01, 0.12),
+              r: clamp(s.r as number, 0, 255),
+              g: clamp(s.g as number, 0, 255),
+              b: clamp(s.b as number, 0, 255),
+              stdR: clamp(s.stdR as number, 4, 80),
+              stdG: clamp(s.stdG as number, 4, 80),
+              stdB: clamp(s.stdB as number, 4, 80),
+            };
+          }
+        } else {
+          restored[key] = null;
+        }
+        continue;
+      }
+
       if (typeof defaultVal === 'boolean' && typeof candidate === 'boolean') {
         restored[key] = candidate;
       } else if (

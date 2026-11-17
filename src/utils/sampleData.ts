@@ -1,4 +1,4 @@
-import { FaceProfile } from '../types/face';
+import { FaceProfile, SkinReferenceSample } from '../types/face';
 import portraitSingleUrl from '../assets/images/portrait_target_single_1794415666287.jpg';
 import portraitDuoUrl from '../assets/images/portrait_target_duo_1794415666938.jpg';
 import portraitGroupUrl from '../assets/images/portrait_target_group_1794415667821.jpg';
@@ -42,6 +42,7 @@ export const DEFAULT_ADJUSTMENTS = {
   swapStrength: 92,
   skinToneMatch: true,
   skinToneStrength: 85,
+  skinReference: null as SkinReferenceSample | null,
   featherRadius: 22,
   brightness: 0,
   contrast: 10,

@@ -9,6 +9,7 @@ import {
   Rect,
   FaceLandmarks,
   LiveCameraConfig,
+  SkinReferenceSample,
 } from '../types/face';
 import { WardrobeAsset, WardrobeCategory } from '../types/body';
 import {
@@ -36,6 +37,7 @@ import {
   detectFacesOnCanvas,
   loadImage,
   renderFaceSwap,
+  sampleTargetSkinReference,
 } from '../utils/faceEngine';
 
 interface FaceStudioContextType {
@@ -144,6 +146,17 @@ interface FaceStudioContextType {
   // Auto-Refocus Camera Re-Centering Trigger
   refocusSignal: number;
   triggerAutoRefocus: () => void;
+
+  // Real-Time Target Body Skin Reference Picker
+  isSkinSamplingMode: boolean;
+  setIsSkinSamplingMode: (active: boolean) => void;
+  sampleSkinReferenceAt: (
+    normX: number,
+    normY: number,
+    radiusRatio?: number,
+    commitHistory?: boolean
+  ) => SkinReferenceSample | null;
+  clearSkinReference: () => void;
 }
 
 const FaceStudioContext = createContext<FaceStudioContextType | undefined>(undefined);
@@ -230,6 +243,8 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const manualMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hasManualMaskStrokes, setHasManualMaskStrokes] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isSkinSamplingMode, setIsSkinSamplingMode] = useState(false);
+  const prevTargetUrlForSkinRef = useRef<string>(targetImageUrl);
 
   // Auto-save adjustments to localStorage (debounced during rapid slider drags + flushed on unload)
   useEffect(() => {
@@ -303,6 +318,13 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   }, [activeProfileId]);
 
   useEffect(() => {
+    if (prevTargetUrlForSkinRef.current !== targetImageUrl) {
+      prevTargetUrlForSkinRef.current = targetImageUrl;
+      setIsSkinSamplingMode(false);
+      if (latestAdjustmentsRef.current.skinReference) {
+        setAdjustments((prev) => ({ ...prev, skinReference: null }));
+      }
+    }
     if (!targetImageUrl) {
       setTargetImageElement(null);
       setDetectedFaces([]);
@@ -1293,6 +1315,40 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     setRefocusSignal((n) => n + 1);
   }, [detectedFaces]);
 
+  const sampleSkinReferenceAt = useCallback(
+    (
+      normX: number,
+      normY: number,
+      radiusRatio?: number,
+      commitHistory: boolean = false
+    ): SkinReferenceSample | null => {
+      if (!targetImageElement) return null;
+      const rad =
+        radiusRatio ?? latestAdjustmentsRef.current.skinReference?.radiusRatio ?? 0.032;
+      const sample = sampleTargetSkinReference(targetImageElement, normX, normY, rad);
+      if (!sample) return null;
+      updateAdjustments(
+        {
+          skinToneMatch: true,
+          skinReference: sample,
+        },
+        commitHistory
+          ? `Skin Reference (#${[sample.r, sample.g, sample.b]
+              .map((v) => Math.round(v).toString(16).padStart(2, '0'))
+              .join('')
+              .toUpperCase()})`
+          : undefined
+      );
+      return sample;
+    },
+    [targetImageElement, updateAdjustments]
+  );
+
+  const clearSkinReference = useCallback(() => {
+    setIsSkinSamplingMode(false);
+    updateAdjustments({ skinReference: null }, 'Reset Skin Reference to Auto Face');
+  }, [updateAdjustments]);
+
   const syncFaceToLive = useCallback(
     (faceId?: string) => {
       const targetId = faceId || selectedFaceId || detectedFaces[0]?.id;
@@ -1403,6 +1459,10 @@ export const FaceStudioProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         syncFaceToLive,
         refocusSignal,
         triggerAutoRefocus,
+        isSkinSamplingMode,
+        setIsSkinSamplingMode,
+        sampleSkinReferenceAt,
+        clearSkinReference,
       }}
     >
       {children}

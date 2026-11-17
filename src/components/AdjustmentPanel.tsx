@@ -25,6 +25,7 @@ import {
   Activity,
   Crosshair,
   Compass,
+  Pipette,
 } from 'lucide-react';
 import { useFaceStudio } from '../context/FaceStudioContext';
 import {
@@ -265,6 +266,11 @@ export const AdjustmentPanel: React.FC = () => {
     autoOptimizeReport,
     autoOptimizeWithCamera,
     triggerAutoRefocus,
+    targetImageUrl,
+    isSkinSamplingMode,
+    setIsSkinSamplingMode,
+    sampleSkinReferenceAt,
+    clearSkinReference,
   } = useFaceStudio();
 
   const [activeSubTab, setActiveSubTab] = useState<AdjustmentSubTab>(
@@ -617,6 +623,123 @@ export const AdjustmentPanel: React.FC = () => {
                   />
                 </div>
               )}
+
+              {/* Real-Time Target-Body Skin Reference Picker */}
+              <div className="mt-2.5 pt-2.5 border-t border-slate-200/60 dark:border-slate-800/60 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {adjustments.skinReference ? (
+                      <div
+                        className="w-6 h-6 rounded-full border-2 border-white dark:border-slate-700 shadow-sm shrink-0"
+                        style={{
+                          backgroundColor: `rgb(${Math.round(adjustments.skinReference.r)}, ${Math.round(
+                            adjustments.skinReference.g
+                          )}, ${Math.round(adjustments.skinReference.b)})`,
+                        }}
+                        title={`Sampled RGB(${Math.round(adjustments.skinReference.r)}, ${Math.round(
+                          adjustments.skinReference.g
+                        )}, ${Math.round(adjustments.skinReference.b)})`}
+                      />
+                    ) : (
+                      <div className="w-6 h-6 rounded-full bg-amber-500/15 border border-amber-500/40 flex items-center justify-center shrink-0">
+                        <Pipette className="w-3.5 h-3.5 text-amber-500" />
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <span className="block text-xs font-semibold text-slate-800 dark:text-slate-200">
+                        Skin Reference
+                      </span>
+                      <span className="block text-[10px] text-slate-500 truncate">
+                        {isSkinSamplingMode
+                          ? 'Touch any part of target body to sample…'
+                          : adjustments.skinReference
+                          ? `Body Baseline #${[
+                              adjustments.skinReference.r,
+                              adjustments.skinReference.g,
+                              adjustments.skinReference.b,
+                            ]
+                              .map((v) => Math.round(v).toString(16).padStart(2, '0'))
+                              .join('')
+                              .toUpperCase()}`
+                          : 'Touch target body to override face baseline'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {adjustments.skinReference && (
+                      <button
+                        type="button"
+                        onClick={clearSkinReference}
+                        className="px-2 py-1 rounded-md text-[10px] font-medium bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors"
+                        title="Clear custom skin reference and revert to automatic face sampling"
+                      >
+                        Auto
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!targetImageUrl}
+                      onClick={() => {
+                        const next = !isSkinSamplingMode;
+                        if (next && (adjustments.brushMode !== 'none' || adjustments.showGeometricMesh)) {
+                          updateAdjustments({ brushMode: 'none', showGeometricMesh: false });
+                        }
+                        setIsSkinSamplingMode(next);
+                      }}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-all whitespace-nowrap ${
+                        !targetImageUrl
+                          ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed opacity-60'
+                          : isSkinSamplingMode
+                          ? 'bg-amber-500 text-slate-950 shadow-sm ring-2 ring-amber-400/50'
+                          : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs'
+                      }`}
+                      title="Touch or drag on any part of the target body to set baseline color"
+                    >
+                      <Pipette className="w-3 h-3 shrink-0" />
+                      <span>{isSkinSamplingMode ? 'Done' : 'Pick Skin'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {adjustments.skinReference && (
+                  <div>
+                    <div className="flex items-center justify-between text-[11px] mb-1">
+                      <span className="text-slate-600 dark:text-slate-400">Sample Patch Size</span>
+                      <span className="font-mono text-slate-500">
+                        {Math.round(adjustments.skinReference.radiusRatio * 1000)}px
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.014"
+                      max="0.075"
+                      step="0.002"
+                      value={adjustments.skinReference.radiusRatio}
+                      onChange={(e) => {
+                        const ref = adjustments.skinReference;
+                        if (ref) {
+                          sampleSkinReferenceAt(ref.normX, ref.normY, Number(e.target.value), false);
+                        }
+                      }}
+                      onMouseUp={() => {
+                        const ref = adjustments.skinReference;
+                        if (ref) {
+                          sampleSkinReferenceAt(ref.normX, ref.normY, ref.radiusRatio, true);
+                        }
+                      }}
+                      onTouchEnd={() => {
+                        const ref = adjustments.skinReference;
+                        if (ref) {
+                          sampleSkinReferenceAt(ref.normX, ref.normY, ref.radiusRatio, true);
+                        }
+                      }}
+                      aria-label="Skin Reference Sample Radius"
+                      className="w-full accent-amber-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer"
+                    />
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Edge Feathering Tool */}
