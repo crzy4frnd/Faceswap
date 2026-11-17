@@ -6,12 +6,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
@@ -46,9 +49,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -67,14 +73,27 @@ fun CustomAssetDialog(
     val context = LocalContext.current
     var rawBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var tolerance by remember { mutableIntStateOf(35) }
+    var removeStrayObjects by remember { mutableStateOf(true) }
+    var preserveDetails by remember { mutableStateOf(false) }
+    var manualMaskBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var undoHistory by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var assetName by remember { mutableStateOf("Custom Jacket") }
     var category by remember { mutableStateOf(WardrobeCategory.CLOTHING) }
     var anchorPoint by remember { mutableStateOf(BodyAnchorPoint.SHOULDERS) }
     var fabricType by remember { mutableStateOf(FabricType.SILK) }
 
-    val segmentedBitmap = remember(rawBitmap, tolerance) {
-        rawBitmap?.let { NativeAssetSegmenter.extractTransparentAsset(it, tolerance) }
+    val autoSegmentedBitmap = remember(rawBitmap, tolerance, removeStrayObjects, preserveDetails) {
+        rawBitmap?.let {
+            NativeAssetSegmenter.extractTransparentAsset(
+                source = it,
+                tolerance = tolerance,
+                removeExtraneousObjects = removeStrayObjects,
+                preserveInnerDetails = preserveDetails
+            )
+        }
     }
+    val segmentedBitmap = manualMaskBitmap ?: autoSegmentedBitmap
 
     var pendingCameraFile by remember { mutableStateOf<java.io.File?>(null) }
 
@@ -82,6 +101,8 @@ fun CustomAssetDialog(
         val file = pendingCameraFile
         if (success && file != null && file.exists()) {
             NativeStorageHelper.loadBitmapFromFile(file.absolutePath, 900)?.let { loaded ->
+                manualMaskBitmap = null
+                undoHistory = emptyList()
                 rawBitmap = loaded
             }
         }
@@ -90,6 +111,8 @@ fun CustomAssetDialog(
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let {
             NativeStorageHelper.loadBitmapFromUri(context, it, 900)?.let { loaded ->
+                manualMaskBitmap = null
+                undoHistory = emptyList()
                 rawBitmap = loaded
             }
         }
@@ -145,11 +168,11 @@ fun CustomAssetDialog(
                     }
                 }
 
-                // Segmented Preview Box
+                // Segmented Preview Box (supports 1-tap Magic Wand removal of stray items / inner gaps)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(170.dp)
+                        .height(175.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(Color(0xFF1E293B))
                         .border(1.dp, Color(0xFF334155), RoundedCornerShape(14.dp)),
@@ -160,8 +183,68 @@ fun CustomAssetDialog(
                             bitmap = segmentedBitmap.asImageBitmap(),
                             contentDescription = "Segmented Asset",
                             contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxWidth().padding(8.dp)
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(8.dp)
+                                .onSizeChanged { previewSize = it }
+                                .pointerInput(segmentedBitmap, tolerance) {
+                                    detectTapGestures { offset ->
+                                        val w = previewSize.width.toFloat()
+                                        val h = previewSize.height.toFloat()
+                                        if (w <= 0f || h <= 0f) return@detectTapGestures
+                                        val bmpAspect = segmentedBitmap.width.toFloat() / segmentedBitmap.height.toFloat()
+                                        val boxAspect = w / h
+                                        val drawW: Float
+                                        val drawH: Float
+                                        val padX: Float
+                                        val padY: Float
+                                        if (bmpAspect > boxAspect) {
+                                            drawW = w
+                                            drawH = w / bmpAspect
+                                            padX = 0f
+                                            padY = (h - drawH) * 0.5f
+                                        } else {
+                                            drawH = h
+                                            drawW = h * bmpAspect
+                                            padX = (w - drawW) * 0.5f
+                                            padY = 0f
+                                        }
+                                        val nx = (offset.x - padX) / drawW
+                                        val ny = (offset.y - padY) / drawH
+                                        if (nx in 0f..1f && ny in 0f..1f) {
+                                            val updated = NativeAssetSegmenter.removeConnectedRegionAt(
+                                                bitmap = segmentedBitmap,
+                                                normX = nx,
+                                                normY = ny,
+                                                tolerance = tolerance
+                                            )
+                                            if (updated !== segmentedBitmap) {
+                                                undoHistory = (undoHistory + segmentedBitmap).takeLast(8)
+                                                manualMaskBitmap = updated
+                                            }
+                                        }
+                                    }
+                                }
                         )
+                        if (undoHistory.isNotEmpty()) {
+                            IconButton(
+                                onClick = {
+                                    val prev = undoHistory.lastOrNull()
+                                    if (prev != null) {
+                                        undoHistory = undoHistory.dropLast(1)
+                                        manualMaskBitmap = prev
+                                    }
+                                },
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(6.dp)
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xCC0F172A))
+                            ) {
+                                Icon(Icons.Default.Undo, contentDescription = "Undo Tap Removal", tint = Color.White, modifier = Modifier.size(16.dp))
+                            }
+                        }
                     } else {
                         Text(
                             "Snap a photo or pick a shirt, dress, necklace, crown, or watch from Gallery.\nBackground is automatically removed.",
@@ -173,13 +256,45 @@ fun CustomAssetDialog(
                 }
 
                 if (rawBitmap != null) {
+                    Text(
+                        "Tap any remaining stray spot on the preview to erase it.",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 10.sp
+                    )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("BG Cutout $tolerance", color = Color(0xFF22D3EE), fontSize = 11.sp, modifier = Modifier.width(86.dp))
                         Slider(
                             value = tolerance.toFloat(),
-                            onValueChange = { tolerance = it.toInt() },
+                            onValueChange = {
+                                tolerance = it.toInt()
+                                manualMaskBitmap = null
+                                undoHistory = emptyList()
+                            },
                             valueRange = 10f..75f,
                             modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.horizontalScroll(rememberScrollState())
+                    ) {
+                        FilterChip(
+                            selected = removeStrayObjects,
+                            onClick = {
+                                removeStrayObjects = !removeStrayObjects
+                                manualMaskBitmap = null
+                                undoHistory = emptyList()
+                            },
+                            label = { Text("Strip Stray Objects", fontSize = 10.sp) }
+                        )
+                        FilterChip(
+                            selected = preserveDetails,
+                            onClick = {
+                                preserveDetails = !preserveDetails
+                                manualMaskBitmap = null
+                                undoHistory = emptyList()
+                            },
+                            label = { Text("Protect Inner White", fontSize = 10.sp) }
                         )
                     }
                 }

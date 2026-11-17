@@ -178,5 +178,9 @@ data class LiveCameraConfig(
     val faceSwapEnabled: Boolean = false,
     val swapStrength: Int = 90,
     val showLandmarkMesh: Boolean = false,
-    val useFrontCamera: Boolean = true
+    val useFrontCamera: Boolean = true,
+    val clothWidthScale: Float = 1.0f,
+    val clothCollarOffset: Float = 0f,
+    val clothFitHug: Float = 0.45f,
+    val faceMotionTrail: Boolean = true
 )

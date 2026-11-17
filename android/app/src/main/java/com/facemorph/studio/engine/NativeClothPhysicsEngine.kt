@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import com.facemorph.studio.model.BodyAnchorPoint
 import com.facemorph.studio.model.BodyScanResult
 import com.facemorph.studio.model.ClothPhysicsConfig
@@ -107,15 +109,26 @@ object NativeClothPhysicsEngine {
     ): ClothMeshState {
         val particles = mutableListOf<ClothParticle>()
         val springs = mutableListOf<ClothSpring>()
-        val dx = width / (cols - 1)
         val dy = height / (rows - 1)
+        val centerX = startX + width * 0.5f
 
         for (r in 0 until rows) {
+            val v = r.toFloat() / (rows - 1)
+            // Subtle tailored waist taper along middle torso & slight shoulder flare at top
+            val envelope = when {
+                v < 0.25f -> 1.0f - v * 0.16f
+                v < 0.65f -> 0.96f - sin(((v - 0.25f) / 0.40f) * PI.toFloat()) * 0.08f
+                else -> 0.94f + (v - 0.65f) * 0.14f
+            }
+            val rowW = width * envelope
+            val rowLeft = centerX - rowW * 0.5f
+            val rowDx = rowW / (cols - 1)
+
             for (c in 0 until cols) {
                 val u = c.toFloat() / (cols - 1)
-                val v = r.toFloat() / (rows - 1)
-                val px = startX + c * dx
-                val py = startY + r * dy
+                val collarArch = if (r == 0) sin(u * PI.toFloat()) * minOf(dy * 0.35f, 10f) else 0f
+                val px = rowLeft + c * rowDx
+                val py = startY + r * dy + collarArch
                 val isPinned = (r == 0) || (r == 1 && (c == 1 || c == cols - 2))
                 particles.add(
                     ClothParticle(
@@ -124,8 +137,8 @@ object NativeClothPhysicsEngine {
                         oldX = px,
                         oldY = py,
                         pinned = isPinned,
-                        pinOffsetX = (u - 0.5f) * width,
-                        pinOffsetY = v * height,
+                        pinOffsetX = px - centerX,
+                        pinOffsetY = r * dy + collarArch,
                         u = u,
                         v = v,
                         mass = 1.0f + v * 0.45f
@@ -357,10 +370,28 @@ object NativeClothPhysicsEngine {
 
             when (asset.anchorPoint) {
                 BodyAnchorPoint.SHOULDERS -> {
-                    val targetW = shoulderSpan * 1.48f * layer.scale
+                    val targetW = shoulderSpan * 1.56f * layer.scale
                     val targetH = targetW * (bmp.height.toFloat() / bmp.width.toFloat())
                     val cx = (scan.leftShoulder.x + scan.rightShoulder.x) * 0.5f + layer.offsetX
                     val cy = (scan.leftShoulder.y + scan.rightShoulder.y) * 0.5f + layer.offsetY
+
+                    canvas.save()
+                    val headHalfW = shoulderSpan * 0.24f
+                    val headCenterY = scan.nose.y + (scan.throat.y - scan.nose.y) * 0.35f
+                    val jawHole = Path().apply {
+                        fillType = Path.FillType.EVEN_ODD
+                        addRect(0f, 0f, targetBitmap.width.toFloat(), targetBitmap.height.toFloat(), Path.Direction.CW)
+                        addOval(
+                            RectF(
+                                scan.throat.x - headHalfW,
+                                headCenterY - headHalfW * 1.35f,
+                                scan.throat.x + headHalfW,
+                                scan.throat.y - 4f
+                            ),
+                            Path.Direction.CW
+                        )
+                    }
+                    canvas.clipPath(jawHole)
 
                     if (clothConfig.enabled && clothConfig.isSimulating) {
                         val mesh = clothMeshes[layer.assetId]?.takeIf {
@@ -384,6 +415,7 @@ object NativeClothPhysicsEngine {
                     } else {
                         drawScaledRotatedBitmap(canvas, bmp, cx, cy - targetH * 0.14f, targetW, targetH, layer.rotation, centeredY = false)
                     }
+                    canvas.restore()
                 }
 
                 BodyAnchorPoint.NECK -> {

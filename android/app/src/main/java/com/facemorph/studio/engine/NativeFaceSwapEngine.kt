@@ -28,7 +28,6 @@ import kotlin.coroutines.resume
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
-import kotlin.math.min
 
 object NativeFaceSwapEngine {
 
@@ -198,25 +197,105 @@ object NativeFaceSwapEngine {
         )
     }
 
-    private fun sampleAverageSkinRgb(bmp: Bitmap, cx: Int, cy: Int, radius: Int): Triple<Float, Float, Float> {
-        var r = 0L
-        var g = 0L
-        var b = 0L
-        var count = 0
-        val step = max(1, radius / 4)
-        for (dy in -radius..radius step step) {
+    fun sampleFacialSkinOnlyRgb(
+        bmp: Bitmap,
+        cx: Int,
+        cy: Int,
+        radiusX: Int,
+        radiusY: Int
+    ): Triple<Float, Float, Float> {
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        var skinCount = 0
+        var fallbackR = 0L
+        var fallbackG = 0L
+        var fallbackB = 0L
+        var fallbackCount = 0
+
+        val stepX = max(1, radiusX / 5)
+        val stepY = max(1, radiusY / 5)
+        for (dy in -radiusY..radiusY step stepY) {
             val py = (cy + dy).coerceIn(0, bmp.height - 1)
-            for (dx in -radius..radius step step) {
+            for (dx in -radiusX..radiusX step stepX) {
                 val px = (cx + dx).coerceIn(0, bmp.width - 1)
                 val c = bmp.getPixel(px, py)
-                r += Color.red(c)
-                g += Color.green(c)
-                b += Color.blue(c)
-                count++
+                val r = Color.red(c)
+                val g = Color.green(c)
+                val b = Color.blue(c)
+                val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                if (lum in 45f..242f) {
+                    fallbackR += r
+                    fallbackG += g
+                    fallbackB += b
+                    fallbackCount++
+                    // Exclude dark beard/hair/eyes & gray background; target pure facial skin
+                    if (r > 65 && g > 38 && b > 20 && r > g && (r - b) > 10) {
+                        rSum += r
+                        gSum += g
+                        bSum += b
+                        skinCount++
+                    }
+                }
             }
         }
-        val n = max(1, count).toFloat()
-        return Triple(r / n, g / n, b / n)
+        return if (skinCount >= 4) {
+            Triple(rSum.toFloat() / skinCount, gSum.toFloat() / skinCount, bSum.toFloat() / skinCount)
+        } else {
+            val n = max(1, fallbackCount).toFloat()
+            Triple(
+                if (fallbackCount > 0) fallbackR / n else 190f,
+                if (fallbackCount > 0) fallbackG / n else 148f,
+                if (fallbackCount > 0) fallbackB / n else 125f
+            )
+        }
+    }
+
+    /**
+     * Fast in-place luminance 3x3 unsharp clarity pass with coring threshold so eyes, brows,
+     * and lips render crisp and vivid without amplifying noise or edge halos.
+     */
+    private fun applyClaritySharpening(bitmap: Bitmap, clarityAmount: Float = 0.36f) {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 8 || h < 8 || clarityAmount <= 0.01f) return
+
+        val total = w * h
+        val src = IntArray(total)
+        bitmap.getPixels(src, 0, w, 0, 0, w, h)
+        val lum = FloatArray(total)
+        for (i in 0 until total) {
+            val c = src[i]
+            lum[i] = 0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c)
+        }
+
+        val out = src.copyOf()
+        val strength = clarityAmount * 1.15f
+        for (y in 1 until h - 1) {
+            val r0 = (y - 1) * w
+            val r1 = y * w
+            val r2 = (y + 1) * w
+            for (x in 1 until w - 1) {
+                val idx = r1 + x
+                val c = src[idx]
+                if (Color.alpha(c) < 25) continue
+
+                val blurL = (
+                    lum[r0 + x - 1] + 2f * lum[r0 + x] + lum[r0 + x + 1] +
+                        2f * lum[r1 + x - 1] + 4f * lum[idx] + 2f * lum[r1 + x + 1] +
+                        lum[r2 + x - 1] + 2f * lum[r2 + x] + lum[r2 + x + 1]
+                    ) / 16f
+                val detail = lum[idx] - blurL
+                if (kotlin.math.abs(detail) < 1.6f) continue
+
+                val delta = (detail * strength).coerceIn(-22f, 22f)
+                val nr = (Color.red(c) + delta).toInt().coerceIn(0, 255)
+                val ng = (Color.green(c) + delta).toInt().coerceIn(0, 255)
+                val nb = (Color.blue(c) + delta).toInt().coerceIn(0, 255)
+                out[idx] = Color.argb(Color.alpha(c), nr, ng, nb)
+            }
+        }
+        bitmap.setPixels(out, 0, w, 0, 0, w, h)
     }
 
     fun createFeatheredInnerFacePatch(
@@ -226,7 +305,8 @@ object NativeFaceSwapEngine {
         patchH: Int,
         featherRatio: Float,
         smartBlend: Boolean,
-        targetSkinRgb: Triple<Float, Float, Float>? = null
+        targetSkinRgb: Triple<Float, Float, Float>? = null,
+        applyDefaultRadialMask: Boolean = true
     ): Bitmap {
         val patch = Bitmap.createBitmap(patchW, patchH, Bitmap.Config.ARGB_8888)
         patch.setHasAlpha(true)
@@ -241,51 +321,73 @@ object NativeFaceSwapEngine {
         val dstRect = RectF(0f, 0f, patchW.toFloat(), patchH.toFloat())
 
         val facePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        // Subtle clarity contrast & vibrance lift paired with skin-only tone matching
+        val rGain: Float
+        val gGain: Float
+        val bGain: Float
         if (targetSkinRgb != null) {
             val srcCenterX = (sL + sR) / 2
-            val srcCenterY = (sT + (sB - sT) * 0.56f).toInt()
-            val (sr, sg, sb) = sampleAverageSkinRgb(srcBitmap, srcCenterX, srcCenterY, max(4, (sR - sL) / 8))
+            val srcCenterY = (sT + (sB - sT) * 0.44f).toInt()
+            val (sr, sg, sb) = sampleFacialSkinOnlyRgb(
+                srcBitmap,
+                srcCenterX,
+                srcCenterY,
+                max(4, (sR - sL) / 4),
+                max(4, (sB - sT) / 5)
+            )
             val (tr, tg, tb) = targetSkinRgb
-            val rGain = (tr / max(30f, sr)).coerceIn(0.76f, 1.32f)
-            val gGain = (tg / max(30f, sg)).coerceIn(0.76f, 1.32f)
-            val bGain = (tb / max(30f, sb)).coerceIn(0.74f, 1.30f)
-
-            val cm = ColorMatrix().apply {
-                set(
-                    floatArrayOf(
-                        rGain, 0f, 0f, 0f, 0f,
-                        0f, gGain, 0f, 0f, 0f,
-                        0f, 0f, bGain, 0f, 0f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-            }
-            facePaint.colorFilter = ColorMatrixColorFilter(cm)
+            rGain = (tr / max(45f, sr)).coerceIn(0.82f, 1.26f)
+            gGain = (tg / max(42f, sg)).coerceIn(0.82f, 1.26f)
+            bGain = (tb / max(38f, sb)).coerceIn(0.80f, 1.24f)
+        } else {
+            rGain = 1.0f
+            gGain = 1.0f
+            bGain = 1.0f
         }
+
+        // Mild S-curve contrast pop (1.06x) prevents dull/washed appearance
+        val cScale = 1.06f
+        val cShift = -7.5f
+        val cm = ColorMatrix().apply {
+            set(
+                floatArrayOf(
+                    rGain * cScale, 0f, 0f, 0f, cShift,
+                    0f, gGain * cScale, 0f, 0f, cShift,
+                    0f, 0f, bGain * cScale, 0f, cShift,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+        }
+        facePaint.colorFilter = ColorMatrixColorFilter(cm)
 
         pCanvas.drawBitmap(srcBitmap, srcRect, dstRect, facePaint)
 
-        // Elliptical anatomical face mask stretched cleanly to patchW x patchH
-        val innerStop = (0.68f - featherRatio * 0.25f - (if (smartBlend) 0.12f else 0f)).coerceIn(0.24f, 0.72f)
-        val gradient = RadialGradient(
-            0f,
-            0f,
-            1f,
-            intArrayOf(Color.WHITE, Color.WHITE, Color.argb(145, 255, 255, 255), Color.TRANSPARENT),
-            floatArrayOf(0f, innerStop, (innerStop + 1f) * 0.5f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        val gradMatrix = Matrix().apply {
-            setScale(patchW * 0.49f, patchH * 0.49f)
-            postTranslate(patchW * 0.5f, patchH * 0.5f)
-        }
-        gradient.setLocalMatrix(gradMatrix)
+        // Apply crisp luminance unsharp clarity filter before alpha perimeter mask
+        applyClaritySharpening(patch, clarityAmount = 0.36f)
 
-        val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-            shader = gradient
+        // Solid opaque interior core (prevents blurry double-exposure ghosting on eyes/mouth), smooth edge feather
+        if (applyDefaultRadialMask) {
+            val innerStop = (0.76f - featherRatio * 0.24f - (if (smartBlend) 0.06f else 0f)).coerceIn(0.48f, 0.80f)
+            val gradient = RadialGradient(
+                0f,
+                0f,
+                1f,
+                intArrayOf(Color.WHITE, Color.WHITE, Color.argb(180, 255, 255, 255), Color.TRANSPARENT),
+                floatArrayOf(0f, innerStop, (innerStop + 1f) * 0.52f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            val gradMatrix = Matrix().apply {
+                setScale(patchW * 0.49f, patchH * 0.49f)
+                postTranslate(patchW * 0.5f, patchH * 0.5f)
+            }
+            gradient.setLocalMatrix(gradMatrix)
+
+            val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                shader = gradient
+            }
+            pCanvas.drawRect(dstRect, maskPaint)
         }
-        pCanvas.drawRect(dstRect, maskPaint)
         return patch
     }
 
@@ -334,22 +436,42 @@ object NativeFaceSwapEngine {
             val patchH = max(24, faceH.toInt())
 
             val targetSkinRgb = if (adjustments.skinToneMatch) {
-                sampleAverageSkinRgb(
+                // Sample cheek & forehead bridge strictly inside clean skin oval (avoids moustaches/shadows)
+                sampleFacialSkinOnlyRgb(
                     targetBitmap,
                     lm.nose.x.toInt(),
-                    ((lm.nose.y + lm.lips.y) * 0.48f).toInt(),
-                    max(4, (faceW * 0.11f).toInt())
+                    ((lm.leftEye.y + lm.rightEye.y) * 0.5f + (lm.nose.y - lm.leftEye.y) * 0.35f).toInt(),
+                    max(6, (faceW * 0.24f).toInt()),
+                    max(6, (faceH * 0.16f).toInt())
                 )
             } else null
 
+            val featherRatio = (adjustments.featherRadius / 50f).coerceIn(0.15f, 0.85f)
             val patch = createFeatheredInnerFacePatch(
                 srcBitmap = srcBitmap,
                 metrics = metrics,
                 patchW = patchW,
                 patchH = patchH,
-                featherRatio = (adjustments.featherRadius / 50f).coerceIn(0.15f, 0.85f),
+                featherRatio = featherRatio,
                 smartBlend = adjustments.smartBlend,
-                targetSkinRgb = targetSkinRgb
+                targetSkinRgb = targetSkinRgb,
+                applyDefaultRadialMask = false
+            )
+
+            val swapMatrix = Matrix().apply {
+                setTranslate(-patchW * metrics.eyeMidXRatio, -patchH * metrics.eyeMidYRatio)
+                postRotate(finalAngle)
+                postTranslate(targetEyeMidX, targetEyeMidY)
+            }
+
+            FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
+                patch = patch,
+                targetSource = targetBitmap,
+                swapMatrix = swapMatrix,
+                featherRatio = featherRatio,
+                smartBlend = adjustments.smartBlend,
+                blendIntensity = (adjustments.smartBlendIntensity / 100f).coerceIn(0f, 1f),
+                preserveHighContrastOcclusions = adjustments.autoMaskHair || adjustments.autoMaskAccessories
             )
 
             val alpha = ((adjustments.swapStrength * face.strength) / 10000f * 255f).toInt().coerceIn(0, 255)
@@ -357,16 +479,7 @@ object NativeFaceSwapEngine {
                 this.alpha = alpha
             }
 
-            canvas.save()
-            canvas.translate(targetEyeMidX, targetEyeMidY)
-            canvas.rotate(finalAngle)
-            canvas.drawBitmap(
-                patch,
-                -patchW * metrics.eyeMidXRatio,
-                -patchH * metrics.eyeMidYRatio,
-                compositePaint
-            )
-            canvas.restore()
+            canvas.drawBitmap(patch, swapMatrix, compositePaint)
             patch.recycle()
         }
 

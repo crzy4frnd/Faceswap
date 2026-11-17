@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
@@ -97,6 +98,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
 
 @Composable
 fun LiveCameraScreen(viewModel: StudioViewModel) {
@@ -559,13 +561,16 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                val toggles = listOf(
-                                    Triple("BG Cutout", config.removeBackground) { viewModel.liveConfig = config.copy(removeBackground = !config.removeBackground) },
-                                    Triple("Skin Smooth", config.removeHairAndBlemishes) { viewModel.liveConfig = config.copy(removeHairAndBlemishes = !config.removeHairAndBlemishes) },
-                                    Triple("Clothes", config.wearClothes) { viewModel.liveConfig = config.copy(wearClothes = !config.wearClothes) },
-                                    Triple("Jewelry", config.wearJewelry) { viewModel.liveConfig = config.copy(wearJewelry = !config.wearJewelry) },
-                                    Triple("Face Swap", config.faceSwapEnabled) { viewModel.liveConfig = config.copy(faceSwapEnabled = !config.faceSwapEnabled) }
-                                )
+                                val toggles = buildList {
+                                    add(Triple("BG Cutout", config.removeBackground) { viewModel.liveConfig = config.copy(removeBackground = !config.removeBackground) })
+                                    add(Triple("Skin Smooth", config.removeHairAndBlemishes) { viewModel.liveConfig = config.copy(removeHairAndBlemishes = !config.removeHairAndBlemishes) })
+                                    add(Triple("Clothes", config.wearClothes) { viewModel.liveConfig = config.copy(wearClothes = !config.wearClothes) })
+                                    add(Triple("Jewelry", config.wearJewelry) { viewModel.liveConfig = config.copy(wearJewelry = !config.wearJewelry) })
+                                    add(Triple("Face Swap", config.faceSwapEnabled) { viewModel.liveConfig = config.copy(faceSwapEnabled = !config.faceSwapEnabled) })
+                                    if (config.faceSwapEnabled) {
+                                        add(Triple("Motion Trail", config.faceMotionTrail) { viewModel.liveConfig = config.copy(faceMotionTrail = !config.faceMotionTrail) })
+                                    }
+                                }
                                 toggles.forEach { (label, active, onClick) ->
                                     Text(
                                         label,
@@ -638,6 +643,26 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                         onValueChange = { viewModel.liveConfig = config.copy(swapStrength = it.toInt()) },
                                         valueRange = 20f..100f,
                                         modifier = Modifier.weight(1f).height(26.dp)
+                                    )
+                                }
+                            } else if (config.wearClothes) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Body-fit mesh tracks shoulders & torso.", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                                    Text(
+                                        "Tune Fit",
+                                        color = Color(0xFF38BDF8),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(7.dp))
+                                            .background(Color(0xFF0F172A))
+                                            .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(7.dp))
+                                            .clickable { activeDeckTab = 2 }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
                                     )
                                 }
                             } else {
@@ -758,6 +783,86 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                         }
                                         Spacer(Modifier.height(3.dp))
                                         Text(asset.name, color = Color.White, fontSize = 9.sp, maxLines = 1)
+                                    }
+                                }
+                            }
+
+                            if (config.wearClothes) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF111827))
+                                        .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("Body Fit Calibration", color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF1E293B))
+                                                .clickable {
+                                                    viewModel.liveConfig = config.copy(
+                                                        clothWidthScale = 1.0f,
+                                                        clothCollarOffset = 0f,
+                                                        clothFitHug = 0.45f
+                                                    )
+                                                }
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Icon(Icons.Default.RestartAlt, contentDescription = "Reset Fit", tint = Color(0xFF94A3B8), modifier = Modifier.size(12.dp))
+                                            Spacer(Modifier.width(3.dp))
+                                            Text("Reset", color = Color(0xFFCBD5E1), fontSize = 9.sp)
+                                        }
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "Width ${(config.clothWidthScale * 100f).roundToInt()}%",
+                                            color = Color(0xFFCBD5E1),
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.width(82.dp)
+                                        )
+                                        Slider(
+                                            value = config.clothWidthScale,
+                                            onValueChange = { viewModel.liveConfig = config.copy(clothWidthScale = it) },
+                                            valueRange = 0.75f..1.40f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "Collar ${config.clothCollarOffset.roundToInt()}",
+                                            color = Color(0xFFCBD5E1),
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.width(82.dp)
+                                        )
+                                        Slider(
+                                            value = config.clothCollarOffset,
+                                            onValueChange = { viewModel.liveConfig = config.copy(clothCollarOffset = it) },
+                                            valueRange = -40f..40f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "Hug ${(config.clothFitHug * 100f).roundToInt()}%",
+                                            color = Color(0xFFCBD5E1),
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.width(82.dp)
+                                        )
+                                        Slider(
+                                            value = config.clothFitHug,
+                                            onValueChange = { viewModel.liveConfig = config.copy(clothFitHug = it) },
+                                            valueRange = 0f..1f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
                                     }
                                 }
                             }
