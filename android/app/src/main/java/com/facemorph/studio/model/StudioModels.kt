@@ -59,6 +59,23 @@ data class TargetSampleItem(
     val customFilePath: String? = null
 )
 
+data class SkinSamplePatch(
+    val normX: Float,
+    val normY: Float,
+    val radiusRatio: Float = 0.032f,
+    val sampledRed: Float,
+    val sampledGreen: Float,
+    val sampledBlue: Float
+)
+
+data class VirtualLightConfig(
+    val enabled: Boolean = true,
+    val directionDeg: Float = 305f,
+    val elevationDeg: Float = 38f,
+    val intensity: Float = 0.36f,
+    val warmth: Float = 0.08f
+)
+
 data class FaceAdjustments(
     val swapStrength: Int = 92,
     val skinToneMatch: Boolean = true,
@@ -71,7 +88,9 @@ data class FaceAdjustments(
     val scale: Float = 1.0f,
     val rotation: Float = 0f,
     val offsetX: Float = 0f,
-    val offsetY: Float = 0f
+    val offsetY: Float = 0f,
+    val manualSkinPatch: SkinSamplePatch? = null,
+    val virtualLight: VirtualLightConfig = VirtualLightConfig()
 )
 
 enum class WardrobeCategory(val label: String) {
@@ -182,5 +201,6 @@ data class LiveCameraConfig(
     val clothWidthScale: Float = 1.0f,
     val clothCollarOffset: Float = 0f,
     val clothFitHug: Float = 0.45f,
-    val faceMotionTrail: Boolean = true
+    val faceMotionTrail: Boolean = true,
+    val virtualLight: VirtualLightConfig = VirtualLightConfig()
 )

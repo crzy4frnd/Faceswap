@@ -7,13 +7,18 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
+import android.util.Size
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
@@ -23,7 +28,10 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -49,6 +57,7 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FiberManualRecord
@@ -57,6 +66,7 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -65,12 +75,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -87,24 +97,23 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.facemorph.studio.engine.AsyncCameraFrameBridge
 import com.facemorph.studio.engine.NativeLiveArEngine
 import com.facemorph.studio.engine.NativeStorageHelper
+import com.facemorph.studio.engine.ThermalPerformanceMonitor
 import com.facemorph.studio.model.WardrobeCategory
 import com.facemorph.studio.viewmodel.StudioViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 @Composable
 fun LiveCameraScreen(viewModel: StudioViewModel) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
 
     val config = viewModel.liveConfig
     val latestConfig by rememberUpdatedState(config)
@@ -117,6 +126,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
 
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Effects, 1=Background, 2=Wardrobe
     var isDeckExpanded by remember { mutableStateOf(true) }
+    var showLiveLightStudio by remember { mutableStateOf(false) }
     var pendingFaceCameraFile by remember { mutableStateOf<File?>(null) }
 
     var hasCameraPermission by remember {
@@ -177,18 +187,77 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
     }
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    val isProcessingFrame = remember { AtomicBoolean(false) }
+    val frameBridge = remember { AsyncCameraFrameBridge() }
+    val thermalMonitor = remember { ThermalPerformanceMonitor(context.applicationContext) }
+    val thermalWarning by thermalMonitor.warningState.collectAsState()
     val startTimeMs = remember { System.currentTimeMillis() }
 
-    DisposableEffect(Unit) {
+    LaunchedEffect(config.faceSwapEnabled) {
+        thermalMonitor.setFaceSwapActive(config.faceSwapEnabled)
+    }
+
+    DisposableEffect(thermalMonitor) {
+        thermalMonitor.startMonitoring()
         onDispose {
+            thermalMonitor.stopMonitoring()
             activeRecording?.stop()
+            frameBridge.frameSignal.close()
             cameraExecutor.shutdown()
+        }
+    }
+
+    // Dedicated asynchronous ML & rendering consumer loop decoupled from CameraX ImageProxy HAL queue
+    LaunchedEffect(frameBridge) {
+        withContext(Dispatchers.Default) {
+            var lastEmittedBitmap: Bitmap? = null
+            for (ignored in frameBridge.frameSignal) {
+                val decoded = frameBridge.acquireLatestDecodedFrame() ?: continue
+                val curCfg = latestConfig
+                val bgBmp = latestBgMap[curCfg.activeBgId]
+                val swapBmp = latestProfileMap[latestActiveProfileId]
+                val swapMetrics = latestMetricsMap[latestActiveProfileId]
+                val clothAsset = latestWardrobeAssets.find { it.id == curCfg.selectedClothingId }
+                val clothBmp = clothAsset?.let { latestWardrobeBitmaps[it.id] }
+                val jewAsset = latestWardrobeAssets.find { it.id == curCfg.selectedJewelryId }
+                val jewBmp = jewAsset?.let { latestWardrobeBitmaps[it.id] }
+                val elapsedSec = (System.currentTimeMillis() - startTimeMs) / 1000f
+
+                val reusableOut = frameBridge.acquireReusableOutputBitmap(
+                    w = decoded.width,
+                    h = decoded.height,
+                    currentlyDisplayed = lastEmittedBitmap
+                )
+                val frameStartMs = SystemClock.elapsedRealtime()
+                val out = NativeLiveArEngine.processLiveFrame(
+                    frame = decoded.bitmap,
+                    config = curCfg,
+                    bgBitmap = bgBmp,
+                    swapProfileBitmap = swapBmp,
+                    swapProfileMetrics = swapMetrics,
+                    clothingAsset = clothAsset,
+                    clothingBitmap = clothBmp,
+                    jewelryAsset = jewAsset,
+                    jewelryBitmap = jewBmp,
+                    timeSec = elapsedSec,
+                    reusableOutput = reusableOut
+                )
+                val frameDurationMs = SystemClock.elapsedRealtime() - frameStartMs
+                thermalMonitor.recordFrameMetrics(
+                    isFaceSwapActive = curCfg.faceSwapEnabled && swapBmp != null && swapMetrics != null && curCfg.swapStrength > 0,
+                    processingDurationMs = frameDurationMs,
+                    droppedFromBridge = decoded.droppedSinceLast
+                )
+                lastEmittedBitmap = out
+                withContext(Dispatchers.Main.immediate) {
+                    processedBitmap = out
+                }
+            }
         }
     }
 
     LaunchedEffect(hasCameraPermission, config.useFrontCamera) {
         if (!hasCameraPermission) return@LaunchedEffect
+        frameBridge.resetSequenceForCameraSwitch()
         val cameraProvider = withContext(Dispatchers.IO) {
             ProcessCameraProvider.getInstance(context).get()
         }
@@ -204,61 +273,24 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
             setSurfaceProvider(previewView.surfaceProvider)
         }
 
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(720, 960),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
         val imageAnalysis = ImageAnalysis.Builder()
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .setResolutionSelector(resolutionSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
         imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-            if (!isProcessingFrame.compareAndSet(false, true)) {
-                imageProxy.close()
-                return@setAnalyzer
-            }
-            try {
-                val rawBmp = imageProxy.toBitmap()
-                val rotated = NativeLiveArEngine.rotateAndMirrorBitmap(
-                    rawBmp,
-                    imageProxy.imageInfo.rotationDegrees,
-                    mirrorHorizontal = latestConfig.useFrontCamera
-                )
-                if (rotated !== rawBmp) rawBmp.recycle()
-
-                val curCfg = latestConfig
-                val bgBmp = latestBgMap[curCfg.activeBgId]
-                val swapBmp = latestProfileMap[latestActiveProfileId]
-                val swapMetrics = latestMetricsMap[latestActiveProfileId]
-                val clothAsset = latestWardrobeAssets.find { it.id == curCfg.selectedClothingId }
-                val clothBmp = clothAsset?.let { latestWardrobeBitmaps[it.id] }
-                val jewAsset = latestWardrobeAssets.find { it.id == curCfg.selectedJewelryId }
-                val jewBmp = jewAsset?.let { latestWardrobeBitmaps[it.id] }
-                val elapsedSec = (System.currentTimeMillis() - startTimeMs) / 1000f
-
-                scope.launch(Dispatchers.Default) {
-                    try {
-                        val out = NativeLiveArEngine.processLiveFrame(
-                            frame = rotated,
-                            config = curCfg,
-                            bgBitmap = bgBmp,
-                            swapProfileBitmap = swapBmp,
-                            swapProfileMetrics = swapMetrics,
-                            clothingAsset = clothAsset,
-                            clothingBitmap = clothBmp,
-                            jewelryAsset = jewAsset,
-                            jewelryBitmap = jewBmp,
-                            timeSec = elapsedSec
-                        )
-                        rotated.recycle()
-                        withContext(Dispatchers.Main) {
-                            processedBitmap = out
-                        }
-                    } finally {
-                        isProcessingFrame.set(false)
-                    }
-                }
-            } catch (_: Exception) {
-                isProcessingFrame.set(false)
-            } finally {
-                imageProxy.close()
-            }
+            frameBridge.submitImageProxy(imageProxy, mirrorHorizontal = latestConfig.useFrontCamera)
         }
 
         val recorder = Recorder.Builder()
@@ -424,6 +456,78 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                         Icon(Icons.Default.Cameraswitch, contentDescription = "Flip Camera", tint = Color.White, modifier = Modifier.size(16.dp))
                     }
                 }
+
+                // Visual 'Performance Warning' overlay shown only when device thermals cause dropped frames during real-time face swap
+                AnimatedVisibility(
+                    visible = thermalWarning.showPerformanceWarning && config.faceSwapEnabled,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    val severe = thermalWarning.isSevereThrottling
+                    val borderTint = if (severe) Color(0xFFEF4444) else Color(0xFFF59E0B)
+                    val accentTint = if (severe) Color(0xFFFCA5A5) else Color(0xFFFDE68A)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(Color(0xE6111827))
+                            .border(1.2.dp, borderTint, RoundedCornerShape(11.dp))
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Performance Warning",
+                            tint = borderTint,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Performance Warning",
+                                color = accentTint,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                thermalWarning.message.ifBlank { "Device thermals are throttling real-time face swap" },
+                                color = Color(0xFFE2E8F0),
+                                fontSize = 10.sp
+                            )
+                        }
+                        if (config.faceMotionTrail || config.removeHairAndBlemishes || config.removeBackground) {
+                            Text(
+                                "Optimize",
+                                color = Color(0xFF0F172A),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(borderTint)
+                                    .clickable {
+                                        viewModel.liveConfig = config.copy(
+                                            faceMotionTrail = false,
+                                            removeHairAndBlemishes = false,
+                                            removeBackground = false
+                                        )
+                                        thermalMonitor.dismissWarningTemporarily()
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Dismiss Warning",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clickable { thermalMonitor.dismissWarningTemporarily() }
+                        )
+                    }
+                }
             }
         }
 
@@ -457,7 +561,12 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                         .background(Color.White)
                         .border(3.dp, Color(0xFF6366F1), CircleShape)
                         .clickable {
-                            processedBitmap?.let { viewModel.exportBitmapToGallery(it, "LiveAR") }
+                            processedBitmap?.let { bmp ->
+                                val snapshot = bmp.copy(Bitmap.Config.ARGB_8888, false)
+                                if (snapshot != null) {
+                                    viewModel.exportBitmapToGallery(snapshot, "LiveAR")
+                                }
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -569,7 +678,9 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                     add(Triple("Face Swap", config.faceSwapEnabled) { viewModel.liveConfig = config.copy(faceSwapEnabled = !config.faceSwapEnabled) })
                                     if (config.faceSwapEnabled) {
                                         add(Triple("Motion Trail", config.faceMotionTrail) { viewModel.liveConfig = config.copy(faceMotionTrail = !config.faceMotionTrail) })
+                                        add(Triple("Relight", showLiveLightStudio) { showLiveLightStudio = !showLiveLightStudio })
                                     }
+                                    add(Triple("3D Mesh", config.showLandmarkMesh) { viewModel.liveConfig = config.copy(showLandmarkMesh = !config.showLandmarkMesh) })
                                 }
                                 toggles.forEach { (label, active, onClick) ->
                                     Text(
@@ -585,6 +696,14 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                             .padding(horizontal = 10.dp, vertical = 6.dp)
                                     )
                                 }
+                            }
+
+                            if (config.faceSwapEnabled && showLiveLightStudio) {
+                                VirtualLightingStudioPanel(
+                                    light = config.virtualLight,
+                                    onLightChange = { viewModel.liveConfig = config.copy(virtualLight = it) },
+                                    compact = true
+                                )
                             }
 
                             if (config.faceSwapEnabled && viewModel.faceProfiles.isEmpty()) {
@@ -832,7 +951,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                         Slider(
                                             value = config.clothWidthScale,
                                             onValueChange = { viewModel.liveConfig = config.copy(clothWidthScale = it) },
-                                            valueRange = 0.75f..1.40f,
+                                            valueRange = 0.75f..1.55f,
                                             modifier = Modifier.weight(1f).height(24.dp)
                                         )
                                     }
@@ -846,7 +965,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                         Slider(
                                             value = config.clothCollarOffset,
                                             onValueChange = { viewModel.liveConfig = config.copy(clothCollarOffset = it) },
-                                            valueRange = -40f..40f,
+                                            valueRange = -80f..80f,
                                             modifier = Modifier.weight(1f).height(24.dp)
                                         )
                                     }

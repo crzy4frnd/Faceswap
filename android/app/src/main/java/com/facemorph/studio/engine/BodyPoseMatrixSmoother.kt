@@ -188,6 +188,8 @@ data class StabilizedFacePose(
     val eyeMidY: Float,
     val eyeDist: Float,
     val rollDeg: Float,
+    val yawDeg: Float = 0f,
+    val pitchDeg: Float = 0f,
     val trackingConfidence: Float
 )
 
@@ -218,7 +220,9 @@ data class StabilizedBodyFitState(
     val chestOffsetRatioX: Float,
     val waistOffsetRatioX: Float,
     val effectiveTiltDeg: Float,
-    val poseBlendAlpha: Float
+    val poseBlendAlpha: Float,
+    val shoulderSeamV: Float,
+    val shoulderSlopeDiffY: Float
 )
 
 /**
@@ -254,6 +258,8 @@ class BodyPoseMatrixSmoother {
     private val kfEyeY = KalmanFilter1D(processNoisePos = 22f, processNoiseVel = 740f, baseMeasurementNoise = 2.6f, outlierZThreshold = 3.8f)
     private val kfEyeDist = KalmanFilter1D(processNoisePos = 6f, processNoiseVel = 180f, baseMeasurementNoise = 5.2f, outlierZThreshold = 1.75f)
     private val kfRoll = KalmanFilter1D(processNoisePos = 9f, processNoiseVel = 280f, baseMeasurementNoise = 3.8f, outlierZThreshold = 2.1f)
+    private val kfYaw = KalmanFilter1D(processNoisePos = 10f, processNoiseVel = 310f, baseMeasurementNoise = 4.2f, outlierZThreshold = 2.2f)
+    private val kfPitch = KalmanFilter1D(processNoisePos = 10f, processNoiseVel = 310f, baseMeasurementNoise = 4.2f, outlierZThreshold = 2.2f)
 
     // Face-Swap Transformation Matrix component Kalman filters (anti-flicker during speech & whip-pans)
     private val swapKfX = KalmanFilter1D(processNoisePos = 20f, processNoiseVel = 680f, baseMeasurementNoise = 2.2f, outlierZThreshold = 3.5f)
@@ -272,6 +278,8 @@ class BodyPoseMatrixSmoother {
     private val fEyeY = OneEuroFilter1D(minCutoff = 2.10f, beta = 0.024f)
     private val fEyeDist = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.014f)
     private val fRoll = OneEuroFilter1D(minCutoff = 1.55f, beta = 0.016f)
+    private val fYaw = OneEuroFilter1D(minCutoff = 1.60f, beta = 0.018f)
+    private val fPitch = OneEuroFilter1D(minCutoff = 1.60f, beta = 0.018f)
 
     // Body pose keypoint One-Euro filters
     private val pShLX = OneEuroFilter1D(minCutoff = 1.15f, beta = 0.014f)
@@ -302,11 +310,11 @@ class BodyPoseMatrixSmoother {
         missedFaceFrames = 0
         lastValidFace = null
         listOf(
-            kfCx, kfCy, kfBottomY, kfW, kfH, kfEyeX, kfEyeY, kfEyeDist, kfRoll,
+            kfCx, kfCy, kfBottomY, kfW, kfH, kfEyeX, kfEyeY, kfEyeDist, kfRoll, kfYaw, kfPitch,
             swapKfX, swapKfY, swapKfPatchW, swapKfPatchH, swapKfAngle
         ).forEach { it.reset() }
         listOf(
-            fCx, fCy, fChinY, fW, fH, fEyeX, fEyeY, fEyeDist, fRoll,
+            fCx, fCy, fChinY, fW, fH, fEyeX, fEyeY, fEyeDist, fRoll, fYaw, fPitch,
             pShLX, pShLY, pShRX, pShRY, pChLX, pChRX, pChY, pWaLX, pWaRX, pWaY, pConfFilter,
             mTx, mTy, mSx, mSy, mRot, mSkew
         ).forEach { it.reset() }
@@ -346,6 +354,8 @@ class BodyPoseMatrixSmoother {
         rawEyeMidY: Float?,
         rawEyeDist: Float?,
         rawRollDeg: Float?,
+        rawYawDeg: Float? = null,
+        rawPitchDeg: Float? = null,
         frameW: Int,
         frameH: Int,
         dtSec: Float
@@ -367,6 +377,8 @@ class BodyPoseMatrixSmoother {
                 eyeMidY = rawEyeMidY ?: (rawCenterY - fh * 0.10f),
                 eyeDist = rawEyeDist ?: (fw * 0.44f),
                 rollDeg = rawRollDeg ?: 0f,
+                yawDeg = (rawYawDeg ?: 0f).coerceIn(-65f, 65f),
+                pitchDeg = (rawPitchDeg ?: 0f).coerceIn(-55f, 55f),
                 trackingConfidence = 1.0f
             ).also { lastValidFace = it }
         } else {
@@ -390,6 +402,8 @@ class BodyPoseMatrixSmoother {
                     eyeMidY = fallbackCy - fallbackH * 0.10f,
                     eyeDist = fallbackW * 0.44f,
                     rollDeg = 0f,
+                    yawDeg = 0f,
+                    pitchDeg = 0f,
                     trackingConfidence = 0.15f
                 )
             }
@@ -419,6 +433,8 @@ class BodyPoseMatrixSmoother {
         val kEyeY: Float
         val kEyeDist: Float
         val kRoll: Float
+        val kYaw: Float
+        val kPitch: Float
 
         if (!detected && missedFaceFrames <= 10 && kfCx.isInitialized()) {
             // Velocity-predicted Kalman coasting when fast motion causes a transient detection drop
@@ -431,6 +447,8 @@ class BodyPoseMatrixSmoother {
             kEyeY = kfEyeY.predict(dtSec)
             kEyeDist = max(12f, kfEyeDist.predict(dtSec))
             kRoll = kfRoll.predict(dtSec)
+            kYaw = kfYaw.predict(dtSec).coerceIn(-65f, 65f)
+            kPitch = kfPitch.predict(dtSec).coerceIn(-55f, 55f)
         } else {
             val prevEyeD = if (kfEyeDist.isInitialized()) max(1f, kfEyeDist.currentValue()) else rawFace.eyeDist
             val prevH = if (kfH.isInitialized()) max(1f, kfH.currentValue()) else rawFace.height
@@ -448,6 +466,8 @@ class BodyPoseMatrixSmoother {
             kEyeY = kfEyeY.update(rawFace.eyeMidY, dtSec)
             kEyeDist = max(12f, kfEyeDist.update(rawFace.eyeDist, dtSec))
             kRoll = kfRoll.updateAngleDeg(rawFace.rollDeg, dtSec)
+            kYaw = kfYaw.updateAngleDeg(rawFace.yawDeg, dtSec).coerceIn(-65f, 65f)
+            kPitch = kfPitch.updateAngleDeg(rawFace.pitchDeg, dtSec).coerceIn(-55f, 55f)
         }
 
         // Stage 2: One-Euro micro-tremor polish on Kalman-stabilized face state
@@ -461,6 +481,8 @@ class BodyPoseMatrixSmoother {
             eyeMidY = fEyeY.filter(kEyeY, dtSec),
             eyeDist = fEyeDist.filter(kEyeDist, dtSec),
             rollDeg = fRoll.filterAngleDeg(kRoll, dtSec),
+            yawDeg = fYaw.filterAngleDeg(kYaw, dtSec).coerceIn(-65f, 65f),
+            pitchDeg = fPitch.filterAngleDeg(kPitch, dtSec).coerceIn(-55f, 55f),
             trackingConfidence = rawFace.trackingConfidence
         )
     }
@@ -514,6 +536,8 @@ class BodyPoseMatrixSmoother {
         stabilizedFace: StabilizedFacePose,
         rawPose: RawBodyPoseKeypoints,
         garmentAspectRatio: Float,
+        garmentShoulderSeamV: Float = 0.14f,
+        garmentShoulderWidthRatio: Float = 0.80f,
         isWaistGarment: Boolean,
         dtSec: Float
     ): StabilizedBodyFitState {
@@ -535,20 +559,26 @@ class BodyPoseMatrixSmoother {
         val faceW = max(24f, stabilizedFace.width)
         val faceH = max(28f, stabilizedFace.height)
         val aspect = garmentAspectRatio.coerceIn(0.25f, 3.0f)
+        val seamV = if (isWaistGarment) 0.04f else garmentShoulderSeamV.coerceIn(0.03f, 0.28f)
+        val sleeveScaleInv = if (isWaistGarment) 1.0f else (1f / garmentShoulderWidthRatio.coerceIn(0.62f, 0.98f))
 
         // 2. Build Matrix A: Face-Tracking-Driven Garment Transformation Matrix (M_face)
+        // Pin garment shoulder seam (seamV) onto anatomical collarbone level (~chinY + 0.16*faceH)
+        val faceShoulderSpan = faceW * 2.95f
         val faceSpanW = if (isWaistGarment) {
-            faceW * 2.55f
+            faceW * 2.65f
         } else {
-            faceW * 3.12f
+            faceShoulderSpan * sleeveScaleInv
         }
+        val faceGarmentH = faceSpanW * aspect
+        val faceShoulderY = stabilizedFace.bottomY + faceH * 0.16f
         val faceTopY = if (isWaistGarment) {
             stabilizedFace.bottomY + faceH * 1.15f
         } else {
-            stabilizedFace.bottomY + faceH * 0.12f
+            faceShoulderY - faceGarmentH * seamV
         }
         val faceMatrix = Matrix().apply {
-            setScale(faceSpanW, faceSpanW * aspect)
+            setScale(faceSpanW, faceGarmentH)
             postRotate(stabilizedFace.rollDeg * 0.42f)
             postTranslate(stabilizedFace.centerX, faceTopY)
         }
@@ -558,29 +588,30 @@ class BodyPoseMatrixSmoother {
         val shMidY = (smoothPose.shoulderLeftY + smoothPose.shoulderRightY) * 0.5f
         val shDx = smoothPose.shoulderRightX - smoothPose.shoulderLeftX
         val shDy = smoothPose.shoulderRightY - smoothPose.shoulderLeftY
-        val shoulderSpan = max(faceW * 2.25f, hypot(shDx.toDouble(), shDy.toDouble()).toFloat())
+        val shoulderSpan = max(faceW * 2.85f, hypot(shDx.toDouble(), shDy.toDouble()).toFloat())
         val rawPoseTiltDeg = Math.toDegrees(atan2(shDy.toDouble(), max(1f, shDx).toDouble())).toFloat().coerceIn(-22f, 22f)
 
         val chestMidX = (smoothPose.leftChestX + smoothPose.rightChestX) * 0.5f
-        val chestSpan = max(faceW * 2.0f, smoothPose.rightChestX - smoothPose.leftChestX)
+        val chestSpan = max(shoulderSpan * 0.94f, smoothPose.rightChestX - smoothPose.leftChestX)
         val waistMidX = (smoothPose.leftWaistX + smoothPose.rightWaistX) * 0.5f
-        val waistSpan = max(faceW * 1.8f, smoothPose.rightWaistX - smoothPose.leftWaistX)
+        val waistSpan = max(chestSpan * 0.88f, smoothPose.rightWaistX - smoothPose.leftWaistX)
 
+        // Size garment width so outer sleeves wrap cleanly around outer arms/chest silhouette
         val poseSpanW = if (isWaistGarment) {
             waistSpan * 1.24f
         } else {
-            shoulderSpan * 1.18f
+            max(shoulderSpan * sleeveScaleInv * 1.06f, chestSpan * 1.05f)
         }
         val poseHeight = poseSpanW * aspect
         val poseTopY = if (isWaistGarment) {
             smoothPose.waistY - poseHeight * 0.10f
         } else {
-            shMidY - faceH * 0.12f
+            // Rest garment shoulder seam directly onto user's shoulder ridge (back collar sits neatly behind neck)
+            shMidY - poseHeight * seamV - faceH * 0.03f
         }
-        val poseAnchorX = if (isWaistGarment) waistMidX else shMidX
-        val torsoSkew = (((chestMidX - shMidX) / max(30f, poseHeight)) * 0.65f).coerceIn(-0.16f, 0.16f)
-        // Blend head roll & shoulder tilt cleanly inside pose rotation
-        val poseRotDeg = (rawPoseTiltDeg * 0.65f + stabilizedFace.rollDeg * 0.35f).coerceIn(-26f, 26f)
+        val poseAnchorX = if (isWaistGarment) waistMidX else (shMidX * 0.62f + stabilizedFace.centerX * 0.38f)
+        val torsoSkew = (((chestMidX - shMidX) / max(30f, poseHeight)) * 0.60f).coerceIn(-0.14f, 0.14f)
+        val poseRotDeg = (rawPoseTiltDeg * 0.65f + stabilizedFace.rollDeg * 0.35f).coerceIn(-24f, 24f)
 
         val poseMatrix = Matrix().apply {
             setScale(poseSpanW, poseHeight)
@@ -616,10 +647,11 @@ class BodyPoseMatrixSmoother {
             postTranslate(finalTx, finalTy)
         }
 
-        val chestRatio = (chestSpan * 1.14f / max(1f, finalSx)).coerceIn(0.80f, 1.12f)
-        val waistRatio = (waistSpan / max(1f, finalSx)).coerceIn(0.68f, 1.08f)
-        val chestShiftRatio = ((chestMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.14f, 0.14f)
-        val waistShiftRatio = ((waistMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.18f, 0.18f)
+        // Keep sleeves full enough to cover outer upper arms while contouring chest & waist
+        val chestRatio = (chestSpan * 1.06f / max(1f, finalSx)).coerceIn(0.95f, 1.15f)
+        val waistRatio = (waistSpan * 1.04f / max(1f, finalSx)).coerceIn(0.90f, 1.12f)
+        val chestShiftRatio = ((chestMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.10f, 0.10f)
+        val waistShiftRatio = ((waistMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.14f, 0.14f)
 
         return StabilizedBodyFitState(
             face = stabilizedFace,
@@ -634,7 +666,9 @@ class BodyPoseMatrixSmoother {
             chestOffsetRatioX = chestShiftRatio,
             waistOffsetRatioX = waistShiftRatio,
             effectiveTiltDeg = finalRot,
-            poseBlendAlpha = blendAlpha
+            poseBlendAlpha = blendAlpha,
+            shoulderSeamV = seamV,
+            shoulderSlopeDiffY = (smoothPose.shoulderRightY - smoothPose.shoulderLeftY).coerceIn(-faceH * 0.25f, faceH * 0.25f)
         )
     }
 

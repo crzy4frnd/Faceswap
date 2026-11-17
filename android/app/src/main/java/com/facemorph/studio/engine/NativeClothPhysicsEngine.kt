@@ -370,26 +370,40 @@ object NativeClothPhysicsEngine {
 
             when (asset.anchorPoint) {
                 BodyAnchorPoint.SHOULDERS -> {
-                    val targetW = shoulderSpan * 1.56f * layer.scale
+                    val garmentMetrics = GarmentStructureAnalyzer.analyze(bmp)
+                    val seamV = garmentMetrics.shoulderSeamV.coerceIn(0.04f, 0.26f)
+                    val targetW = (shoulderSpan / garmentMetrics.shoulderWidthRatio.coerceIn(0.65f, 0.96f)) * 1.18f * layer.scale
                     val targetH = targetW * (bmp.height.toFloat() / bmp.width.toFloat())
                     val cx = (scan.leftShoulder.x + scan.rightShoulder.x) * 0.5f + layer.offsetX
                     val cy = (scan.leftShoulder.y + scan.rightShoulder.y) * 0.5f + layer.offsetY
+                    val anchoredStartY = cy - targetH * seamV
 
                     canvas.save()
-                    val headHalfW = shoulderSpan * 0.24f
+                    val headHalfW = shoulderSpan * 0.23f
                     val headCenterY = scan.nose.y + (scan.throat.y - scan.nose.y) * 0.35f
-                    val jawHole = Path().apply {
-                        fillType = Path.FillType.EVEN_ODD
-                        addRect(0f, 0f, targetBitmap.width.toFloat(), targetBitmap.height.toFloat(), Path.Direction.CW)
+                    val headOval = Path().apply {
                         addOval(
                             RectF(
                                 scan.throat.x - headHalfW,
                                 headCenterY - headHalfW * 1.35f,
                                 scan.throat.x + headHalfW,
-                                scan.throat.y - 4f
+                                scan.throat.y
                             ),
                             Path.Direction.CW
                         )
+                    }
+                    val throatV = Path().apply {
+                        val nw = headHalfW * 0.54f
+                        moveTo(scan.throat.x - nw, scan.throat.y - headHalfW * 0.2f)
+                        quadTo(scan.throat.x - nw * 0.55f, scan.throat.y + headHalfW * 0.36f, scan.throat.x, scan.throat.y + headHalfW * 0.44f)
+                        quadTo(scan.throat.x + nw * 0.55f, scan.throat.y + headHalfW * 0.36f, scan.throat.x + nw, scan.throat.y - headHalfW * 0.2f)
+                        close()
+                    }
+                    headOval.op(throatV, Path.Op.UNION)
+                    val jawHole = Path().apply {
+                        fillType = Path.FillType.EVEN_ODD
+                        addRect(0f, 0f, targetBitmap.width.toFloat(), targetBitmap.height.toFloat(), Path.Direction.CW)
+                        addPath(headOval)
                     }
                     canvas.clipPath(jawHole)
 
@@ -398,7 +412,7 @@ object NativeClothPhysicsEngine {
                             abs(it.width - targetW) < 40f
                         } ?: createClothGrid(
                             startX = cx - targetW * 0.5f,
-                            startY = cy - targetH * 0.14f,
+                            startY = anchoredStartY,
                             width = targetW,
                             height = targetH
                         ).also { clothMeshes[layer.assetId] = it }
@@ -413,7 +427,7 @@ object NativeClothPhysicsEngine {
                             layer.shadowDepth
                         )
                     } else {
-                        drawScaledRotatedBitmap(canvas, bmp, cx, cy - targetH * 0.14f, targetW, targetH, layer.rotation, centeredY = false)
+                        drawScaledRotatedBitmap(canvas, bmp, cx, anchoredStartY, targetW, targetH, layer.rotation, centeredY = false)
                     }
                     canvas.restore()
                 }

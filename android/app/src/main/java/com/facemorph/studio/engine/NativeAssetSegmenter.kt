@@ -352,7 +352,40 @@ object NativeAssetSegmenter {
             }
         }
 
-        // 5. Soft edge anti-aliasing & true color decontamination (eliminates white/gray dotted halos!)
+        // 5. Multi-ring fringe color decontamination & vector matte alpha (eliminates white/gray JPEG halos!)
+        val ringDist = IntArray(total) { 99 }
+        for (i in 0 until total) {
+            if (isBackground[i] || Color.alpha(pixels[i]) < 15) {
+                ringDist[i] = 0
+            }
+        }
+        // Pass 1: immediate boundary pixels touching background
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                val idx = row + x
+                if (ringDist[idx] == 0) continue
+                val touchesBg = (x > 0 && ringDist[idx - 1] == 0) ||
+                    (x < w - 1 && ringDist[idx + 1] == 0) ||
+                    (y > 0 && ringDist[idx - w] == 0) ||
+                    (y < h - 1 && ringDist[idx + w] == 0)
+                if (touchesBg) ringDist[idx] = 1
+            }
+        }
+        // Pass 2: 2nd-pixel JPEG compression halo ring
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                val idx = row + x
+                if (ringDist[idx] <= 1) continue
+                val touchesRing1 = (x > 0 && ringDist[idx - 1] == 1) ||
+                    (x < w - 1 && ringDist[idx + 1] == 1) ||
+                    (y > 0 && ringDist[idx - w] == 1) ||
+                    (y < h - 1 && ringDist[idx + w] == 1)
+                if (touchesRing1) ringDist[idx] = 2
+            }
+        }
+
         val outPixels = IntArray(total)
         var minX = w
         var minY = h
@@ -364,16 +397,10 @@ object NativeAssetSegmenter {
             for (x in 0 until w) {
                 val idx = row + x
                 val c = pixels[idx]
-                if (isBackground[idx] || Color.alpha(c) < 15) {
+                if (ringDist[idx] == 0) {
                     outPixels[idx] = Color.TRANSPARENT
                     continue
                 }
-
-                var bgNeighbors = 0
-                if (x > 0 && isBackground[idx - 1]) bgNeighbors++
-                if (x < w - 1 && isBackground[idx + 1]) bgNeighbors++
-                if (y > 0 && isBackground[idx - w]) bgNeighbors++
-                if (y < h - 1 && isBackground[idx + w]) bgNeighbors++
 
                 val origAlpha = Color.alpha(c)
                 var r = Color.red(c)
@@ -381,27 +408,76 @@ object NativeAssetSegmenter {
                 var b = Color.blue(c)
                 var finalAlpha = origAlpha
 
-                if (bgNeighbors > 0) {
+                val distRing = ringDist[idx]
+                if (distRing == 1 || distRing == 2) {
                     val (dSq, nearestBg) = nearestBgDistSq(c)
                     val d = sqrt(dSq)
-                    // If outer pixel is very close to backdrop cluster color, treat it cleanly as fringe
-                    val blendFactor = (d / (maxDist * 1.15f)).coerceIn(0f, 1f)
-                    val edgeWeight = when (bgNeighbors) {
-                        1 -> 0.76f
-                        2 -> 0.56f
-                        else -> 0.34f
-                    }
-                    val alphaScale = (blendFactor * 0.72f + edgeWeight * 0.28f).coerceIn(0.08f, 0.92f)
-                    finalAlpha = (origAlpha * alphaScale).toInt().coerceIn(0, 255)
 
-                    // Subtract residual background halo tint from semi-transparent border pixels
-                    val aNorm = (finalAlpha / 255f).coerceIn(0.25f, 0.99f)
-                    val bgLeak = ((1f - aNorm) * 0.65f).coerceIn(0f, 0.55f)
-                    r = (((r - nearestBg.r * bgLeak) / (1f - bgLeak))).toInt().coerceIn(0, 255)
-                    g = (((g - nearestBg.g * bgLeak) / (1f - bgLeak))).toInt().coerceIn(0, 255)
-                    b = (((b - nearestBg.b * bgLeak) / (1f - bgLeak))).toInt().coerceIn(0, 255)
+                    // Sample pure interior cloth color from nearby non-fringe pixels (5x5 window)
+                    var inR = 0f; var inG = 0f; var inB = 0f; var inCnt = 0
+                    val y0 = max(0, y - 2); val y1 = min(h - 1, y + 2)
+                    val x0 = max(0, x - 2); val x1 = min(w - 1, x + 2)
+                    for (ny in y0..y1) {
+                        val nrow = ny * w
+                        for (nx in x0..x1) {
+                            val nIdx = nrow + nx
+                            if (ringDist[nIdx] > 2) {
+                                val nc = pixels[nIdx]
+                                inR += Color.red(nc)
+                                inG += Color.green(nc)
+                                inB += Color.blue(nc)
+                                inCnt++
+                            }
+                        }
+                    }
+
+                    // Project current pixel color onto [nearestBg -> interiorFg] vector to solve true foreground coverage
+                    if (inCnt > 0) {
+                        val fgR = inR / inCnt
+                        val fgG = inG / inCnt
+                        val fgB = inB / inCnt
+                        val vR = fgR - nearestBg.r
+                        val vG = fgG - nearestBg.g
+                        val vB = fgB - nearestBg.b
+                        val vLenSq = vR * vR + vG * vG + vB * vB
+
+                        if (vLenSq > 900f) {
+                            val pR = r - nearestBg.r
+                            val pG = g - nearestBg.g
+                            val pB = b - nearestBg.b
+                            val projT = ((pR * vR + pG * vG + pB * vB) / vLenSq).coerceIn(0f, 1.25f)
+
+                            if (distRing == 1) {
+                                val covAlpha = (projT * 0.92f).coerceIn(0.0f, 0.94f)
+                                finalAlpha = (origAlpha * covAlpha).toInt().coerceIn(0, 255)
+                                // Pull fringe color strongly toward true pure cloth color to strip white JPEG rim
+                                val pull = (1f - projT.coerceIn(0.1f, 0.95f) * 0.65f).coerceIn(0.35f, 0.92f)
+                                r = (r + (fgR - r) * pull).toInt().coerceIn(0, 255)
+                                g = (g + (fgG - g) * pull).toInt().coerceIn(0, 255)
+                                b = (b + (fgB - b) * pull).toInt().coerceIn(0, 255)
+                            } else if (projT < 0.78f) {
+                                // Ring-2 pixel contaminated by JPEG white compression halo -> decontaminate & soften slightly
+                                val covAlpha = (0.45f + projT * 0.68f).coerceIn(0.35f, 1.0f)
+                                finalAlpha = (origAlpha * covAlpha).toInt().coerceIn(0, 255)
+                                val pull = ((0.85f - projT) * 0.85f).coerceIn(0f, 0.78f)
+                                r = (r + (fgR - r) * pull).toInt().coerceIn(0, 255)
+                                g = (g + (fgG - g) * pull).toInt().coerceIn(0, 255)
+                                b = (b + (fgB - b) * pull).toInt().coerceIn(0, 255)
+                            }
+                        } else if (distRing == 1) {
+                            val blendFactor = (d / (maxDist * 1.25f)).coerceIn(0.08f, 0.88f)
+                            finalAlpha = (origAlpha * blendFactor).toInt().coerceIn(0, 255)
+                        }
+                    } else if (distRing == 1) {
+                        val blendFactor = (d / (maxDist * 1.25f)).coerceIn(0.08f, 0.88f)
+                        finalAlpha = (origAlpha * blendFactor).toInt().coerceIn(0, 255)
+                    }
                 }
 
+                if (finalAlpha < 12) {
+                    outPixels[idx] = Color.TRANSPARENT
+                    continue
+                }
                 outPixels[idx] = Color.argb(finalAlpha, r, g, b)
                 if (finalAlpha > 35) {
                     if (x < minX) minX = x

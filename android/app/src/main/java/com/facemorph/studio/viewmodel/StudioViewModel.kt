@@ -27,6 +27,7 @@ import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.FittedWardrobeLayer
 import com.facemorph.studio.model.LiveCameraConfig
 import com.facemorph.studio.model.Point2D
+import com.facemorph.studio.model.SkinSamplePatch
 import com.facemorph.studio.model.SourceFaceMetrics
 import com.facemorph.studio.model.StudioTab
 import com.facemorph.studio.model.TargetSampleItem
@@ -61,6 +62,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var detectedFaces by mutableStateOf<List<DetectedFaceData>>(emptyList())
     var selectedFaceId by mutableStateOf<String?>(null)
     var adjustments by mutableStateOf(FaceAdjustments())
+    var isSkinSamplingMode by mutableStateOf(false)
     var splitCompareEnabled by mutableStateOf(false)
     var splitComparePercent by mutableFloatStateOf(50f)
 
@@ -232,6 +234,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         selectedFaceId = null
         bodySubjectFaceId = null
         bodyScan = null
+        isSkinSamplingMode = false
+        adjustments = adjustments.copy(manualSkinPatch = null)
     }
 
     fun rescanTargetFaces() {
@@ -260,7 +264,42 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             selectedFaceId = firstFace?.id
             bodySubjectFaceId = firstFace?.id
             bodyScan = scan
+            isSkinSamplingMode = false
+            adjustments = adjustments.copy(manualSkinPatch = null)
         }
+    }
+
+    fun sampleSkinPatchAt(
+        normX: Float,
+        normY: Float,
+        radiusRatio: Float = adjustments.manualSkinPatch?.radiusRatio ?: 0.032f
+    ) {
+        val bmp = targetBitmap ?: return
+        val nx = normX.coerceIn(0f, 1f)
+        val ny = normY.coerceIn(0f, 1f)
+        val rRatio = radiusRatio.coerceIn(0.014f, 0.075f)
+        val (r, g, b) = NativeFaceSwapEngine.sampleSkinPatchReferenceRgb(bmp, nx, ny, rRatio)
+        adjustments = adjustments.copy(
+            skinToneMatch = true,
+            manualSkinPatch = SkinSamplePatch(
+                normX = nx,
+                normY = ny,
+                radiusRatio = rRatio,
+                sampledRed = r,
+                sampledGreen = g,
+                sampledBlue = b
+            )
+        )
+    }
+
+    fun updateSkinSampleRadius(radiusRatio: Float) {
+        val patch = adjustments.manualSkinPatch ?: return
+        sampleSkinPatchAt(patch.normX, patch.normY, radiusRatio)
+    }
+
+    fun clearManualSkinPatch() {
+        isSkinSamplingMode = false
+        adjustments = adjustments.copy(manualSkinPatch = null)
     }
 
     fun selectBodySubjectFace(faceId: String) {

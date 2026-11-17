@@ -3,9 +3,12 @@ package com.facemorph.studio.engine
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PointF
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
@@ -21,6 +24,9 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.math.PI
@@ -67,6 +73,14 @@ object NativeLiveArEngine {
     private var smoothedTrailIntensity: Float = 0f
     private var lastTrailTimeSec: Float = -1f
 
+    // Reusable offscreen compositing caches for asynchronous frame pipeline (zero per-frame large allocations)
+    private var reusableFgLayer: Bitmap? = null
+    private var cachedBgSourceRef: Bitmap? = null
+    private var cachedBgW: Int = -1
+    private var cachedBgH: Int = -1
+    private var cachedScaledBg: Bitmap? = null
+    private var reusableMatteAlphaPixels: IntArray = IntArray(0)
+
     fun rotateAndMirrorBitmap(source: Bitmap, rotationDegrees: Int, mirrorHorizontal: Boolean): Bitmap {
         if (rotationDegrees == 0 && !mirrorHorizontal) return source
         val matrix = Matrix().apply {
@@ -86,26 +100,43 @@ object NativeLiveArEngine {
         clothingBitmap: Bitmap?,
         jewelryAsset: WardrobeAssetItem?,
         jewelryBitmap: Bitmap?,
-        timeSec: Float
+        timeSec: Float,
+        reusableOutput: Bitmap? = null
     ): Bitmap {
         val w = frame.width
         val h = frame.height
-        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val reusingOutput = reusableOutput != null &&
+            !reusableOutput.isRecycled &&
+            reusableOutput.isMutable &&
+            reusableOutput.width == w &&
+            reusableOutput.height == h
+        val output = if (reusingOutput) {
+            reusableOutput!!
+        } else {
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        }
         val canvas = Canvas(output)
+        if (reusingOutput) {
+            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        }
         val dtSec = bodyPoseSmoother.checkContextAndGetDt(w, h, config.useFrontCamera, timeSec)
 
-        // Extract live ML Kit Selfie Segmentation matte whenever BG cutout OR live clothing/jewelry fitting is active
+        // Run ML Kit Selfie Segmentation & Face Detection concurrently in parallel (eliminates sequential JNI latency)
         val needMatte = config.removeBackground ||
             (config.wearClothes && clothingAsset != null && clothingBitmap != null) ||
             (config.wearJewelry && jewelryAsset != null && jewelryBitmap != null)
-        val matteBitmap = if (needMatte) extractPersonMatte(frame) else null
 
-        // 1. Live Background Removal & Replacement
+        val (matteBitmap, detectedFace) = coroutineScope {
+            val matteDeferred = if (needMatte) async(Dispatchers.Default) { extractPersonMatte(frame) } else null
+            val faceDeferred = async(Dispatchers.Default) { detectFirstFaceFast(frame) }
+            matteDeferred?.await() to faceDeferred.await()
+        }
+
+        // 1. Live Background Removal & Replacement (with cached scaled background & pooled fgLayer)
         if (config.removeBackground) {
             if (bgBitmap != null) {
-                val scaledBg = Bitmap.createScaledBitmap(bgBitmap, w, h, true)
+                val scaledBg = getOrScaleBackground(bgBitmap, w, h)
                 canvas.drawBitmap(scaledBg, 0f, 0f, null)
-                if (scaledBg !== bgBitmap) scaledBg.recycle()
             } else if (config.activeBgId == "green") {
                 canvas.drawColor(Color.rgb(0, 214, 70))
             } else {
@@ -113,9 +144,9 @@ object NativeLiveArEngine {
             }
 
             if (matteBitmap != null) {
-                val fgLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                fgLayer.setHasAlpha(true)
+                val fgLayer = ensureReusableFgLayer(w, h)
                 val fgCanvas = Canvas(fgLayer)
+                fgCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                 fgCanvas.drawBitmap(frame, 0f, 0f, null)
                 val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -124,7 +155,6 @@ object NativeLiveArEngine {
                 scaledMatte.setHasAlpha(true)
                 fgCanvas.drawBitmap(scaledMatte, 0f, 0f, maskPaint)
                 canvas.drawBitmap(fgLayer, 0f, 0f, null)
-                fgLayer.recycle()
                 if (scaledMatte !== matteBitmap) scaledMatte.recycle()
             } else {
                 canvas.drawBitmap(frame, 0f, 0f, null)
@@ -133,8 +163,7 @@ object NativeLiveArEngine {
             canvas.drawBitmap(frame, 0f, 0f, null)
         }
 
-        // 2. Detect & temporally stabilize live face landmarks (prevents hand-shake jitter & 1-frame misses)
-        val detectedFace = detectFirstFaceFast(frame)
+        // 2. Temporally stabilize live face landmarks (prevents hand-shake jitter & 1-frame misses)
         val smoothFace = bodyPoseSmoother.stabilizeFace(
             rawCenterX = detectedFace?.centerX,
             rawCenterY = detectedFace?.centerY,
@@ -145,6 +174,8 @@ object NativeLiveArEngine {
             rawEyeMidY = detectedFace?.eyeMidY,
             rawEyeDist = detectedFace?.eyeDist,
             rawRollDeg = detectedFace?.rollDeg,
+            rawYawDeg = detectedFace?.yawDeg,
+            rawPitchDeg = detectedFace?.pitchDeg,
             frameW = w,
             frameH = h,
             dtSec = dtSec
@@ -155,9 +186,6 @@ object NativeLiveArEngine {
         val faceH = smoothFace.height
         val chinY = smoothFace.bottomY
         val rollDeg = smoothFace.rollDeg
-        val eyeMidX = smoothFace.eyeMidX
-        val eyeMidY = smoothFace.eyeMidY
-        val eyeDist = smoothFace.eyeDist
 
         // 3. Soft Feathered Skin & Lower-Face Hair Smoothing (never leaks background wall onto hair)
         if (config.removeHairAndBlemishes && config.hairRemovalIntensity > 0 && smoothFace.trackingConfidence > 0.25f) {
@@ -165,6 +193,7 @@ object NativeLiveArEngine {
         }
 
         // 4. Real-Time Inner-Face Swap (Kalman-Stabilized Matrix) + Velocity-Triggered Motion Trail
+        var activeSwapTransform: StabilizedFaceSwapTransform? = null
         if (config.faceSwapEnabled && swapProfileBitmap != null && swapProfileMetrics != null && config.swapStrength > 0) {
             val swapTransform = bodyPoseSmoother.buildStabilizedFaceSwapTransform(
                 stabilizedFace = smoothFace,
@@ -174,6 +203,7 @@ object NativeLiveArEngine {
                 sourceRollDeg = swapProfileMetrics.rollDeg,
                 dtSec = dtSec
             )
+            activeSwapTransform = swapTransform
             val patchW = swapTransform.patchWidth
             val patchH = swapTransform.patchHeight
             val targetSkinRgb = NativeFaceSwapEngine.sampleFacialSkinOnlyRgb(
@@ -193,6 +223,18 @@ object NativeLiveArEngine {
                 targetSkinRgb = targetSkinRgb,
                 applyDefaultRadialMask = false
             )
+
+            if (config.virtualLight.enabled && config.virtualLight.intensity > 0.015f) {
+                val localLight = config.virtualLight.copy(
+                    directionDeg = config.virtualLight.directionDeg - swapTransform.angleDeg
+                )
+                VirtualLightingStudioShader.applyFaceMeshRelighting(
+                    patch = patch,
+                    metrics = swapProfileMetrics,
+                    light = localLight,
+                    targetAmbientRgb = targetSkinRgb
+                )
+            }
 
             FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
                 patch = patch,
@@ -246,10 +288,13 @@ object NativeLiveArEngine {
         val clothAspectRatio = if (clothingBitmap != null && clothingBitmap.width > 0) {
             clothingBitmap.height.toFloat() / clothingBitmap.width.toFloat()
         } else 1.0f
+        val garmentMetrics = clothingBitmap?.let { GarmentStructureAnalyzer.analyze(it) }
         val bodyFitState = bodyPoseSmoother.updateAndInterpolateBodyTransform(
             stabilizedFace = smoothFace,
             rawPose = rawPose,
             garmentAspectRatio = clothAspectRatio,
+            garmentShoulderSeamV = garmentMetrics?.shoulderSeamV ?: 0.14f,
+            garmentShoulderWidthRatio = garmentMetrics?.shoulderWidthRatio ?: 0.80f,
             isWaistGarment = clothingAsset?.anchorPoint == BodyAnchorPoint.WAIST,
             dtSec = dtSec
         )
@@ -259,6 +304,7 @@ object NativeLiveArEngine {
         if (config.wearClothes && clothingAsset != null && clothingBitmap != null) {
             renderBodyFittedClothingMesh(
                 canvas = canvas,
+                rawFrame = frame,
                 frameW = w,
                 frameH = h,
                 clothingAsset = clothingAsset,
@@ -316,27 +362,18 @@ object NativeLiveArEngine {
             }
         }
 
-        // 7. Optional Landmark & Torso Mesh Overlay
+        // 7. Toggleable Real-Time 3D Face Mesh & Body Alignment Wireframe Overlay
         if (config.showLandmarkMesh) {
-            val meshPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(195, 34, 211, 238)
-                style = Paint.Style.STROKE
-                strokeWidth = 2.4f
-            }
-            if (smoothFace.trackingConfidence > 0.2f) {
-                canvas.drawOval(
-                    RectF(faceCX - faceW * 0.45f, faceCY - faceH * 0.48f, faceCX + faceW * 0.45f, faceCY + faceH * 0.48f),
-                    meshPaint
-                )
-                canvas.drawCircle(eyeMidX - eyeDist * 0.5f, eyeMidY, 4.5f, meshPaint)
-                canvas.drawCircle(eyeMidX + eyeDist * 0.5f, eyeMidY, 4.5f, meshPaint)
-            }
-            // Stabilized shoulder tilt line & chest contour HUD
-            canvas.drawLine(torso.shoulderLeftX, torso.shoulderLeftY, torso.shoulderRightX, torso.shoulderRightY, meshPaint)
-            canvas.drawLine(torso.leftChestX, torso.chestY, torso.rightChestX, torso.chestY, meshPaint)
-            canvas.drawLine(torso.shoulderLeftX, torso.shoulderLeftY, torso.leftChestX, torso.chestY, meshPaint)
-            canvas.drawLine(torso.shoulderRightX, torso.shoulderRightY, torso.rightChestX, torso.chestY, meshPaint)
-            canvas.drawCircle(bodyFitState.collarPivotX, bodyFitState.collarPivotY, 5.5f, meshPaint)
+            val hasOutfitOverlay = (config.wearClothes && clothingBitmap != null) ||
+                (config.wearJewelry && jewelryBitmap != null)
+            FaceMeshWireframeRenderer.render(
+                canvas = canvas,
+                smoothFace = smoothFace,
+                rawFace = detectedFace?.rawGeometry,
+                swapTransform = activeSwapTransform,
+                bodyFitState = bodyFitState,
+                showBodyFitMesh = hasOutfitOverlay
+            )
         }
 
         matteBitmap?.recycle()
@@ -580,57 +617,90 @@ object NativeLiveArEngine {
                 return null
             }
 
-            val scanStartY = (mChinY + (mFaceH * 0.06f).toInt()).coerceIn(1, mh - 3)
-            val scanEndY = (mChinY + (mFaceH * 0.85f).toInt()).coerceIn(scanStartY + 2, mh - 2)
-            var detectedLeftSh = faceCX - faceW * 1.48f
-            var detectedRightSh = faceCX + faceW * 1.48f
+            val scanStartY = (mChinY + (mFaceH * 0.04f).toInt()).coerceIn(1, mh - 4)
+            val scanEndY = (mChinY + (mFaceH * 0.95f).toInt()).coerceIn(scanStartY + 2, mh - 2)
+            var shoulderAnchorMy = -1
+            var detectedLeftSh = faceCX - faceW * 1.56f
+            var detectedRightSh = faceCX + faceW * 1.56f
 
+            // Locate collar-to-shoulder flare first, then measure full deltoid/upper-arm span slightly lower
             for (my in scanStartY..scanEndY) {
                 val span = scanRowSpan(my, mCenterX) ?: continue
                 val spanW = span.second - span.first
-                if (spanW >= faceW * 1.72f) {
+                if (spanW >= faceW * 1.62f) {
+                    shoulderAnchorMy = my
                     val rowY = my / scaleY
-                    dropRatio = ((rowY - chinY) / faceH).coerceIn(0.14f, 0.42f)
-                    val shoulderPeakRow = min(mh - 2, my + max(2, (mFaceH * 0.14f).toInt()))
-                    val peakSpan = scanRowSpan(shoulderPeakRow, mCenterX) ?: span
-                    detectedLeftSh = peakSpan.first
-                    detectedRightSh = peakSpan.second
+                    dropRatio = ((rowY - chinY) / faceH).coerceIn(0.10f, 0.30f)
+
+                    // Scan full shoulder-cap to upper-arm shelf to capture widest deltoid contour
+                    val capStart = min(mh - 2, my + max(1, (mFaceH * 0.12f).toInt()))
+                    val capEnd = min(mh - 1, my + max(3, (mFaceH * 0.42f).toInt()))
+                    var bestSpanW = spanW
+                    var bestL = span.first
+                    var bestR = span.second
+                    for (sy in capStart..capEnd) {
+                        val capSpan = scanRowSpan(sy, mCenterX) ?: continue
+                        val cw = capSpan.second - capSpan.first
+                        if (cw > bestSpanW) {
+                            bestSpanW = cw
+                            bestL = capSpan.first
+                            bestR = capSpan.second
+                        }
+                    }
+                    detectedLeftSh = bestL
+                    detectedRightSh = bestR
                     validSignals++
                     break
                 }
             }
 
-            leftRatio = ((faceCX - detectedLeftSh) / faceW).coerceIn(1.18f, 2.35f)
-            rightRatio = ((detectedRightSh - faceCX) / faceW).coerceIn(1.18f, 2.35f)
+            leftRatio = ((faceCX - detectedLeftSh) / faceW).coerceIn(1.36f, 2.75f)
+            rightRatio = ((detectedRightSh - faceCX) / faceW).coerceIn(1.36f, 2.75f)
 
             val baseShoulderY = chinY + dropRatio * faceH
-            val leftCol = ((faceCX - faceW * 0.92f) * scaleX).toInt()
-            val rightCol = ((faceCX + faceW * 0.92f) * scaleX).toInt()
-            val edgeScanTop = (mChinY + (mFaceH * 0.04f).toInt()).coerceIn(0, mh - 2)
-            val edgeScanBot = min(mh - 1, (baseShoulderY * scaleY).toInt() + max(4, (mFaceH * 0.25f).toInt()))
-            leftShY = sampleTopEdgeY(leftCol, edgeScanTop, edgeScanBot)?.coerceIn(chinY + faceH * 0.08f, chinY + faceH * 0.52f) ?: baseShoulderY
-            rightShY = sampleTopEdgeY(rightCol, edgeScanTop, edgeScanBot)?.coerceIn(chinY + faceH * 0.08f, chinY + faceH * 0.52f) ?: baseShoulderY
+            // Sample shoulder ridge height along both inner & mid-shoulder columns (stays tightly at collarbone level)
+            val innerL = ((faceCX - faceW * 0.68f) * scaleX).toInt()
+            val midL = ((faceCX - faceW * 0.96f) * scaleX).toInt()
+            val innerR = ((faceCX + faceW * 0.68f) * scaleX).toInt()
+            val midR = ((faceCX + faceW * 0.96f) * scaleX).toInt()
+            val edgeScanTop = (mChinY + (mFaceH * 0.03f).toInt()).coerceIn(0, mh - 2)
+            val edgeScanBot = min(mh - 1, (baseShoulderY * scaleY).toInt() + max(4, (mFaceH * 0.20f).toInt()))
+            val l1 = sampleTopEdgeY(innerL, edgeScanTop, edgeScanBot)
+            val l2 = sampleTopEdgeY(midL, edgeScanTop, edgeScanBot)
+            val r1 = sampleTopEdgeY(innerR, edgeScanTop, edgeScanBot)
+            val r2 = sampleTopEdgeY(midR, edgeScanTop, edgeScanBot)
+            val rawLeftShY = when {
+                l1 != null && l2 != null -> (l1 * 0.55f + l2 * 0.45f)
+                else -> l1 ?: l2 ?: baseShoulderY
+            }
+            val rawRightShY = when {
+                r1 != null && r2 != null -> (r1 * 0.55f + r2 * 0.45f)
+                else -> r1 ?: r2 ?: baseShoulderY
+            }
+            leftShY = rawLeftShY.coerceIn(chinY + faceH * 0.08f, chinY + faceH * 0.34f)
+            rightShY = rawRightShY.coerceIn(chinY + faceH * 0.08f, chinY + faceH * 0.34f)
 
-            val mChestY = ((baseShoulderY + faceH * 0.45f) * scaleY).toInt().coerceIn(scanStartY, mh - 2)
+            val chestStart = if (shoulderAnchorMy > 0) shoulderAnchorMy else scanStartY
+            val mChestY = ((baseShoulderY + faceH * 0.48f) * scaleY).toInt().coerceIn(chestStart, mh - 2)
             val chestSpan = scanRowSpan(mChestY, mCenterX)
             if (chestSpan != null) {
-                leftChestRatio = ((faceCX - chestSpan.first) / faceW).coerceIn(1.08f, leftRatio * 1.04f)
-                rightChestRatio = ((chestSpan.second - faceCX) / faceW).coerceIn(1.08f, rightRatio * 1.04f)
+                leftChestRatio = ((faceCX - chestSpan.first) / faceW).coerceIn(leftRatio * 0.90f, leftRatio * 1.12f)
+                rightChestRatio = ((chestSpan.second - faceCX) / faceW).coerceIn(rightRatio * 0.90f, rightRatio * 1.12f)
                 validSignals++
             } else {
-                leftChestRatio = leftRatio * 0.94f
-                rightChestRatio = rightRatio * 0.94f
+                leftChestRatio = leftRatio * 0.98f
+                rightChestRatio = rightRatio * 0.98f
             }
 
             val mWaistY = ((baseShoulderY + faceH * 1.05f) * scaleY).toInt().coerceIn(mChestY, mh - 1)
             val waistSpan = if (mWaistY < mh - 2) scanRowSpan(mWaistY, mCenterX) else null
             if (waistSpan != null) {
-                leftWaistRatio = ((faceCX - waistSpan.first) / faceW).coerceIn(0.95f, leftChestRatio * 1.02f)
-                rightWaistRatio = ((waistSpan.second - faceCX) / faceW).coerceIn(0.95f, rightChestRatio * 1.02f)
+                leftWaistRatio = ((faceCX - waistSpan.first) / faceW).coerceIn(leftChestRatio * 0.84f, leftChestRatio * 1.04f)
+                rightWaistRatio = ((waistSpan.second - faceCX) / faceW).coerceIn(rightChestRatio * 0.84f, rightChestRatio * 1.04f)
                 validSignals++
             } else {
-                leftWaistRatio = leftChestRatio * 0.88f
-                rightWaistRatio = rightChestRatio * 0.88f
+                leftWaistRatio = leftChestRatio * 0.92f
+                rightWaistRatio = rightChestRatio * 0.92f
             }
         }
 
@@ -657,12 +727,43 @@ object NativeLiveArEngine {
     }
 
     /**
+     * Samples ambient lighting luminance and color cast from the person's neck/upper-chest skin area
+     * so AR garments match the live room's warmth & exposure naturally instead of looking flatly pasted.
+     */
+    private fun buildAmbientLightingColorFilter(
+        rawFrame: Bitmap,
+        faceCenterX: Float,
+        chinY: Float,
+        faceW: Float,
+        faceH: Float
+    ): ColorMatrixColorFilter {
+        val sx = faceCenterX.toInt().coerceIn(4, rawFrame.width - 5)
+        val sy = (chinY - faceH * 0.12f).toInt().coerceIn(4, rawFrame.height - 5)
+        val rx = max(6, (faceW * 0.18f).toInt())
+        val ry = max(6, (faceH * 0.12f).toInt())
+        val (r, g, b) = NativeFaceSwapEngine.sampleFacialSkinOnlyRgb(rawFrame, sx, sy, rx, ry)
+        val lum = (0.299f * r + 0.587f * g + 0.114f * b).coerceIn(55f, 225f)
+        // Subtle 30% luminance adaptation + mild room warmth tint (keeps dark suits rich dark navy)
+        val exposureScale = (1f + ((lum / 145f) - 1f) * 0.28f).coerceIn(0.82f, 1.18f)
+        val meanC = max(1f, (r + g + b) / 3f)
+        val rTint = (1f + ((r / meanC) - 1f) * 0.16f).coerceIn(0.92f, 1.08f)
+        val gTint = (1f + ((g / meanC) - 1f) * 0.16f).coerceIn(0.92f, 1.08f)
+        val bTint = (1f + ((b / meanC) - 1f) * 0.16f).coerceIn(0.92f, 1.08f)
+
+        val cm = ColorMatrix().apply {
+            setScale(exposureScale * rTint, exposureScale * gTint, exposureScale * bTint, 1f)
+        }
+        return ColorMatrixColorFilter(cm)
+    }
+
+    /**
      * Deforms the garment across an 8x9 local mesh transformed by the temporally smoothed
-     * Face <-> Body Pose affine transformation matrix, adding chest breathing stretch,
-     * anatomical collarbone slope, waist hug taper, and EVEN_ODD chin clearance.
+     * Face <-> Body Pose affine transformation matrix, anchoring garment shoulder seams directly
+     * onto detected shoulders, wrapping the collar cleanly around the neck/jaw, and harmonizing lighting.
      */
     private fun renderBodyFittedClothingMesh(
         canvas: Canvas,
+        rawFrame: Bitmap,
         frameW: Int,
         frameH: Int,
         clothingAsset: WardrobeAssetItem,
@@ -674,55 +775,57 @@ object NativeLiveArEngine {
         val face = fitState.face
         val torso = fitState.pose
         val isWaist = clothingAsset.anchorPoint == BodyAnchorPoint.WAIST
-        val scaleMul = clothingAsset.defaultScale * config.clothWidthScale.coerceIn(0.75f, 1.40f)
+        val scaleMul = clothingAsset.defaultScale * config.clothWidthScale.coerceIn(0.75f, 1.55f)
         val hug = config.clothFitHug.coerceIn(0.0f, 1.0f)
 
         val garmentW = max(1f, fitState.fittedShoulderWidth)
         val garmentH = max(1f, fitState.fittedGarmentHeight)
         val chestRatio = fitState.fittedChestRatio
-        val waistRatio = fitState.fittedWaistRatio * (1.02f - hug * 0.12f)
+        val waistRatio = fitState.fittedWaistRatio * (1.01f - hug * 0.08f)
 
         val cols = 8
         val rows = 9
         val verts = FloatArray(cols * rows * 2)
 
-        val breatheNorm = (sin(timeSec * 1.8f) * max(1.8f, face.width * 0.025f)) / garmentW
-        val hemSwayNorm = (sin(timeSec * 2.3f) * if (clothingAsset.fabricType.name == "SILK") 3.6f else 1.5f) / garmentW
+        val breatheNorm = (sin(timeSec * 1.8f) * max(1.6f, face.width * 0.022f)) / garmentW
+        val hemSwayNorm = (sin(timeSec * 2.3f) * if (clothingAsset.fabricType.name == "SILK") 3.4f else 1.4f) / garmentW
 
         val torsoCenterX = (torso.shoulderLeftX + torso.shoulderRightX) * 0.5f
         val leftHalfSh = max(1f, torsoCenterX - torso.shoulderLeftX)
         val rightHalfSh = max(1f, torso.shoulderRightX - torsoCenterX)
         val yawAsym = ((rightHalfSh - leftHalfSh) / (rightHalfSh + leftHalfSh)).coerceIn(-0.18f, 0.18f)
+        val seamV = fitState.shoulderSeamV.coerceIn(0.04f, 0.28f)
+        val shoulderSlopeNorm = fitState.shoulderSlopeDiffY / garmentH
 
         for (r in 0 until rows) {
             val v = r.toFloat() / (rows - 1)
 
             val widthRatio = when {
-                isWaist -> 0.96f + v * 0.18f
-                v <= 0.35f -> {
-                    val t = v / 0.35f
+                isWaist -> 0.98f + v * 0.16f
+                v <= 0.36f -> {
+                    val t = v / 0.36f
                     val st = t * t * (3f - 2f * t)
                     1.0f * (1f - st) + chestRatio * st
                 }
-                v <= 0.75f -> {
-                    val t = (v - 0.35f) / 0.40f
+                v <= 0.76f -> {
+                    val t = (v - 0.36f) / 0.40f
                     val st = t * t * (3f - 2f * t)
                     chestRatio * (1f - st) + waistRatio * st
                 }
                 else -> {
-                    val t = (v - 0.75f) / 0.25f
-                    waistRatio * (1f + t * (0.08f - hug * 0.05f))
+                    val t = (v - 0.76f) / 0.24f
+                    waistRatio * (1f + t * (0.06f - hug * 0.04f))
                 }
-            } + sin(v * PI.toFloat()) * breatheNorm * 1.4f
+            } + sin(v * PI.toFloat()) * breatheNorm * 1.25f
 
             val centerShiftX = when {
                 isWaist -> fitState.waistOffsetRatioX + hemSwayNorm * v
-                v <= 0.4f -> {
-                    val t = v / 0.4f
+                v <= 0.42f -> {
+                    val t = v / 0.42f
                     fitState.chestOffsetRatioX * t
                 }
                 else -> {
-                    val t = (v - 0.4f) / 0.6f
+                    val t = (v - 0.42f) / 0.58f
                     fitState.chestOffsetRatioX * (1f - t) + fitState.waistOffsetRatioX * t + hemSwayNorm * v * v
                 }
             } + sin(v * PI.toFloat()) * yawAsym * (face.width / garmentW) * 0.16f
@@ -731,18 +834,19 @@ object NativeLiveArEngine {
                 val u = c.toFloat() / (cols - 1)
                 val centeredU = u - 0.5f
 
-                val edgeDist = abs(centeredU) * 2f
-                val shoulderArchDropNorm = if (!isWaist && v < 0.35f) {
-                    val falloff = 1f - (v / 0.35f)
-                    val outerShoulderSlope = edgeDist * edgeDist * (face.height * 0.055f)
-                    val collarCenterDip = (1f - edgeDist * edgeDist) * (face.height * 0.035f)
-                    ((outerShoulderSlope + collarCenterDip) * falloff) / garmentH
+                // Adapt upper shoulders subtly to real shoulder tilt/trapezius curve without pushing coat down off shoulders
+                val shoulderSlopeAdjust = if (!isWaist && v < 0.42f) {
+                    val falloff = 1f - (v / 0.42f)
+                    val slopeFollow = centeredU * shoulderSlopeNorm * 0.45f
+                    val armDropHint = if (v > seamV) (abs(centeredU) * 0.025f * falloff) else 0f
+                    slopeFollow + armDropHint
                 } else 0f
 
-                val yawShiftScale = 1f + yawAsym * centeredU * 0.32f
+                val yawShiftScale = 1f + yawAsym * centeredU * 0.28f
+                val scaledV = if (isWaist) v * scaleMul else seamV + (v - seamV) * scaleMul
                 val idx = (r * cols + c) * 2
                 verts[idx] = (centerShiftX + centeredU * widthRatio * yawShiftScale) * scaleMul
-                verts[idx + 1] = (v + shoulderArchDropNorm) * scaleMul
+                verts[idx + 1] = scaledV + shoulderSlopeAdjust * scaleMul
             }
         }
 
@@ -758,24 +862,49 @@ object NativeLiveArEngine {
         }
 
         val meshPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-            setShadowLayer(12f, 0f, 5f, Color.argb(95, 0, 0, 0))
+            colorFilter = buildAmbientLightingColorFilter(rawFrame, face.centerX, face.bottomY, face.width, face.height)
+            setShadowLayer(10f, 0f, 4f, Color.argb(85, 0, 0, 0))
         }
 
         canvas.save()
-        // Enforce clean jaw/chin silhouette clearance aligned to stabilized face oval (API 1+)
+        // Anatomical Head + Chin + Front-Throat Cutout (EVEN_ODD):
+        // Reveals jaw/beard/front-neck in front of back-collar while coat lapels hug sides of neck & cover shoulders!
         if (!isWaist) {
-            val jawHole = Path().apply {
-                fillType = Path.FillType.EVEN_ODD
-                addRect(0f, 0f, frameW.toFloat(), frameH.toFloat(), Path.Direction.CW)
+            val chinY = face.bottomY
+            val neckHalfW = face.width * 0.25f
+            val headOvalPath = Path().apply {
                 addOval(
                     RectF(
-                        face.centerX - face.width * 0.45f,
-                        face.centerY - face.height * 0.54f,
-                        face.centerX + face.width * 0.45f,
-                        face.centerY + face.height * 0.53f
+                        face.centerX - face.width * 0.46f,
+                        face.centerY - face.height * 0.56f,
+                        face.centerX + face.width * 0.46f,
+                        chinY + face.height * 0.02f
                     ),
                     Path.Direction.CW
                 )
+            }
+            val throatDipPath = Path().apply {
+                moveTo(face.centerX - neckHalfW, chinY - face.height * 0.08f)
+                quadTo(
+                    face.centerX - neckHalfW * 0.58f,
+                    chinY + face.height * 0.14f,
+                    face.centerX,
+                    chinY + face.height * 0.17f
+                )
+                quadTo(
+                    face.centerX + neckHalfW * 0.58f,
+                    chinY + face.height * 0.14f,
+                    face.centerX + neckHalfW,
+                    chinY - face.height * 0.08f
+                )
+                close()
+            }
+            headOvalPath.op(throatDipPath, Path.Op.UNION)
+
+            val jawHole = Path().apply {
+                fillType = Path.FillType.EVEN_ODD
+                addRect(0f, 0f, frameW.toFloat(), frameH.toFloat(), Path.Direction.CW)
+                addPath(headOvalPath)
             }
             canvas.clipPath(jawHole)
         }
@@ -790,7 +919,67 @@ object NativeLiveArEngine {
             0,
             meshPaint
         )
+
+        // Soft cast shadow under chin/throat onto collar lapels for physical 3D wearing depth
+        if (!isWaist) {
+            val shCenterY = face.bottomY + face.height * 0.14f
+            val shRadius = max(12f, face.width * 0.48f)
+            val collarShadowGrad = RadialGradient(
+                0f, 0f, 1f,
+                intArrayOf(Color.argb(95, 4, 6, 14), Color.argb(42, 4, 6, 14), Color.TRANSPARENT),
+                floatArrayOf(0f, 0.55f, 1f),
+                Shader.TileMode.CLAMP
+            ).apply {
+                setLocalMatrix(
+                    Matrix().apply {
+                        setScale(shRadius, shRadius * 0.52f)
+                        postTranslate(face.centerX, shCenterY)
+                    }
+                )
+            }
+            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = collarShadowGrad
+            }
+            canvas.drawOval(
+                RectF(
+                    face.centerX - shRadius,
+                    shCenterY - shRadius * 0.52f,
+                    face.centerX + shRadius,
+                    shCenterY + shRadius * 0.52f
+                ),
+                shadowPaint
+            )
+        }
+
         canvas.restore()
+    }
+
+    private fun getOrScaleBackground(bgBitmap: Bitmap, w: Int, h: Int): Bitmap {
+        val cached = cachedScaledBg
+        if (cachedBgSourceRef === bgBitmap && cachedBgW == w && cachedBgH == h && cached != null && !cached.isRecycled) {
+            return cached
+        }
+        val scaled = if (bgBitmap.width == w && bgBitmap.height == h) bgBitmap else Bitmap.createScaledBitmap(bgBitmap, w, h, true)
+        if (cached != null && cached !== cachedBgSourceRef && !cached.isRecycled) {
+            cached.recycle()
+        }
+        cachedBgSourceRef = bgBitmap
+        cachedBgW = w
+        cachedBgH = h
+        cachedScaledBg = scaled
+        return scaled
+    }
+
+    private fun ensureReusableFgLayer(w: Int, h: Int): Bitmap {
+        val existing = reusableFgLayer
+        if (existing != null && !existing.isRecycled && existing.width == w && existing.height == h) {
+            return existing
+        }
+        existing?.recycle()
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setHasAlpha(true)
+            reusableFgLayer = this
+        }
     }
 
     private suspend fun extractPersonMatte(bitmap: Bitmap): Bitmap? {
@@ -801,10 +990,14 @@ object NativeLiveArEngine {
                     .addOnSuccessListener { mask ->
                         val mw = mask.width
                         val mh = mask.height
+                        val total = mw * mh
                         val buf = mask.buffer
                         buf.rewind()
-                        val alphaPixels = IntArray(mw * mh)
-                        for (i in 0 until mw * mh) {
+                        if (reusableMatteAlphaPixels.size < total) {
+                            reusableMatteAlphaPixels = IntArray(total)
+                        }
+                        val alphaPixels = reusableMatteAlphaPixels
+                        for (i in 0 until total) {
                             val conf = buf.float
                             val t = ((conf - 0.35f) / 0.45f).coerceIn(0f, 1f)
                             val smooth = t * t * (3f - 2f * t)
@@ -838,7 +1031,10 @@ object NativeLiveArEngine {
         val eyeMidX: Float,
         val eyeMidY: Float,
         val eyeDist: Float,
-        val rollDeg: Float
+        val rollDeg: Float,
+        val yawDeg: Float,
+        val pitchDeg: Float,
+        val rawGeometry: RawDetectedFaceGeometry
     )
 
     private suspend fun detectFirstFaceFast(bitmap: Bitmap): FastFaceResult? {
@@ -854,16 +1050,40 @@ object NativeLiveArEngine {
                             val fh = max(40f, b.height().toFloat())
                             val le = f.getLandmark(FaceLandmark.LEFT_EYE)?.position
                             val re = f.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+                            val noseBase = f.getLandmark(FaceLandmark.NOSE_BASE)?.position
+                            val leftCheek = f.getLandmark(FaceLandmark.LEFT_CHEEK)?.position
+                            val rightCheek = f.getLandmark(FaceLandmark.RIGHT_CHEEK)?.position
+                            val mouthLeft = f.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+                            val mouthRight = f.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+                            val mouthBottom = f.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+
                             val roll = if (le != null && re != null) {
                                 Math.toDegrees(atan2((re.y - le.y).toDouble(), (re.x - le.x).toDouble())).toFloat()
                             } else {
                                 -f.headEulerAngleZ
                             }
+                            val yaw = f.headEulerAngleY
+                            val pitch = f.headEulerAngleX
                             val eyeMidX = if (le != null && re != null) (le.x + re.x) * 0.5f else b.centerX().toFloat()
                             val eyeMidY = if (le != null && re != null) (le.y + re.y) * 0.5f else b.centerY() - fh * 0.1f
                             val eyeDist = if (le != null && re != null) {
                                 hypot((re.x - le.x).toDouble(), (re.y - le.y).toDouble()).toFloat()
                             } else fw * 0.44f
+
+                            val rawGeom = RawDetectedFaceGeometry(
+                                boundingBox = RectF(b),
+                                leftEye = le?.let { PointF(it.x, it.y) },
+                                rightEye = re?.let { PointF(it.x, it.y) },
+                                noseBase = noseBase?.let { PointF(it.x, it.y) },
+                                leftCheek = leftCheek?.let { PointF(it.x, it.y) },
+                                rightCheek = rightCheek?.let { PointF(it.x, it.y) },
+                                mouthLeft = mouthLeft?.let { PointF(it.x, it.y) },
+                                mouthRight = mouthRight?.let { PointF(it.x, it.y) },
+                                mouthBottom = mouthBottom?.let { PointF(it.x, it.y) },
+                                yawDeg = yaw,
+                                pitchDeg = pitch,
+                                rollDeg = roll
+                            )
 
                             if (cont.isActive) {
                                 cont.resume(
@@ -876,7 +1096,10 @@ object NativeLiveArEngine {
                                         eyeMidX = eyeMidX,
                                         eyeMidY = eyeMidY,
                                         eyeDist = eyeDist,
-                                        rollDeg = roll
+                                        rollDeg = roll,
+                                        yawDeg = yaw,
+                                        pitchDeg = pitch,
+                                        rawGeometry = rawGeom
                                     )
                                 )
                             }

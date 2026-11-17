@@ -28,6 +28,7 @@ import kotlin.coroutines.resume
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 
 object NativeFaceSwapEngine {
 
@@ -251,6 +252,82 @@ object NativeFaceSwapEngine {
         }
     }
 
+    private data class SkinSample(val r: Int, val g: Int, val b: Int, val lum: Float)
+
+    /**
+     * Samples a circular skin patch from the unmodified target body image using an interquartile
+     * trimmed luminance filter so specular glare and stray hair/shadow specks do not skew color grading.
+     */
+    fun sampleSkinPatchReferenceRgb(
+        bmp: Bitmap,
+        normX: Float,
+        normY: Float,
+        radiusRatio: Float = 0.032f
+    ): Triple<Float, Float, Float> {
+        val w = bmp.width
+        val h = bmp.height
+        if (w <= 1 || h <= 1) return Triple(190f, 148f, 125f)
+
+        val cx = (normX.coerceIn(0f, 1f) * (w - 1)).toInt()
+        val cy = (normY.coerceIn(0f, 1f) * (h - 1)).toInt()
+        val radPx = max(4, (min(w, h) * radiusRatio.coerceIn(0.012f, 0.09f)).toInt())
+        val radSq = radPx * radPx
+        val step = max(1, radPx / 8)
+
+        val samples = ArrayList<SkinSample>(256)
+
+        val y0 = (cy - radPx).coerceIn(0, h - 1)
+        val y1 = (cy + radPx).coerceIn(0, h - 1)
+        val x0 = (cx - radPx).coerceIn(0, w - 1)
+        val x1 = (cx + radPx).coerceIn(0, w - 1)
+
+        var py = y0
+        while (py <= y1) {
+            val dy = py - cy
+            val dySq = dy * dy
+            var px = x0
+            while (px <= x1) {
+                val dx = px - cx
+                if (dx * dx + dySq <= radSq) {
+                    val c = bmp.getPixel(px, py)
+                    if (Color.alpha(c) >= 25) {
+                        val r = Color.red(c)
+                        val g = Color.green(c)
+                        val b = Color.blue(c)
+                        val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                        samples.add(SkinSample(r, g, b, lum))
+                    }
+                }
+                px += step
+            }
+            py += step
+        }
+
+        if (samples.isEmpty()) {
+            val c = bmp.getPixel(cx, cy)
+            return Triple(Color.red(c).toFloat(), Color.green(c).toFloat(), Color.blue(c).toFloat())
+        }
+
+        val slice = if (samples.size >= 8) {
+            samples.sortBy { it.lum }
+            val trim = (samples.size * 0.15f).toInt().coerceIn(1, samples.size / 4)
+            samples.subList(trim, samples.size - trim)
+        } else {
+            samples
+        }
+
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        for (s in slice) {
+            rSum += s.r
+            gSum += s.g
+            bSum += s.b
+        }
+        val count = max(1, slice.size).toFloat()
+        return Triple(rSum / count, gSum / count, bSum / count)
+    }
+
     /**
      * Fast in-place luminance 3x3 unsharp clarity pass with coring threshold so eyes, brows,
      * and lips render crisp and vivid without amplifying noise or edge halos.
@@ -306,7 +383,8 @@ object NativeFaceSwapEngine {
         featherRatio: Float,
         smartBlend: Boolean,
         targetSkinRgb: Triple<Float, Float, Float>? = null,
-        applyDefaultRadialMask: Boolean = true
+        applyDefaultRadialMask: Boolean = true,
+        isManualSkinReference: Boolean = false
     ): Bitmap {
         val patch = Bitmap.createBitmap(patchW, patchH, Bitmap.Config.ARGB_8888)
         patch.setHasAlpha(true)
@@ -321,10 +399,11 @@ object NativeFaceSwapEngine {
         val dstRect = RectF(0f, 0f, patchW.toFloat(), patchH.toFloat())
 
         val facePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        // Subtle clarity contrast & vibrance lift paired with skin-only tone matching
+        // Subtle clarity contrast & vibrance lift paired with skin-only or manual-patch color grading
         val rGain: Float
         val gGain: Float
         val bGain: Float
+        val lumOffset: Float
         if (targetSkinRgb != null) {
             val srcCenterX = (sL + sR) / 2
             val srcCenterY = (sT + (sB - sT) * 0.44f).toInt()
@@ -336,18 +415,34 @@ object NativeFaceSwapEngine {
                 max(4, (sB - sT) / 5)
             )
             val (tr, tg, tb) = targetSkinRgb
-            rGain = (tr / max(45f, sr)).coerceIn(0.82f, 1.26f)
-            gGain = (tg / max(42f, sg)).coerceIn(0.82f, 1.26f)
-            bGain = (tb / max(38f, sb)).coerceIn(0.80f, 1.24f)
+            val srcLum = 0.299f * sr + 0.587f * sg + 0.114f * sb
+            val dstLum = 0.299f * tr + 0.587f * tg + 0.114f * tb
+            val lumRatio = dstLum / max(40f, srcLum)
+
+            if (isManualSkinReference) {
+                val rawR = tr / max(40f, sr)
+                val rawG = tg / max(36f, sg)
+                val rawB = tb / max(32f, sb)
+                rGain = (rawR * 0.86f + lumRatio * 0.14f).coerceIn(0.64f, 1.48f)
+                gGain = (rawG * 0.86f + lumRatio * 0.14f).coerceIn(0.64f, 1.48f)
+                bGain = (rawB * 0.86f + lumRatio * 0.14f).coerceIn(0.62f, 1.46f)
+                lumOffset = ((dstLum - srcLum) * 0.08f).coerceIn(-14f, 14f)
+            } else {
+                rGain = (tr / max(45f, sr)).coerceIn(0.82f, 1.26f)
+                gGain = (tg / max(42f, sg)).coerceIn(0.82f, 1.26f)
+                bGain = (tb / max(38f, sb)).coerceIn(0.80f, 1.24f)
+                lumOffset = 0f
+            }
         } else {
             rGain = 1.0f
             gGain = 1.0f
             bGain = 1.0f
+            lumOffset = 0f
         }
 
         // Mild S-curve contrast pop (1.06x) prevents dull/washed appearance
         val cScale = 1.06f
-        val cShift = -7.5f
+        val cShift = -7.5f + lumOffset
         val cm = ColorMatrix().apply {
             set(
                 floatArrayOf(
@@ -435,15 +530,20 @@ object NativeFaceSwapEngine {
             val patchW = max(20, faceW.toInt())
             val patchH = max(24, faceH.toInt())
 
+            val manualPatch = adjustments.manualSkinPatch
             val targetSkinRgb = if (adjustments.skinToneMatch) {
-                // Sample cheek & forehead bridge strictly inside clean skin oval (avoids moustaches/shadows)
-                sampleFacialSkinOnlyRgb(
-                    targetBitmap,
-                    lm.nose.x.toInt(),
-                    ((lm.leftEye.y + lm.rightEye.y) * 0.5f + (lm.nose.y - lm.leftEye.y) * 0.35f).toInt(),
-                    max(6, (faceW * 0.24f).toInt()),
-                    max(6, (faceH * 0.16f).toInt())
-                )
+                if (manualPatch != null) {
+                    Triple(manualPatch.sampledRed, manualPatch.sampledGreen, manualPatch.sampledBlue)
+                } else {
+                    // Sample cheek & forehead bridge strictly inside clean skin oval (avoids moustaches/shadows)
+                    sampleFacialSkinOnlyRgb(
+                        targetBitmap,
+                        lm.nose.x.toInt(),
+                        ((lm.leftEye.y + lm.rightEye.y) * 0.5f + (lm.nose.y - lm.leftEye.y) * 0.35f).toInt(),
+                        max(6, (faceW * 0.24f).toInt()),
+                        max(6, (faceH * 0.16f).toInt())
+                    )
+                }
             } else null
 
             val featherRatio = (adjustments.featherRadius / 50f).coerceIn(0.15f, 0.85f)
@@ -455,8 +555,21 @@ object NativeFaceSwapEngine {
                 featherRatio = featherRatio,
                 smartBlend = adjustments.smartBlend,
                 targetSkinRgb = targetSkinRgb,
-                applyDefaultRadialMask = false
+                applyDefaultRadialMask = false,
+                isManualSkinReference = manualPatch != null
             )
+
+            if (adjustments.virtualLight.enabled && adjustments.virtualLight.intensity > 0.015f) {
+                val localLight = adjustments.virtualLight.copy(
+                    directionDeg = adjustments.virtualLight.directionDeg - finalAngle
+                )
+                VirtualLightingStudioShader.applyFaceMeshRelighting(
+                    patch = patch,
+                    metrics = metrics,
+                    light = localLight,
+                    targetAmbientRgb = targetSkinRgb
+                )
+            }
 
             val swapMatrix = Matrix().apply {
                 setTranslate(-patchW * metrics.eyeMidXRatio, -patchH * metrics.eyeMidYRatio)

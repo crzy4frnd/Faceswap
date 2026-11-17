@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
@@ -66,6 +67,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,6 +76,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
@@ -88,6 +91,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.facemorph.studio.engine.NativeFaceSwapEngine
 import com.facemorph.studio.engine.NativeStorageHelper
+import com.facemorph.studio.engine.VirtualLightingStudioShader
 import com.facemorph.studio.model.FaceAdjustments
 import com.facemorph.studio.viewmodel.StudioViewModel
 import java.io.File
@@ -103,12 +107,20 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     val profileCache = viewModel.profileBitmapCache.toMap()
     val metricsCache = viewModel.profileMetricsCache.toMap()
 
-    var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Align
+    var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Light, 3=Align
     var isDeckExpanded by remember { mutableStateOf(true) }
     var showToolsMenu by remember { mutableStateOf(false) }
     var activeLandmarkKey by remember { mutableStateOf("nose") }
     var viewportZoom by remember { mutableFloatStateOf(1f) }
     var viewportPan by remember { mutableStateOf(Offset.Zero) }
+    val isSamplingSkin = viewModel.isSkinSamplingMode
+    val latestTargetBmp by rememberUpdatedState(targetBmp)
+    val latestZoom by rememberUpdatedState(viewportZoom)
+    val latestPan by rememberUpdatedState(viewportPan)
+    val latestSamplingMode by rememberUpdatedState(isSamplingSkin)
+    val latestShowMesh by rememberUpdatedState(adj.showGeometricMesh)
+    val latestFaces by rememberUpdatedState(faces)
+    val latestSelectedFaceId by rememberUpdatedState(viewModel.selectedFaceId)
 
     var pendingTargetCameraFile by remember { mutableStateOf<File?>(null) }
     var pendingFaceCameraFile by remember { mutableStateOf<File?>(null) }
@@ -116,6 +128,24 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     LaunchedEffect(viewModel.activeTargetId, targetBmp) {
         viewportZoom = 1f
         viewportPan = Offset.Zero
+    }
+
+    fun sampleSkinAtPointer(pos: Offset, canvasW: Float, canvasH: Float, requireInsideBounds: Boolean) {
+        val bmp = latestTargetBmp ?: return
+        val bw = bmp.width.toFloat()
+        val bh = bmp.height.toFloat()
+        val baseScale = min(canvasW / bw, canvasH / bh)
+        val scale = baseScale * latestZoom
+        val drawW = bw * scale
+        val drawH = bh * scale
+        val left = (canvasW - drawW) / 2f + latestPan.x
+        val top = (canvasH - drawH) / 2f + latestPan.y
+        if (requireInsideBounds && (pos.x !in left..(left + drawW) || pos.y !in top..(top + drawH))) {
+            return
+        }
+        val normX = ((pos.x - left) / drawW).coerceIn(0f, 1f)
+        val normY = ((pos.y - top) / drawH).coerceIn(0f, 1f)
+        viewModel.sampleSkinPatchAt(normX, normY)
     }
 
     val targetGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -252,7 +282,22 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             enabled = renderedBitmap != null,
                             onClick = {
                                 showToolsMenu = false
-                                viewModel.adjustments = adj.copy(showGeometricMesh = !adj.showGeometricMesh)
+                                val nextMesh = !adj.showGeometricMesh
+                                if (nextMesh) viewModel.isSkinSamplingMode = false
+                                viewModel.adjustments = adj.copy(showGeometricMesh = nextMesh)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (isSamplingSkin) "Done Skin Sample" else "Sample Skin Patch", color = Color.White, fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Colorize, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp)) },
+                            enabled = renderedBitmap != null,
+                            onClick = {
+                                showToolsMenu = false
+                                val nextSample = !isSamplingSkin
+                                if (nextSample) {
+                                    viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                }
+                                viewModel.isSkinSamplingMode = nextSample
                             }
                         )
                         DropdownMenuItem(
@@ -269,6 +314,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             leadingIcon = { Icon(Icons.Default.RestartAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp)) },
                             onClick = {
                                 showToolsMenu = false
+                                viewModel.isSkinSamplingMode = false
                                 viewModel.adjustments = FaceAdjustments()
                                 viewModel.splitCompareEnabled = false
                             }
@@ -320,6 +366,16 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                         .fillMaxSize()
                         .pointerInput(Unit) {
                             detectTapGestures(
+                                onTap = { tapOffset ->
+                                    if (latestSamplingMode) {
+                                        sampleSkinAtPointer(
+                                            pos = tapOffset,
+                                            canvasW = size.width.toFloat(),
+                                            canvasH = size.height.toFloat(),
+                                            requireInsideBounds = true
+                                        )
+                                    }
+                                },
                                 onDoubleTap = { tapOffset ->
                                     if (viewportZoom > 1.1f) {
                                         viewportZoom = 1f
@@ -337,65 +393,88 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 }
                             )
                         }
-                        .pointerInput(adj.showGeometricMesh) {
-                            detectTransformGestures { centroid, panDelta, zoomDelta, _ ->
-                                val prevZoom = viewportZoom
-                                val nextZoom = (prevZoom * zoomDelta).coerceIn(1f, 4f)
-                                val allowSinglePan = !adj.showGeometricMesh && nextZoom > 1.02f
-                                val effectivePan = if (zoomDelta != 1f || allowSinglePan) panDelta else Offset.Zero
-                                val cx = size.width / 2f
-                                val cy = size.height / 2f
-                                val scaleRatio = nextZoom / prevZoom
-                                val newPanX = (centroid.x - cx) - ((centroid.x - cx) - viewportPan.x) * scaleRatio + effectivePan.x
-                                val newPanY = (centroid.y - cy) - ((centroid.y - cy) - viewportPan.y) * scaleRatio + effectivePan.y
+                        .pointerInput(adj.showGeometricMesh, isSamplingSkin) {
+                            if (adj.showGeometricMesh || isSamplingSkin) {
+                                detectDragGestures(
+                                    onDragStart = { startPos ->
+                                        if (latestSamplingMode) {
+                                            sampleSkinAtPointer(
+                                                pos = startPos,
+                                                canvasW = size.width.toFloat(),
+                                                canvasH = size.height.toFloat(),
+                                                requireInsideBounds = false
+                                            )
+                                        }
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        if (latestSamplingMode) {
+                                            sampleSkinAtPointer(
+                                                pos = change.position,
+                                                canvasW = size.width.toFloat(),
+                                                canvasH = size.height.toFloat(),
+                                                requireInsideBounds = false
+                                            )
+                                            return@detectDragGestures
+                                        }
+                                        if (!latestShowMesh) return@detectDragGestures
+                                        val bmp = latestTargetBmp ?: return@detectDragGestures
+                                        val selId = latestSelectedFaceId ?: latestFaces.firstOrNull()?.id ?: return@detectDragGestures
+                                        val bw = bmp.width.toFloat()
+                                        val bh = bmp.height.toFloat()
+                                        val baseScale = min(size.width / bw, size.height / bh)
+                                        val scale = baseScale * latestZoom
+                                        val drawW = bw * scale
+                                        val drawH = bh * scale
+                                        val left = (size.width - drawW) / 2f + latestPan.x
+                                        val top = (size.height - drawH) / 2f + latestPan.y
+                                        val dxImg = dragAmount.x / scale
+                                        val dyImg = dragAmount.y / scale
+                                        val tapX = (change.position.x - left) / scale
+                                        val tapY = (change.position.y - top) / scale
 
-                                viewportZoom = nextZoom
-                                if (nextZoom <= 1.02f) {
-                                    viewportPan = Offset.Zero
-                                } else {
-                                    val maxX = size.width * (nextZoom - 1f) * 0.55f
-                                    val maxY = size.height * (nextZoom - 1f) * 0.55f
-                                    viewportPan = Offset(
-                                        newPanX.coerceIn(-maxX, maxX),
-                                        newPanY.coerceIn(-maxY, maxY)
-                                    )
-                                }
-                            }
-                        }
-                        .pointerInput(adj.showGeometricMesh, faces, viewModel.selectedFaceId) {
-                            detectDragGestures { change, dragAmount ->
-                                if (!adj.showGeometricMesh) return@detectDragGestures
-                                change.consume()
-                                val selId = viewModel.selectedFaceId ?: faces.firstOrNull()?.id ?: return@detectDragGestures
-                                val bw = renderedBitmap.width.toFloat()
-                                val bh = renderedBitmap.height.toFloat()
-                                val baseScale = min(size.width / bw, size.height / bh)
-                                val scale = baseScale * viewportZoom
-                                val drawW = bw * scale
-                                val drawH = bh * scale
-                                val left = (size.width - drawW) / 2f + viewportPan.x
-                                val top = (size.height - drawH) / 2f + viewportPan.y
-                                val dxImg = dragAmount.x / scale
-                                val dyImg = dragAmount.y / scale
-                                val tapX = (change.position.x - left) / scale
-                                val tapY = (change.position.y - top) / scale
-
-                                val f = faces.find { it.id == selId }
-                                if (f != null) {
-                                    val lm = f.landmarks
-                                    val pts = listOf(
-                                        "forehead" to lm.forehead,
-                                        "leftEye" to lm.leftEye,
-                                        "rightEye" to lm.rightEye,
-                                        "nose" to lm.nose,
-                                        "lips" to lm.lips,
-                                        "chin" to lm.chin
-                                    )
-                                    val nearest = pts.minByOrNull { (_, p) ->
-                                        hypot((p.x - tapX).toDouble(), (p.y - tapY).toDouble())
+                                        val f = latestFaces.find { it.id == selId }
+                                        if (f != null) {
+                                            val lm = f.landmarks
+                                            val pts = listOf(
+                                                "forehead" to lm.forehead,
+                                                "leftEye" to lm.leftEye,
+                                                "rightEye" to lm.rightEye,
+                                                "nose" to lm.nose,
+                                                "lips" to lm.lips,
+                                                "chin" to lm.chin
+                                            )
+                                            val nearest = pts.minByOrNull { (_, p) ->
+                                                hypot((p.x - tapX).toDouble(), (p.y - tapY).toDouble())
+                                            }
+                                            if (nearest != null) activeLandmarkKey = nearest.first
+                                            viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, dxImg, dyImg)
+                                        }
                                     }
-                                    if (nearest != null) activeLandmarkKey = nearest.first
-                                    viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, dxImg, dyImg)
+                                )
+                            } else {
+                                detectTransformGestures { centroid, panDelta, zoomDelta, _ ->
+                                    val prevZoom = latestZoom
+                                    val nextZoom = (prevZoom * zoomDelta).coerceIn(1f, 4f)
+                                    val allowSinglePan = nextZoom > 1.02f
+                                    val effectivePan = if (zoomDelta != 1f || allowSinglePan) panDelta else Offset.Zero
+                                    val cx = size.width / 2f
+                                    val cy = size.height / 2f
+                                    val scaleRatio = nextZoom / prevZoom
+                                    val newPanX = (centroid.x - cx) - ((centroid.x - cx) - latestPan.x) * scaleRatio + effectivePan.x
+                                    val newPanY = (centroid.y - cy) - ((centroid.y - cy) - latestPan.y) * scaleRatio + effectivePan.y
+
+                                    viewportZoom = nextZoom
+                                    if (nextZoom <= 1.02f) {
+                                        viewportPan = Offset.Zero
+                                    } else {
+                                        val maxX = size.width * (nextZoom - 1f) * 0.55f
+                                        val maxY = size.height * (nextZoom - 1f) * 0.55f
+                                        viewportPan = Offset(
+                                            newPanX.coerceIn(-maxX, maxX),
+                                            newPanY.coerceIn(-maxY, maxY)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -434,6 +513,59 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             end = Offset(splitX, top + drawH),
                             strokeWidth = 2.5f
                         )
+                    }
+
+                    adj.manualSkinPatch?.let { patch ->
+                        if (isSamplingSkin || activeDeckTab == 1) {
+                            val px = left + patch.normX * drawW
+                            val py = top + patch.normY * drawH
+                            val patchRadiusPx = (patch.radiusRatio * min(drawW, drawH)).coerceAtLeast(14f)
+                            val sampledColor = Color(
+                                red = (patch.sampledRed / 255f).coerceIn(0f, 1f),
+                                green = (patch.sampledGreen / 255f).coerceIn(0f, 1f),
+                                blue = (patch.sampledBlue / 255f).coerceIn(0f, 1f)
+                            )
+                            drawCircle(
+                                color = sampledColor.copy(alpha = 0.28f),
+                                radius = patchRadiusPx,
+                                center = Offset(px, py)
+                            )
+                            drawCircle(
+                                color = Color(0xCC020617),
+                                radius = patchRadiusPx,
+                                center = Offset(px, py),
+                                style = Stroke(width = 4.5f)
+                            )
+                            drawCircle(
+                                color = if (isSamplingSkin) Color(0xFFFBBF24) else Color.White,
+                                radius = patchRadiusPx,
+                                center = Offset(px, py),
+                                style = Stroke(width = 2.2f)
+                            )
+                            drawLine(
+                                color = Color.White,
+                                start = Offset(px - 6f, py),
+                                end = Offset(px + 6f, py),
+                                strokeWidth = 1.8f
+                            )
+                            drawLine(
+                                color = Color.White,
+                                start = Offset(px, py - 6f),
+                                end = Offset(px, py + 6f),
+                                strokeWidth = 1.8f
+                            )
+                            if (isSamplingSkin) {
+                                val loupeY = (py - patchRadiusPx - 26f).coerceAtLeast(top + 20f)
+                                drawCircle(color = Color(0xEE020617), radius = 15f, center = Offset(px, loupeY))
+                                drawCircle(color = sampledColor, radius = 12f, center = Offset(px, loupeY))
+                                drawCircle(
+                                    color = Color(0xFFFBBF24),
+                                    radius = 12f,
+                                    center = Offset(px, loupeY),
+                                    style = Stroke(width = 2f)
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -515,6 +647,61 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 }
             }
 
+            if (renderedBitmap != null && isSamplingSkin) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xDD0B1120))
+                        .border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    val patch = adj.manualSkinPatch
+                    if (patch != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Color(
+                                        (patch.sampledRed / 255f).coerceIn(0f, 1f),
+                                        (patch.sampledGreen / 255f).coerceIn(0f, 1f),
+                                        (patch.sampledBlue / 255f).coerceIn(0f, 1f)
+                                    )
+                                )
+                                .border(1.dp, Color.White, CircleShape)
+                        )
+                    } else {
+                        Icon(Icons.Default.Colorize, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
+                    }
+                    Text(
+                        if (patch != null) "Drag skin to adjust" else "Tap or drag skin",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (patch != null) {
+                        Text(
+                            "Clear",
+                            color = Color(0xFFF87171),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable { viewModel.clearManualSkinPatch() }
+                        )
+                    }
+                    Text(
+                        "Done",
+                        color = Color(0xFFFBBF24),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { viewModel.isSkinSamplingMode = false }
+                    )
+                }
+            }
+
             // Minimal Bottom-Right Quick View Toggles when image loaded
             if (renderedBitmap != null) {
                 Row(
@@ -527,9 +714,43 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(9.dp))
+                            .background(
+                                when {
+                                    isSamplingSkin -> Color(0xDDD97706)
+                                    adj.manualSkinPatch != null -> Color(0xCC312E81)
+                                    else -> Color(0xCC0B1120)
+                                }
+                            )
+                            .border(
+                                1.dp,
+                                if (isSamplingSkin || adj.manualSkinPatch != null) Color(0xFFFBBF24) else Color(0xFF334155),
+                                RoundedCornerShape(9.dp)
+                            )
+                            .clickable {
+                                val nextSample = !isSamplingSkin
+                                if (nextSample) {
+                                    viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                }
+                                viewModel.isSkinSamplingMode = nextSample
+                            }
+                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.Colorize, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Pick Skin", color = Color.White, fontSize = 11.sp)
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
                             .background(if (adj.showGeometricMesh) Color(0xDD0891B2) else Color(0xCC0B1120))
                             .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
-                            .clickable { viewModel.adjustments = adj.copy(showGeometricMesh = !adj.showGeometricMesh) }
+                            .clickable {
+                                val nextMesh = !adj.showGeometricMesh
+                                if (nextMesh) viewModel.isSkinSamplingMode = false
+                                viewModel.adjustments = adj.copy(showGeometricMesh = nextMesh)
+                            }
                             .padding(horizontal = 9.dp, vertical = 6.dp)
                     ) {
                         Icon(Icons.Default.GridOn, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
@@ -609,7 +830,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                         .padding(3.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    listOf("Faces", "Blend", "Align").forEachIndexed { idx, label ->
+                    listOf("Faces", "Blend", "Light", "Align").forEachIndexed { idx, label ->
                         val selected = isDeckExpanded && activeDeckTab == idx
                         Box(
                             modifier = Modifier
@@ -840,9 +1061,119 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                     Switch(checked = adj.smartBlend, onCheckedChange = { viewModel.adjustments = adj.copy(smartBlend = it) })
                                 }
                             }
+                            if (renderedBitmap != null) {
+                                val manualPatch = adj.manualSkinPatch
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(Color(0xFF111827))
+                                        .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(9.dp))
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (manualPatch != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        Color(
+                                                            (manualPatch.sampledRed / 255f).coerceIn(0f, 1f),
+                                                            (manualPatch.sampledGreen / 255f).coerceIn(0f, 1f),
+                                                            (manualPatch.sampledBlue / 255f).coerceIn(0f, 1f)
+                                                        )
+                                                    )
+                                                    .border(1.dp, Color.White, CircleShape)
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.Colorize, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(15.dp))
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            if (manualPatch != null) "Skin Ref: Target Patch" else "Skin Ref: Auto Face",
+                                            color = Color(0xFFE2E8F0),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        if (manualPatch != null) {
+                                            Text(
+                                                "Auto",
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 11.sp,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(7.dp))
+                                                    .background(Color(0xFF1E293B))
+                                                    .clickable { viewModel.clearManualSkinPatch() }
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                        Text(
+                                            if (isSamplingSkin) "Done" else "Sample Skin",
+                                            color = if (isSamplingSkin) Color(0xFF0F172A) else Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(7.dp))
+                                                .background(if (isSamplingSkin) Color(0xFFFBBF24) else Color(0xFF312E81))
+                                                .border(
+                                                    1.dp,
+                                                    if (isSamplingSkin) Color(0xFFFBBF24) else Color(0xFF6366F1),
+                                                    RoundedCornerShape(7.dp)
+                                                )
+                                                .clickable {
+                                                    val nextSample = !isSamplingSkin
+                                                    if (nextSample) {
+                                                        viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                                    }
+                                                    viewModel.isSkinSamplingMode = nextSample
+                                                }
+                                                .padding(horizontal = 9.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                                if (manualPatch != null) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Patch Size", color = Color(0xFFCBD5E1), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                                        Slider(
+                                            value = manualPatch.radiusRatio,
+                                            onValueChange = { viewModel.updateSkinSampleRadius(it) },
+                                            valueRange = 0.014f..0.075f,
+                                            colors = SliderDefaults.colors(thumbColor = Color(0xFFFBBF24), activeTrackColor = Color(0xFFFBBF24)),
+                                            modifier = Modifier.weight(1f).height(28.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         2 -> {
+                            VirtualLightingStudioPanel(
+                                light = adj.virtualLight,
+                                onLightChange = { viewModel.adjustments = adj.copy(virtualLight = it) },
+                                onAutoMatchTarget = targetBmp?.let { bmp ->
+                                    {
+                                        val refFace = faces.firstOrNull { it.id == viewModel.selectedFaceId }
+                                            ?: faces.firstOrNull { it.enabled }
+                                            ?: faces.firstOrNull()
+                                        val estimated = VirtualLightingStudioShader.estimateTargetLightEnvironment(
+                                            targetBitmap = bmp,
+                                            faceCenterX = refFace?.let { (it.boxLeft + it.boxRight) * 0.5f },
+                                            faceCenterY = refFace?.let { (it.boxTop + it.boxBottom) * 0.5f },
+                                            faceWidth = refFace?.let { it.boxRight - it.boxLeft },
+                                            faceHeight = refFace?.let { it.boxBottom - it.boxTop }
+                                        )
+                                        viewModel.adjustments = adj.copy(virtualLight = estimated)
+                                    }
+                                }
+                            )
+                        }
+
+                        3 -> {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Size ${(adj.scale * 100).toInt()}%", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
                                 Slider(
