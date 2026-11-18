@@ -18,6 +18,7 @@ import com.facemorph.studio.model.BodyAnchorPoint
 import com.facemorph.studio.model.LiveCameraConfig
 import com.facemorph.studio.model.SourceFaceMetrics
 import com.facemorph.studio.model.WardrobeAssetItem
+import com.facemorph.studio.model.WardrobeSubCategory
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -320,16 +321,29 @@ object NativeLiveArEngine {
             val scaleMul = jewelryAsset.defaultScale
             when (jewelryAsset.anchorPoint) {
                 BodyAnchorPoint.HEAD -> {
-                    val hW = faceW * 1.25f * scaleMul
-                    val hH = hW * (jewelryBitmap.height.toFloat() / jewelryBitmap.width.toFloat())
-                    val scaledHat = Bitmap.createScaledBitmap(jewelryBitmap, max(8, hW.toInt()), max(8, hH.toInt()), true)
-                    scaledHat.setHasAlpha(true)
-                    canvas.save()
-                    canvas.translate(faceCX, faceCY - faceH * 0.52f)
-                    canvas.rotate(rollDeg)
-                    canvas.drawBitmap(scaledHat, -hW * 0.5f, -hH * 0.72f, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-                    canvas.restore()
-                    if (scaledHat !== jewelryBitmap) scaledHat.recycle()
+                    if (jewelryAsset.subCategory == WardrobeSubCategory.GLASSES) {
+                        val gW = faceW * 0.94f * scaleMul
+                        val gH = gW * (jewelryBitmap.height.toFloat() / jewelryBitmap.width.toFloat())
+                        val scaledGlasses = Bitmap.createScaledBitmap(jewelryBitmap, max(8, gW.toInt()), max(8, gH.toInt()), true)
+                        scaledGlasses.setHasAlpha(true)
+                        canvas.save()
+                        canvas.translate(smoothFace.eyeMidX, smoothFace.eyeMidY)
+                        canvas.rotate(rollDeg)
+                        canvas.drawBitmap(scaledGlasses, -gW * 0.5f, -gH * 0.5f, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+                        canvas.restore()
+                        if (scaledGlasses !== jewelryBitmap) scaledGlasses.recycle()
+                    } else {
+                        val hW = faceW * 1.25f * scaleMul
+                        val hH = hW * (jewelryBitmap.height.toFloat() / jewelryBitmap.width.toFloat())
+                        val scaledHat = Bitmap.createScaledBitmap(jewelryBitmap, max(8, hW.toInt()), max(8, hH.toInt()), true)
+                        scaledHat.setHasAlpha(true)
+                        canvas.save()
+                        canvas.translate(faceCX, faceCY - faceH * 0.52f)
+                        canvas.rotate(rollDeg)
+                        canvas.drawBitmap(scaledHat, -hW * 0.5f, -hH * 0.72f, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+                        canvas.restore()
+                        if (scaledHat !== jewelryBitmap) scaledHat.recycle()
+                    }
                 }
                 BodyAnchorPoint.WRIST -> {
                     val jW = faceW * 0.58f * scaleMul
@@ -1048,8 +1062,13 @@ object NativeLiveArEngine {
                             val b = f.boundingBox
                             val fw = max(40f, b.width().toFloat())
                             val fh = max(40f, b.height().toFloat())
-                            val le = f.getLandmark(FaceLandmark.LEFT_EYE)?.position
-                            val re = f.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+                            val rawLe = f.getLandmark(FaceLandmark.LEFT_EYE)?.position
+                            val rawRe = f.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+                            val (le, re) = if (rawLe != null && rawRe != null && rawLe.x > rawRe.x) {
+                                rawRe to rawLe
+                            } else {
+                                rawLe to rawRe
+                            }
                             val noseBase = f.getLandmark(FaceLandmark.NOSE_BASE)?.position
                             val leftCheek = f.getLandmark(FaceLandmark.LEFT_CHEEK)?.position
                             val rightCheek = f.getLandmark(FaceLandmark.RIGHT_CHEEK)?.position

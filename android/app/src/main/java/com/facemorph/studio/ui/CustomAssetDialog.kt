@@ -63,6 +63,7 @@ import com.facemorph.studio.engine.NativeStorageHelper
 import com.facemorph.studio.model.BodyAnchorPoint
 import com.facemorph.studio.model.FabricType
 import com.facemorph.studio.model.WardrobeCategory
+import com.facemorph.studio.model.WardrobeSubCategory
 import com.facemorph.studio.viewmodel.StudioViewModel
 
 @Composable
@@ -80,6 +81,7 @@ fun CustomAssetDialog(
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var assetName by remember { mutableStateOf("Custom Jacket") }
     var category by remember { mutableStateOf(WardrobeCategory.CLOTHING) }
+    var subCategory by remember { mutableStateOf(WardrobeSubCategory.JACKET) }
     var anchorPoint by remember { mutableStateOf(BodyAnchorPoint.SHOULDERS) }
     var fabricType by remember { mutableStateOf(FabricType.SILK) }
 
@@ -313,6 +315,26 @@ fun CustomAssetDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                Text("Sub-Category", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    WardrobeSubCategory.entries.forEach { sub ->
+                        FilterChip(
+                            selected = subCategory == sub,
+                            onClick = {
+                                subCategory = sub
+                                category = sub.parentCategory
+                                anchorPoint = when (sub) {
+                                    WardrobeSubCategory.WATCH -> BodyAnchorPoint.WRIST
+                                    WardrobeSubCategory.NECKLACE -> BodyAnchorPoint.NECK
+                                    WardrobeSubCategory.GLASSES, WardrobeSubCategory.HEADWEAR -> BodyAnchorPoint.HEAD
+                                    else -> BodyAnchorPoint.SHOULDERS
+                                }
+                            },
+                            label = { Text(sub.label, fontSize = 10.sp) }
+                        )
+                    }
+                }
+
                 Text("Category", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
                     WardrobeCategory.entries.forEach { cat ->
@@ -324,6 +346,9 @@ fun CustomAssetDialog(
                                     WardrobeCategory.CLOTHING -> BodyAnchorPoint.SHOULDERS
                                     WardrobeCategory.JEWELRY -> BodyAnchorPoint.NECK
                                     WardrobeCategory.ACCESSORY -> BodyAnchorPoint.HEAD
+                                }
+                                if (subCategory.parentCategory != cat) {
+                                    subCategory = WardrobeSubCategory.entries.first { it.parentCategory == cat }
                                 }
                             },
                             label = { Text(cat.label, fontSize = 10.sp) }
@@ -371,7 +396,8 @@ fun CustomAssetDialog(
                             category = category,
                             anchorPoint = anchorPoint,
                             fabricType = fabricType,
-                            defaultScale = scale
+                            defaultScale = scale,
+                            subCategory = subCategory
                         )
                         onDismiss()
                     },

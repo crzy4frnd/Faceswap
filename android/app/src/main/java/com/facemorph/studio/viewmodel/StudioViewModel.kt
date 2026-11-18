@@ -3,6 +3,13 @@ package com.facemorph.studio.viewmodel
 import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -13,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.facemorph.studio.R
+import com.facemorph.studio.engine.BuiltInWardrobeFactory
 import com.facemorph.studio.engine.NativeAssetSegmenter
 import com.facemorph.studio.engine.NativeClothPhysicsEngine
 import com.facemorph.studio.engine.NativeFaceSwapEngine
@@ -33,11 +41,16 @@ import com.facemorph.studio.model.StudioTab
 import com.facemorph.studio.model.TargetSampleItem
 import com.facemorph.studio.model.WardrobeAssetItem
 import com.facemorph.studio.model.WardrobeCategory
+import com.facemorph.studio.model.WardrobeSubCategory
+import com.facemorph.studio.model.defaultSubCategoryFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.ceil
+import kotlin.math.hypot
+import kotlin.math.max
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -65,6 +78,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var isSkinSamplingMode by mutableStateOf(false)
     var splitCompareEnabled by mutableStateOf(false)
     var splitComparePercent by mutableFloatStateOf(50f)
+
+    // Cutout / Protect Foreground Mask Brush (preserves original hair, maang tikka, veil, jewelry)
+    var cutoutProtectionMask by mutableStateOf<Bitmap?>(null)
+    var cutoutMaskVersion by mutableIntStateOf(0)
+    var isCutoutBrushMode by mutableStateOf(false)
+    var cutoutBrushProtect by mutableStateOf(true)
+    var cutoutBrushSizePx by mutableFloatStateOf(34f)
+    var cutoutBrushHardness by mutableFloatStateOf(65f)
+    var cutoutShowOverlay by mutableStateOf(true)
+    var canUndoCutoutMask by mutableStateOf(false)
+    private val cutoutUndoStack = ArrayDeque<Bitmap>(8)
 
     // Bitmap & Metrics Caches
     val profileBitmapCache = mutableStateMapOf<String, Bitmap>()
@@ -114,15 +138,53 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     name = "Midnight Blazer",
                     category = WardrobeCategory.CLOTHING,
                     anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.SUIT,
                     fabricType = FabricType.WOOL,
                     drawableResId = R.drawable.wardrobe_blazer,
                     defaultScale = 1.0f
+                ),
+                WardrobeAssetItem(
+                    id = "asset-suit-navy",
+                    name = "Navy 2-Piece Suit",
+                    category = WardrobeCategory.CLOTHING,
+                    anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.SUIT,
+                    fabricType = FabricType.WOOL,
+                    defaultScale = 1.0f
+                ),
+                WardrobeAssetItem(
+                    id = "asset-shirt-white",
+                    name = "Crisp Dress Shirt",
+                    category = WardrobeCategory.CLOTHING,
+                    anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.SHIRT,
+                    fabricType = FabricType.COTTON,
+                    defaultScale = 0.98f
+                ),
+                WardrobeAssetItem(
+                    id = "asset-shirt-navy",
+                    name = "Navy Formal Shirt",
+                    category = WardrobeCategory.CLOTHING,
+                    anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.SHIRT,
+                    fabricType = FabricType.COTTON,
+                    defaultScale = 0.98f
+                ),
+                WardrobeAssetItem(
+                    id = "asset-jacket-moto",
+                    name = "Slate Moto Jacket",
+                    category = WardrobeCategory.CLOTHING,
+                    anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.JACKET,
+                    fabricType = FabricType.LEATHER,
+                    defaultScale = 1.02f
                 ),
                 WardrobeAssetItem(
                     id = "asset-kimono",
                     name = "Silk Kimono",
                     category = WardrobeCategory.CLOTHING,
                     anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.ETHNIC,
                     fabricType = FabricType.SILK,
                     drawableResId = R.drawable.wardrobe_kimono,
                     defaultScale = 1.12f
@@ -132,6 +194,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     name = "Emerald Pendant",
                     category = WardrobeCategory.JEWELRY,
                     anchorPoint = BodyAnchorPoint.NECK,
+                    subCategory = WardrobeSubCategory.NECKLACE,
                     drawableResId = R.drawable.wardrobe_emerald_pendant,
                     defaultScale = 0.56f
                 ),
@@ -140,6 +203,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     name = "Gold Necklace",
                     category = WardrobeCategory.JEWELRY,
                     anchorPoint = BodyAnchorPoint.NECK,
+                    subCategory = WardrobeSubCategory.NECKLACE,
                     drawableResId = R.drawable.wardrobe_gold_necklace,
                     defaultScale = 0.62f
                 ),
@@ -148,8 +212,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     name = "Chronograph",
                     category = WardrobeCategory.JEWELRY,
                     anchorPoint = BodyAnchorPoint.WRIST,
+                    subCategory = WardrobeSubCategory.WATCH,
                     drawableResId = R.drawable.wardrobe_watch,
                     defaultScale = 0.36f
+                ),
+                WardrobeAssetItem(
+                    id = "asset-glasses-aviator",
+                    name = "Studio Aviators",
+                    category = WardrobeCategory.ACCESSORY,
+                    anchorPoint = BodyAnchorPoint.HEAD,
+                    subCategory = WardrobeSubCategory.GLASSES,
+                    defaultScale = 1.0f
                 )
             )
             val savedCustom = loadSavedCustomWardrobe()
@@ -161,7 +234,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     item.customFilePath != null -> NativeStorageHelper.loadBitmapFromFile(item.customFilePath, 900)
                     item.drawableResId != null -> NativeStorageHelper.loadBitmapFromResource(ctx, item.drawableResId, 900)
                         ?.let { NativeAssetSegmenter.extractTransparentAsset(it, tolerance = 36) }
-                    else -> null
+                    else -> BuiltInWardrobeFactory.createBuiltInBitmap(item.id)
                 }
                 if (bmp != null) loadedWardrobeMaps[item.id] = bmp
             }
@@ -235,6 +308,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         bodySubjectFaceId = null
         bodyScan = null
         isSkinSamplingMode = false
+        isCutoutBrushMode = false
+        clearCutoutMask()
         adjustments = adjustments.copy(manualSkinPatch = null)
     }
 
@@ -265,6 +340,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             bodySubjectFaceId = firstFace?.id
             bodyScan = scan
             isSkinSamplingMode = false
+            isCutoutBrushMode = false
+            clearCutoutMask()
             adjustments = adjustments.copy(manualSkinPatch = null)
         }
     }
@@ -300,6 +377,83 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun clearManualSkinPatch() {
         isSkinSamplingMode = false
         adjustments = adjustments.copy(manualSkinPatch = null)
+    }
+
+    private fun ensureCutoutMaskForTarget(): Bitmap? {
+        val target = targetBitmap ?: return null
+        val cur = cutoutProtectionMask
+        if (cur != null && !cur.isRecycled && cur.width == target.width && cur.height == target.height) {
+            return cur
+        }
+        val created = Bitmap.createBitmap(target.width, target.height, Bitmap.Config.ARGB_8888).apply {
+            setHasAlpha(true)
+        }
+        cutoutProtectionMask = created
+        return created
+    }
+
+    fun beginCutoutStroke() {
+        val mask = ensureCutoutMaskForTarget() ?: return
+        val snapshot = mask.copy(Bitmap.Config.ARGB_8888, false)
+        while (cutoutUndoStack.size >= 8) {
+            cutoutUndoStack.removeFirst().recycle()
+        }
+        cutoutUndoStack.addLast(snapshot)
+        canUndoCutoutMask = cutoutUndoStack.isNotEmpty()
+    }
+
+    fun paintCutoutStrokeSegment(x0Img: Float, y0Img: Float, x1Img: Float, y1Img: Float) {
+        val mask = ensureCutoutMaskForTarget() ?: return
+        val canvas = Canvas(mask)
+        val radius = max(4f, cutoutBrushSizePx)
+        val hardnessNorm = (cutoutBrushHardness / 100f).coerceIn(0.10f, 1.0f)
+        val softStart = (hardnessNorm * 0.88f).coerceIn(0.05f, 0.92f)
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        if (!cutoutBrushProtect) {
+            paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        }
+
+        val dist = hypot((x1Img - x0Img).toDouble(), (y1Img - y0Img).toDouble()).toFloat()
+        val step = max(2f, radius * 0.28f)
+        val count = max(1, ceil(dist / step).toInt())
+
+        for (i in 0..count) {
+            val t = if (count == 0) 0f else i.toFloat() / count
+            val cx = x0Img + (x1Img - x0Img) * t
+            val cy = y0Img + (y1Img - y0Img) * t
+            val brushColor = if (cutoutBrushProtect) Color.argb(235, 244, 63, 94) else Color.WHITE
+            val grad = RadialGradient(
+                cx,
+                cy,
+                radius,
+                intArrayOf(brushColor, brushColor, Color.TRANSPARENT),
+                floatArrayOf(0f, softStart, 1f),
+                Shader.TileMode.CLAMP
+            )
+            paint.shader = grad
+            canvas.drawCircle(cx, cy, radius, paint)
+        }
+        cutoutMaskVersion++
+    }
+
+    fun undoCutoutStroke() {
+        val prev = if (cutoutUndoStack.isNotEmpty()) cutoutUndoStack.removeLast() else null
+        canUndoCutoutMask = cutoutUndoStack.isNotEmpty()
+        if (prev != null) {
+            cutoutProtectionMask = prev.copy(Bitmap.Config.ARGB_8888, true)
+            prev.recycle()
+            cutoutMaskVersion++
+        }
+    }
+
+    fun clearCutoutMask() {
+        while (cutoutUndoStack.isNotEmpty()) {
+            cutoutUndoStack.removeFirst().recycle()
+        }
+        canUndoCutoutMask = false
+        cutoutProtectionMask = null
+        cutoutMaskVersion++
     }
 
     fun selectBodySubjectFace(faceId: String) {
@@ -448,7 +602,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         category: WardrobeCategory,
         anchorPoint: BodyAnchorPoint,
         fabricType: FabricType,
-        defaultScale: Float
+        defaultScale: Float,
+        subCategory: WardrobeSubCategory = defaultSubCategoryFor(category, anchorPoint)
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             val id = "custom-${System.currentTimeMillis()}"
@@ -458,6 +613,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 name = name.ifBlank { "Custom Costume" },
                 category = category,
                 anchorPoint = anchorPoint,
+                subCategory = subCategory,
                 fabricType = fabricType,
                 customFilePath = path,
                 defaultScale = defaultScale,
@@ -553,6 +709,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 put("name", item.name)
                 put("category", item.category.name)
                 put("anchorPoint", item.anchorPoint.name)
+                put("subCategory", item.subCategory.name)
                 put("fabricType", item.fabricType.name)
                 put("customFilePath", item.customFilePath ?: "")
                 put("defaultScale", item.defaultScale.toDouble())
@@ -570,16 +727,24 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 val o = arr.getJSONObject(idx)
                 val path = o.optString("customFilePath", "")
                 if (path.isBlank()) null
-                else WardrobeAssetItem(
-                    id = o.getString("id"),
-                    name = o.getString("name"),
-                    category = WardrobeCategory.valueOf(o.getString("category")),
-                    anchorPoint = BodyAnchorPoint.valueOf(o.getString("anchorPoint")),
-                    fabricType = FabricType.valueOf(o.getString("fabricType")),
-                    customFilePath = path,
-                    defaultScale = o.optDouble("defaultScale", 1.0).toFloat(),
-                    isCustom = true
-                )
+                else {
+                    val cat = WardrobeCategory.valueOf(o.getString("category"))
+                    val anchor = BodyAnchorPoint.valueOf(o.getString("anchorPoint"))
+                    val sub = o.optString("subCategory", "").takeIf { it.isNotBlank() }?.let {
+                        runCatching { WardrobeSubCategory.valueOf(it) }.getOrNull()
+                    } ?: defaultSubCategoryFor(cat, anchor)
+                    WardrobeAssetItem(
+                        id = o.getString("id"),
+                        name = o.getString("name"),
+                        category = cat,
+                        anchorPoint = anchor,
+                        subCategory = sub,
+                        fabricType = FabricType.valueOf(o.getString("fabricType")),
+                        customFilePath = path,
+                        defaultScale = o.optDouble("defaultScale", 1.0).toFloat(),
+                        isCustom = true
+                    )
+                }
             }
         } catch (_: Exception) {
             emptyList()

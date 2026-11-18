@@ -101,6 +101,7 @@ import com.facemorph.studio.engine.NativeLiveArEngine
 import com.facemorph.studio.engine.NativeStorageHelper
 import com.facemorph.studio.engine.ThermalPerformanceMonitor
 import com.facemorph.studio.model.WardrobeCategory
+import com.facemorph.studio.model.WardrobeSubCategory
 import com.facemorph.studio.viewmodel.StudioViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -126,6 +127,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Effects, 1=Background, 2=Wardrobe
     var isDeckExpanded by remember { mutableStateOf(true) }
     var showLiveLightStudio by remember { mutableStateOf(false) }
+    var selectedWardrobeSubFilter by remember { mutableStateOf<WardrobeSubCategory?>(null) }
     var pendingFaceCameraFile by remember { mutableStateOf<File?>(null) }
 
     var hasCameraPermission by remember {
@@ -844,6 +846,120 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                         }
 
                         2 -> {
+                            val subCategories = remember(viewModel.wardrobeAssets) {
+                                WardrobeSubCategory.entries.filter { sub ->
+                                    viewModel.wardrobeAssets.any { it.subCategory == sub } ||
+                                        sub in listOf(
+                                            WardrobeSubCategory.SUIT,
+                                            WardrobeSubCategory.SHIRT,
+                                            WardrobeSubCategory.JACKET,
+                                            WardrobeSubCategory.ETHNIC,
+                                            WardrobeSubCategory.NECKLACE,
+                                            WardrobeSubCategory.WATCH,
+                                            WardrobeSubCategory.GLASSES
+                                        )
+                                }
+                            }
+                            val visibleAssets = remember(viewModel.wardrobeAssets, selectedWardrobeSubFilter) {
+                                val sub = selectedWardrobeSubFilter
+                                if (sub == null) viewModel.wardrobeAssets
+                                else viewModel.wardrobeAssets.filter { it.subCategory == sub }
+                            }
+
+                            // Easy Sub-Category Selection Row (All, Suit, Shirt, Jacket, Ethnic, Necklace, Watch, Glasses)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val allSelected = selectedWardrobeSubFilter == null
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (allSelected) Color(0xFF4F46E5) else Color(0xFF111827))
+                                        .border(
+                                            1.dp,
+                                            if (allSelected) Color(0xFF818CF8) else Color(0xFF1E293B),
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { selectedWardrobeSubFilter = null }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        "All (${viewModel.wardrobeAssets.size})",
+                                        color = if (allSelected) Color.White else Color(0xFFCBD5E1),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                }
+
+                                subCategories.forEach { sub ->
+                                    val subAssets = viewModel.wardrobeAssets.filter { it.subCategory == sub }
+                                    val isSel = selectedWardrobeSubFilter == sub
+                                    val isWornInSub = subAssets.any { asset ->
+                                        if (asset.category == WardrobeCategory.CLOTHING) {
+                                            config.wearClothes && config.selectedClothingId == asset.id
+                                        } else {
+                                            config.wearJewelry && config.selectedJewelryId == asset.id
+                                        }
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(
+                                                when {
+                                                    isSel -> Color(0xFF4F46E5)
+                                                    isWornInSub -> Color(0xFF1E1B4B)
+                                                    else -> Color(0xFF111827)
+                                                }
+                                            )
+                                            .border(
+                                                1.dp,
+                                                when {
+                                                    isSel -> Color(0xFF818CF8)
+                                                    isWornInSub -> Color(0xFF22D3EE)
+                                                    else -> Color(0xFF1E293B)
+                                                },
+                                                RoundedCornerShape(8.dp)
+                                            )
+                                            .clickable {
+                                                selectedWardrobeSubFilter = sub
+                                                val firstMatch = subAssets.firstOrNull()
+                                                if (firstMatch != null && !isWornInSub) {
+                                                    viewModel.liveConfig = if (firstMatch.category == WardrobeCategory.CLOTHING) {
+                                                        config.copy(selectedClothingId = firstMatch.id, wearClothes = true)
+                                                    } else {
+                                                        config.copy(selectedJewelryId = firstMatch.id, wearJewelry = true)
+                                                    }
+                                                }
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                    ) {
+                                        if (isWornInSub) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFF22D3EE))
+                                            )
+                                        }
+                                        Text(
+                                            if (subAssets.isNotEmpty()) "${sub.label} (${subAssets.size})" else sub.label,
+                                            color = if (isSel || isWornInSub) Color.White else Color(0xFFCBD5E1),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+
                             Row(
                                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -852,7 +968,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.Center,
                                     modifier = Modifier
-                                        .width(66.dp)
+                                        .width(62.dp)
                                         .height(66.dp)
                                         .clip(RoundedCornerShape(10.dp))
                                         .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
@@ -862,12 +978,29 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                         }
                                         .padding(6.dp)
                                 ) {
-                                    Icon(Icons.Default.Block, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Default.Block, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(19.dp))
                                     Spacer(Modifier.height(4.dp))
                                     Text("Clear", color = Color(0xFF94A3B8), fontSize = 10.sp)
                                 }
 
-                                viewModel.wardrobeAssets.forEach { asset ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .width(64.dp)
+                                        .height(66.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF082F49))
+                                        .clickable { viewModel.showCustomAssetDialog = true }
+                                        .padding(6.dp)
+                                ) {
+                                    Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("+ Scan", color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                }
+
+                                visibleAssets.forEach { asset ->
                                     val active = if (asset.category == WardrobeCategory.CLOTHING) {
                                         config.wearClothes && config.selectedClothingId == asset.id
                                     } else {
@@ -877,16 +1010,18 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                     Column(
                                         horizontalAlignment = Alignment.CenterHorizontally,
                                         modifier = Modifier
-                                            .width(78.dp)
+                                            .width(80.dp)
                                             .height(66.dp)
                                             .clip(RoundedCornerShape(10.dp))
                                             .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
                                             .background(if (active) Color(0xFF1E1B4B) else Color(0xFF111827))
                                             .clickable {
                                                 viewModel.liveConfig = if (asset.category == WardrobeCategory.CLOTHING) {
-                                                    config.copy(selectedClothingId = asset.id, wearClothes = true)
+                                                    val toggleOff = config.wearClothes && config.selectedClothingId == asset.id
+                                                    config.copy(selectedClothingId = asset.id, wearClothes = !toggleOff)
                                                 } else {
-                                                    config.copy(selectedJewelryId = asset.id, wearJewelry = true)
+                                                    val toggleOff = config.wearJewelry && config.selectedJewelryId == asset.id
+                                                    config.copy(selectedJewelryId = asset.id, wearJewelry = !toggleOff)
                                                 }
                                             }
                                             .padding(5.dp)

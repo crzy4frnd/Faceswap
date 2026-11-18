@@ -17,15 +17,12 @@ import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * Texture-Contrast-Aware Feathering & Edge-Blending Shader Module for Face-Swap Output.
+ * Texture-Contrast-Aware Feathering & Occlusion-Preserving Edge-Blending Shader Module.
  *
  * Extracts the exact geometrically aligned target skin underlay via inverse swap-matrix projection,
- * computes local luminance texture gradients and RGB discrepancy around the perimeter ring, and:
- *  1) Applies wide, silky cubic falloff across smooth skin regions to dissolve seams invisibly.
- *  2) Tightens border roll-off cleanly over high-contrast occlusions (hair, glasses, stubble, jaw shadows)
- *     so original sharp features stay crisp without muddy double-exposure ghosting.
- *  3) Performs a harmonic boundary luminance/chroma pull so lighting transitions seamlessly into
- *     the destination cheek/forehead skin tone while preserving full central eye/nose/lip sharpness.
+ * maintains a 100%-opaque anatomical inner core (brows, eyes, nose, lips, cheekbones) so the swapped
+ * identity never ghosts or double-exposes, recovers foreground jewelry/hairline/veil occlusions over
+ * the forehead & temples, and softly feathers perimeter skin into the destination frame.
  */
 object FaceSwapEdgeBlendShader {
 
@@ -35,7 +32,7 @@ object FaceSwapEdgeBlendShader {
         swapMatrix: Matrix,
         featherRatio: Float,
         smartBlend: Boolean = true,
-        blendIntensity: Float = 0.82f,
+        blendIntensity: Float = 0.78f,
         preserveHighContrastOcclusions: Boolean = true
     ) {
         val w = patch.width
@@ -48,7 +45,6 @@ object FaceSwapEdgeBlendShader {
             return
         }
 
-        // Sample exact geometrically aligned target underlay pixels underneath the swapped patch
         val underlay = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val uCanvas = Canvas(underlay)
         uCanvas.drawBitmap(targetSource, invMatrix, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
@@ -69,9 +65,33 @@ object FaceSwapEdgeBlendShader {
             patchLum[i] = 0.299f * Color.red(pc) + 0.587f * Color.green(pc) + 0.114f * Color.blue(pc)
         }
 
-        // Solid opaque interior core (preserves razor-sharp eyes, nose, and lips); outer ring softens via contrast shader
-        val featherNorm = featherRatio.coerceIn(0.15f, 0.88f)
-        val innerCore = (0.74f - featherNorm * 0.24f - if (smartBlend) 0.05f else 0f).coerceIn(0.46f, 0.78f)
+        // Estimate destination mid-cheek skin luminance for hairline & jewelry occlusion separation
+        var skinLumSum = 0f
+        var skinLumCount = 0
+        val cy0 = (h * 0.42f).toInt().coerceIn(0, h - 1)
+        val cy1 = (h * 0.68f).toInt().coerceIn(cy0, h - 1)
+        val cx0 = (w * 0.28f).toInt().coerceIn(0, w - 1)
+        val cx1 = (w * 0.72f).toInt().coerceIn(cx0, w - 1)
+        for (y in cy0..cy1 step max(1, (cy1 - cy0) / 8)) {
+            val row = y * w
+            for (x in cx0..cx1 step max(1, (cx1 - cx0) / 8)) {
+                val tc = targetPixels[row + x]
+                if (Color.alpha(tc) > 200) {
+                    val r = Color.red(tc)
+                    val g = Color.green(tc)
+                    val b = Color.blue(tc)
+                    if (r > g && (r - b) > 8 && targetLum[row + x] in 50f..238f) {
+                        skinLumSum += targetLum[row + x]
+                        skinLumCount++
+                    }
+                }
+            }
+        }
+        val targetSkinLum = if (skinLumCount >= 6) skinLumSum / skinLumCount else 155f
+
+        // Wide anatomical inner core so brows, eyes, nose, and mouth render at full 100% solid clarity
+        val featherNorm = featherRatio.coerceIn(0.12f, 0.88f)
+        val innerCore = (0.83f - featherNorm * 0.16f - if (smartBlend) 0.03f else 0f).coerceIn(0.62f, 0.86f)
         val halfW = w * 0.5f
         val halfH = h * 0.5f
         val rxInv = 1f / max(1f, halfW * 0.98f)
@@ -81,12 +101,15 @@ object FaceSwapEdgeBlendShader {
         for (y in 0 until h) {
             val ny = (y - halfH) * ryInv
             val nySq = ny * ny
+            // Taper lower jaw slightly for natural anatomical chin oval (matches face silhouette cleanly)
+            val jawTaper = if (ny > 0.12f) (1f - (ny - 0.12f) * 0.18f).coerceIn(0.80f, 1f) else 1f
             val row = y * w
             val yUp = if (y > 0) (y - 1) * w else row
             val yDown = if (y < h - 1) (y + 1) * w else row
+            val vFrac = y.toFloat() / h
 
             for (x in 0 until w) {
-                val nx = (x - halfW) * rxInv
+                val nx = ((x - halfW) * rxInv) / jawTaper
                 val r = sqrt(nx * nx + nySq)
                 val idx = row + x
 
@@ -94,11 +117,7 @@ object FaceSwapEdgeBlendShader {
                     patchPixels[idx] = Color.TRANSPARENT
                     continue
                 }
-                if (r <= innerCore) {
-                    continue
-                }
 
-                val t = ((r - innerCore) / max(0.01f, 1.0f - innerCore)).coerceIn(0f, 1f)
                 val pc = patchPixels[idx]
                 val pA = Color.alpha(pc)
                 if (pA == 0) continue
@@ -108,7 +127,6 @@ object FaceSwapEdgeBlendShader {
                 val xL = if (x > 0) x - 1 else x
                 val xR = if (x < w - 1) x + 1 else x
 
-                // 1. Local Texture Contrast (isotropic luminance gradient on both destination & source skin)
                 val pGx = patchLum[row + xR] - patchLum[row + xL]
                 val pGy = patchLum[yDown + x] - patchLum[yUp + x]
                 val patchGrad = (abs(pGx) + abs(pGy)) * 0.5f
@@ -126,11 +144,52 @@ object FaceSwapEdgeBlendShader {
                     patchGrad
                 }
 
-                // Smoothness vs texture energy at this seam pixel (0 = smooth cheek/forehead, 1 = crisp feature edge)
+                // Foreground occlusion preservation (forehead jewelry/maang tikka, dark bangs/hairline, veil/glasses)
+                var occlusionReveal = 0f
+                if (preserveHighContrastOcclusions && tcAlpha > 25) {
+                    val tR = Color.red(tc)
+                    val tG = Color.green(tc)
+                    val tB = Color.blue(tc)
+                    val tLum = targetLum[idx]
+                    val maxC = max(tR, max(tG, tB))
+                    val minC = min(tR, min(tG, tB))
+                    val tSat = if (maxC > 0) (maxC - minC).toFloat() / maxC else 0f
+
+                    // Upper forehead jewelry/sparkle (e.g. maang tikka, pearl veil border, diamond stud)
+                    val inUpperZone = vFrac < 0.34f && abs(nx) < 0.72f
+                    val inMidlineOrnament = vFrac < 0.38f && abs(nx) < 0.22f
+                    if ((inUpperZone || inMidlineOrnament || r > innerCore * 0.84f) &&
+                        tLum > max(188f, targetSkinLum + 26f) &&
+                        (targetGrad > 9f || tSat < 0.20f)
+                    ) {
+                        val sparkleStrength = ((tLum - max(184f, targetSkinLum + 22f)) / 42f).coerceIn(0f, 1f)
+                        occlusionReveal = max(occlusionReveal, sparkleStrength * 0.94f)
+                    }
+
+                    // Dense dark hairline / parting / bangs on upper forehead or temple perimeter
+                    val inHairZone = vFrac < 0.27f || (vFrac < 0.48f && abs(nx) > 0.62f) || r > innerCore * 0.88f
+                    if (inHairZone && tLum < min(74f, targetSkinLum * 0.56f)) {
+                        val hairStrength = ((min(74f, targetSkinLum * 0.58f) - tLum) / 36f).coerceIn(0f, 1f)
+                        occlusionReveal = max(occlusionReveal, hairStrength * 0.94f)
+                    }
+                }
+
+                if (r <= innerCore) {
+                    if (occlusionReveal > 0.04f) {
+                        val outA = (pA * (1f - occlusionReveal)).toInt().coerceIn(0, 255)
+                        if (outA < 4) {
+                            patchPixels[idx] = Color.TRANSPARENT
+                        } else {
+                            patchPixels[idx] = Color.argb(outA, Color.red(pc), Color.green(pc), Color.blue(pc))
+                        }
+                    }
+                    continue
+                }
+
+                val t = ((r - innerCore) / max(0.01f, 1.0f - innerCore)).coerceIn(0f, 1f)
                 val contrastEnergy = max(targetGrad, targetGrad * 0.68f + patchGrad * 0.32f)
                 val contrastFactor = (contrastEnergy / 28f).coerceIn(0f, 1f)
 
-                // Chromatic/brightness discrepancy between patch and real skin/hair/glasses
                 val pR = Color.red(pc)
                 val pG = Color.green(pc)
                 val pB = Color.blue(pc)
@@ -143,22 +202,20 @@ object FaceSwapEdgeBlendShader {
                     0f
                 }
 
-                // 2. Contrast-Adaptive Feathering Curve
-                // Smooth low-contrast areas melt broadly; sharp high-contrast borders tighten roll-off to avoid blur halos
                 val baseHermite = 1f - (t * t * (3f - 2f * t))
-                val contrastExponent = 1.18f + (1f - contrastFactor) * 0.48f - contrastFactor * 0.22f
+                val contrastExponent = 1.10f + (1f - contrastFactor) * 0.42f - contrastFactor * 0.20f
                 var borderAlpha = baseHermite.pow(contrastExponent)
 
-                // Preserve sharp high-contrast occlusions in original frame (eyeglass frames, stray hair, jaw stubble)
                 if (preserveHighContrastOcclusions && tcAlpha > 25 && targetGrad > 14f && targetGrad > patchGrad * 1.15f) {
-                    val occlusionWeight = ((targetGrad - 14f) / 34f).coerceIn(0f, 0.85f)
+                    val occlusionWeight = ((targetGrad - 14f) / 32f).coerceIn(0f, 0.88f)
                     val edgeProximity = (0.28f + 0.72f * t).coerceIn(0f, 1f)
-                    borderAlpha *= (1f - occlusionWeight * edgeProximity * 0.75f)
+                    borderAlpha *= (1f - occlusionWeight * edgeProximity * 0.78f)
                 }
 
-                // Soften steep tone jumps slightly around mid-border when Smart Blend is enabled
-                if (smartBlend && colorDiff > 0.25f) {
-                    val toneSoften = (1f - min(0.32f, (colorDiff - 0.25f) * 0.22f * t))
+                borderAlpha *= (1f - occlusionReveal)
+
+                if (smartBlend && colorDiff > 0.28f) {
+                    val toneSoften = (1f - min(0.28f, (colorDiff - 0.28f) * 0.20f * t))
                     borderAlpha *= toneSoften
                 }
 
@@ -168,13 +225,11 @@ object FaceSwapEdgeBlendShader {
                     continue
                 }
 
-                // 3. Harmonic Boundary Luminance & Tint Pull (approximates Poisson edge continuity across lighting seams)
                 val rOut: Int
                 val gOut: Int
                 val bOut: Int
-                if (smartBlend && clampedBlend > 0.01f && Color.alpha(tc) > 25) {
-                    // Gently pull swapped border pixel's tone toward target illumination proportional to distance into seam
-                    val pullStrength = (t * (1f - contrastFactor * 0.45f) * 0.58f * clampedBlend).coerceIn(0f, 0.62f)
+                if (smartBlend && clampedBlend > 0.01f && tcAlpha > 25) {
+                    val pullStrength = (t * (1f - contrastFactor * 0.48f) * 0.44f * clampedBlend).coerceIn(0f, 0.48f)
                     rOut = (pR + (tR - pR) * pullStrength).toInt().coerceIn(0, 255)
                     gOut = (pG + (tG - pG) * pullStrength).toInt().coerceIn(0, 255)
                     bOut = (pB + (tB - pB) * pullStrength).toInt().coerceIn(0, 255)
@@ -202,7 +257,7 @@ object FaceSwapEdgeBlendShader {
         val w = patch.width
         val h = patch.height
         val canvas = Canvas(patch)
-        val innerStop = (0.76f - featherRatio * 0.24f - if (smartBlend) 0.06f else 0f).coerceIn(0.48f, 0.80f)
+        val innerStop = (0.82f - featherRatio * 0.16f - if (smartBlend) 0.03f else 0f).coerceIn(0.62f, 0.85f)
         val gradient = RadialGradient(
             0f,
             0f,

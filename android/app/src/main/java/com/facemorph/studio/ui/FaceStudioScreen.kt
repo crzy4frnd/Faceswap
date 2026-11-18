@@ -31,10 +31,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -48,6 +50,9 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -107,17 +112,21 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     val profileCache = viewModel.profileBitmapCache.toMap()
     val metricsCache = viewModel.profileMetricsCache.toMap()
 
-    var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Light, 3=Align
+    var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Cutout, 3=Light, 4=Align
     var isDeckExpanded by remember { mutableStateOf(true) }
     var showToolsMenu by remember { mutableStateOf(false) }
     var activeLandmarkKey by remember { mutableStateOf("nose") }
     var viewportZoom by remember { mutableFloatStateOf(1f) }
     var viewportPan by remember { mutableStateOf(Offset.Zero) }
+    var lastBrushImgPos by remember { mutableStateOf<Offset?>(null) }
+    var brushCursorImgPos by remember { mutableStateOf<Offset?>(null) }
     val isSamplingSkin = viewModel.isSkinSamplingMode
+    val isCutoutBrush = viewModel.isCutoutBrushMode
     val latestTargetBmp by rememberUpdatedState(targetBmp)
     val latestZoom by rememberUpdatedState(viewportZoom)
     val latestPan by rememberUpdatedState(viewportPan)
     val latestSamplingMode by rememberUpdatedState(isSamplingSkin)
+    val latestCutoutMode by rememberUpdatedState(isCutoutBrush)
     val latestShowMesh by rememberUpdatedState(adj.showGeometricMesh)
     val latestFaces by rememberUpdatedState(faces)
     val latestSelectedFaceId by rememberUpdatedState(viewModel.selectedFaceId)
@@ -146,6 +155,22 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
         val normX = ((pos.x - left) / drawW).coerceIn(0f, 1f)
         val normY = ((pos.y - top) / drawH).coerceIn(0f, 1f)
         viewModel.sampleSkinPatchAt(normX, normY)
+    }
+
+    fun screenToImagePos(pos: Offset, canvasW: Float, canvasH: Float): Offset? {
+        val bmp = latestTargetBmp ?: return null
+        val bw = bmp.width.toFloat()
+        val bh = bmp.height.toFloat()
+        val baseScale = min(canvasW / bw, canvasH / bh)
+        val scale = baseScale * latestZoom
+        val drawW = bw * scale
+        val drawH = bh * scale
+        val left = (canvasW - drawW) / 2f + latestPan.x
+        val top = (canvasH - drawH) / 2f + latestPan.y
+        return Offset(
+            ((pos.x - left) / scale).coerceIn(0f, bw),
+            ((pos.y - top) / scale).coerceIn(0f, bh)
+        )
     }
 
     val targetGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -187,7 +212,9 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
         metricsCache,
         adj,
         viewModel.splitCompareEnabled,
-        viewModel.splitComparePercent
+        viewModel.splitComparePercent,
+        viewModel.cutoutMaskVersion,
+        viewModel.cutoutProtectionMask
     ) {
         targetBmp?.let {
             NativeFaceSwapEngine.renderFaceSwapComposite(
@@ -196,7 +223,8 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 profileBitmaps = profileCache,
                 profileMetrics = metricsCache,
                 adjustments = adj,
-                splitPercent = if (viewModel.splitCompareEnabled) viewModel.splitComparePercent else null
+                splitPercent = if (viewModel.splitCompareEnabled) viewModel.splitComparePercent else null,
+                protectionMask = viewModel.cutoutProtectionMask
             )
         }
     }
@@ -283,8 +311,27 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             onClick = {
                                 showToolsMenu = false
                                 val nextMesh = !adj.showGeometricMesh
-                                if (nextMesh) viewModel.isSkinSamplingMode = false
+                                if (nextMesh) {
+                                    viewModel.isSkinSamplingMode = false
+                                    viewModel.isCutoutBrushMode = false
+                                }
                                 viewModel.adjustments = adj.copy(showGeometricMesh = nextMesh)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (isCutoutBrush) "Done Cutout Brush" else "Cutout / Hair Brush", color = Color.White, fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFFF43F5E), modifier = Modifier.size(16.dp)) },
+                            enabled = renderedBitmap != null,
+                            onClick = {
+                                showToolsMenu = false
+                                val nextBrush = !isCutoutBrush
+                                if (nextBrush) {
+                                    viewModel.isSkinSamplingMode = false
+                                    viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                    activeDeckTab = 2
+                                    isDeckExpanded = true
+                                }
+                                viewModel.isCutoutBrushMode = nextBrush
                             }
                         )
                         DropdownMenuItem(
@@ -295,6 +342,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 showToolsMenu = false
                                 val nextSample = !isSamplingSkin
                                 if (nextSample) {
+                                    viewModel.isCutoutBrushMode = false
                                     viewModel.adjustments = adj.copy(showGeometricMesh = false)
                                 }
                                 viewModel.isSkinSamplingMode = nextSample
@@ -315,6 +363,8 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             onClick = {
                                 showToolsMenu = false
                                 viewModel.isSkinSamplingMode = false
+                                viewModel.isCutoutBrushMode = false
+                                viewModel.clearCutoutMask()
                                 viewModel.adjustments = FaceAdjustments()
                                 viewModel.splitCompareEnabled = false
                             }
@@ -374,6 +424,12 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                             canvasH = size.height.toFloat(),
                                             requireInsideBounds = true
                                         )
+                                    } else if (latestCutoutMode) {
+                                        val imgPt = screenToImagePos(tapOffset, size.width.toFloat(), size.height.toFloat())
+                                        if (imgPt != null) {
+                                            viewModel.beginCutoutStroke()
+                                            viewModel.paintCutoutStrokeSegment(imgPt.x, imgPt.y, imgPt.x, imgPt.y)
+                                        }
                                     }
                                 },
                                 onDoubleTap = { tapOffset ->
@@ -393,11 +449,19 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 }
                             )
                         }
-                        .pointerInput(adj.showGeometricMesh, isSamplingSkin) {
-                            if (adj.showGeometricMesh || isSamplingSkin) {
+                        .pointerInput(adj.showGeometricMesh, isSamplingSkin, isCutoutBrush) {
+                            if (adj.showGeometricMesh || isSamplingSkin || isCutoutBrush) {
                                 detectDragGestures(
                                     onDragStart = { startPos ->
-                                        if (latestSamplingMode) {
+                                        if (latestCutoutMode) {
+                                            val imgPt = screenToImagePos(startPos, size.width.toFloat(), size.height.toFloat())
+                                            if (imgPt != null) {
+                                                viewModel.beginCutoutStroke()
+                                                viewModel.paintCutoutStrokeSegment(imgPt.x, imgPt.y, imgPt.x, imgPt.y)
+                                                lastBrushImgPos = imgPt
+                                                brushCursorImgPos = imgPt
+                                            }
+                                        } else if (latestSamplingMode) {
                                             sampleSkinAtPointer(
                                                 pos = startPos,
                                                 canvasW = size.width.toFloat(),
@@ -406,8 +470,26 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                             )
                                         }
                                     },
+                                    onDragEnd = {
+                                        lastBrushImgPos = null
+                                        brushCursorImgPos = null
+                                    },
+                                    onDragCancel = {
+                                        lastBrushImgPos = null
+                                        brushCursorImgPos = null
+                                    },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
+                                        if (latestCutoutMode) {
+                                            val imgPt = screenToImagePos(change.position, size.width.toFloat(), size.height.toFloat())
+                                            if (imgPt != null) {
+                                                val prev = lastBrushImgPos ?: imgPt
+                                                viewModel.paintCutoutStrokeSegment(prev.x, prev.y, imgPt.x, imgPt.y)
+                                                lastBrushImgPos = imgPt
+                                                brushCursorImgPos = imgPt
+                                            }
+                                            return@detectDragGestures
+                                        }
                                         if (latestSamplingMode) {
                                             sampleSkinAtPointer(
                                                 pos = change.position,
@@ -493,6 +575,28 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                         dstOffset = IntOffset(left.toInt(), top.toInt()),
                         dstSize = IntSize(drawW.toInt(), drawH.toInt())
                     )
+
+                    val cutMask = viewModel.cutoutProtectionMask
+                    if (isCutoutBrush && viewModel.cutoutShowOverlay && cutMask != null && !cutMask.isRecycled) {
+                        drawImage(
+                            image = cutMask.asImageBitmap(),
+                            dstOffset = IntOffset(left.toInt(), top.toInt()),
+                            dstSize = IntSize(drawW.toInt(), drawH.toInt()),
+                            alpha = 0.42f
+                        )
+                    }
+
+                    if (isCutoutBrush && brushCursorImgPos != null) {
+                        val cxScreen = left + brushCursorImgPos!!.x * scale
+                        val cyScreen = top + brushCursorImgPos!!.y * scale
+                        val radiusScreen = (viewModel.cutoutBrushSizePx * scale).coerceAtLeast(8f)
+                        drawCircle(
+                            color = if (viewModel.cutoutBrushProtect) Color(0xFFF43F5E) else Color(0xFF22D3EE),
+                            radius = radiusScreen,
+                            center = Offset(cxScreen, cyScreen),
+                            style = Stroke(width = 2.5f)
+                        )
+                    }
 
                     if (adj.showGeometricMesh) {
                         drawIntoCanvas { canvas ->
@@ -647,6 +751,44 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 }
             }
 
+            if (renderedBitmap != null && isCutoutBrush) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xDD0B1120))
+                        .border(1.dp, Color(0xFFF43F5E), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFFF43F5E), modifier = Modifier.size(14.dp))
+                    Text(
+                        if (viewModel.cutoutBrushProtect) "Brush: Protect Hair/Jewelry" else "Brush: Restore Swap",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (viewModel.canUndoCutoutMask) {
+                        Text(
+                            "Undo",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable { viewModel.undoCutoutStroke() }
+                        )
+                    }
+                    Text(
+                        "Done",
+                        color = Color(0xFFF43F5E),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { viewModel.isCutoutBrushMode = false }
+                    )
+                }
+            }
+
             if (renderedBitmap != null && isSamplingSkin) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -708,8 +850,41 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(
+                                when {
+                                    isCutoutBrush -> Color(0xDD9F1239)
+                                    viewModel.cutoutProtectionMask != null -> Color(0xCC4C0519)
+                                    else -> Color(0xCC0B1120)
+                                }
+                            )
+                            .border(
+                                1.dp,
+                                if (isCutoutBrush || viewModel.cutoutProtectionMask != null) Color(0xFFF43F5E) else Color(0xFF334155),
+                                RoundedCornerShape(9.dp)
+                            )
+                            .clickable {
+                                val nextCutout = !isCutoutBrush
+                                if (nextCutout) {
+                                    viewModel.isSkinSamplingMode = false
+                                    viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                    activeDeckTab = 2
+                                    isDeckExpanded = true
+                                }
+                                viewModel.isCutoutBrushMode = nextCutout
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Cutout", color = Color.White, fontSize = 10.sp)
+                    }
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -729,15 +904,16 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             .clickable {
                                 val nextSample = !isSamplingSkin
                                 if (nextSample) {
+                                    viewModel.isCutoutBrushMode = false
                                     viewModel.adjustments = adj.copy(showGeometricMesh = false)
                                 }
                                 viewModel.isSkinSamplingMode = nextSample
                             }
-                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
                     ) {
-                        Icon(Icons.Default.Colorize, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Icon(Icons.Default.Colorize, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Pick Skin", color = Color.White, fontSize = 11.sp)
+                        Text("Skin", color = Color.White, fontSize = 10.sp)
                     }
 
                     Row(
@@ -748,14 +924,17 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
                             .clickable {
                                 val nextMesh = !adj.showGeometricMesh
-                                if (nextMesh) viewModel.isSkinSamplingMode = false
+                                if (nextMesh) {
+                                    viewModel.isSkinSamplingMode = false
+                                    viewModel.isCutoutBrushMode = false
+                                }
                                 viewModel.adjustments = adj.copy(showGeometricMesh = nextMesh)
                             }
-                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
                     ) {
-                        Icon(Icons.Default.GridOn, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Icon(Icons.Default.GridOn, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Mesh", color = Color.White, fontSize = 11.sp)
+                        Text("Mesh", color = Color.White, fontSize = 10.sp)
                     }
 
                     Row(
@@ -765,11 +944,11 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             .background(if (viewModel.splitCompareEnabled) Color(0xDD4F46E5) else Color(0xCC0B1120))
                             .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
                             .clickable { viewModel.splitCompareEnabled = !viewModel.splitCompareEnabled }
-                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
                     ) {
-                        Icon(Icons.Default.Compare, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Icon(Icons.Default.Compare, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Compare", color = Color.White, fontSize = 11.sp)
+                        Text("Compare", color = Color.White, fontSize = 10.sp)
                     }
                 }
             }
@@ -830,7 +1009,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                         .padding(3.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    listOf("Faces", "Blend", "Light", "Align").forEachIndexed { idx, label ->
+                    listOf("Faces", "Blend", "Cutout", "Light", "Align").forEachIndexed { idx, label ->
                         val selected = isDeckExpanded && activeDeckTab == idx
                         Box(
                             modifier = Modifier
@@ -1033,7 +1212,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                     onValueChange = { viewModel.adjustments = adj.copy(swapStrength = it.toInt()) },
                                     valueRange = 0f..100f,
                                     colors = SliderDefaults.colors(thumbColor = Color(0xFF6366F1), activeTrackColor = Color(0xFF6366F1)),
-                                    modifier = Modifier.weight(1f).height(28.dp)
+                                    modifier = Modifier.weight(1f).height(26.dp)
                                 )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1042,8 +1221,53 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                     value = adj.featherRadius.toFloat(),
                                     onValueChange = { viewModel.adjustments = adj.copy(featherRadius = it.toInt()) },
                                     valueRange = 8f..45f,
-                                    modifier = Modifier.weight(1f).height(28.dp)
+                                    modifier = Modifier.weight(1f).height(26.dp)
                                 )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Bright ${adj.brightness.toInt()}", color = Color(0xFFCBD5E1), fontSize = 10.sp, modifier = Modifier.width(56.dp))
+                                        Slider(
+                                            value = adj.brightness,
+                                            onValueChange = { viewModel.adjustments = adj.copy(brightness = it) },
+                                            valueRange = -40f..40f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Sat ${adj.saturation.toInt()}", color = Color(0xFFCBD5E1), fontSize = 10.sp, modifier = Modifier.width(56.dp))
+                                        Slider(
+                                            value = adj.saturation,
+                                            onValueChange = { viewModel.adjustments = adj.copy(saturation = it) },
+                                            valueRange = -40f..40f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Contrast ${adj.contrast.toInt()}", color = Color(0xFFCBD5E1), fontSize = 10.sp, modifier = Modifier.width(62.dp))
+                                        Slider(
+                                            value = adj.contrast,
+                                            onValueChange = { viewModel.adjustments = adj.copy(contrast = it) },
+                                            valueRange = -35f..60f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Warm ${adj.warmth.toInt()}", color = Color(0xFFCBD5E1), fontSize = 10.sp, modifier = Modifier.width(62.dp))
+                                        Slider(
+                                            value = adj.warmth,
+                                            onValueChange = { viewModel.adjustments = adj.copy(warmth = it) },
+                                            valueRange = -30f..30f,
+                                            modifier = Modifier.weight(1f).height(24.dp)
+                                        )
+                                    }
+                                }
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1128,6 +1352,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                                 .clickable {
                                                     val nextSample = !isSamplingSkin
                                                     if (nextSample) {
+                                                        viewModel.isCutoutBrushMode = false
                                                         viewModel.adjustments = adj.copy(showGeometricMesh = false)
                                                     }
                                                     viewModel.isSkinSamplingMode = nextSample
@@ -1152,6 +1377,165 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                         }
 
                         2 -> {
+                            // PicsArt-Style Precision Cutout & Foreground Hair/Jewelry Protect Brush
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(if (isCutoutBrush && viewModel.cutoutBrushProtect) Color(0xFF9F1239) else Color(0xFF111827))
+                                        .border(
+                                            1.dp,
+                                            if (isCutoutBrush && viewModel.cutoutBrushProtect) Color(0xFFF43F5E) else Color(0xFF334155),
+                                            RoundedCornerShape(9.dp)
+                                        )
+                                        .clickable {
+                                            viewModel.isSkinSamplingMode = false
+                                            viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                            viewModel.cutoutBrushProtect = true
+                                            viewModel.isCutoutBrushMode = true
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 7.dp)
+                                ) {
+                                    Icon(Icons.Default.Brush, contentDescription = null, tint = Color(0xFFFDA4AF), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Protect Hair/Jewel", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(if (isCutoutBrush && !viewModel.cutoutBrushProtect) Color(0xFF155E75) else Color(0xFF111827))
+                                        .border(
+                                            1.dp,
+                                            if (isCutoutBrush && !viewModel.cutoutBrushProtect) Color(0xFF22D3EE) else Color(0xFF334155),
+                                            RoundedCornerShape(9.dp)
+                                        )
+                                        .clickable {
+                                            viewModel.isSkinSamplingMode = false
+                                            viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                            viewModel.cutoutBrushProtect = false
+                                            viewModel.isCutoutBrushMode = true
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 7.dp)
+                                ) {
+                                    Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFF67E8F9), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Restore Face", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+
+                                if (isCutoutBrush) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(9.dp))
+                                            .background(Color(0xFF1E293B))
+                                            .clickable { viewModel.isCutoutBrushMode = false }
+                                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("Done", color = Color(0xFFFBBF24), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Size ${viewModel.cutoutBrushSizePx.toInt()}px", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                                Slider(
+                                    value = viewModel.cutoutBrushSizePx,
+                                    onValueChange = { viewModel.cutoutBrushSizePx = it },
+                                    valueRange = 10f..90f,
+                                    colors = SliderDefaults.colors(thumbColor = Color(0xFFF43F5E), activeTrackColor = Color(0xFFF43F5E)),
+                                    modifier = Modifier.weight(1f).height(26.dp)
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Hardness ${viewModel.cutoutBrushHardness.toInt()}%", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
+                                Slider(
+                                    value = viewModel.cutoutBrushHardness,
+                                    onValueChange = { viewModel.cutoutBrushHardness = it },
+                                    valueRange = 10f..100f,
+                                    colors = SliderDefaults.colors(thumbColor = Color(0xFFF43F5E), activeTrackColor = Color(0xFFF43F5E)),
+                                    modifier = Modifier.weight(1f).height(26.dp)
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Auto Hair/Jewel", color = Color(0xFFCBD5E1), fontSize = 11.sp)
+                                    Spacer(Modifier.width(6.dp))
+                                    Switch(
+                                        checked = adj.autoMaskHair || adj.autoMaskAccessories,
+                                        onCheckedChange = { enabled ->
+                                            viewModel.adjustments = adj.copy(
+                                                autoMaskHair = enabled,
+                                                autoMaskAccessories = enabled
+                                            )
+                                        }
+                                    )
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(7.dp))
+                                            .background(if (viewModel.cutoutShowOverlay) Color(0xFF312E81) else Color(0xFF1E293B))
+                                            .clickable { viewModel.cutoutShowOverlay = !viewModel.cutoutShowOverlay }
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    ) {
+                                        Icon(
+                                            if (viewModel.cutoutShowOverlay) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                            contentDescription = "Toggle Mask Overlay",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Overlay", color = Color.White, fontSize = 10.sp)
+                                    }
+                                    if (viewModel.canUndoCutoutMask) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(7.dp))
+                                                .background(Color(0xFF1E293B))
+                                                .clickable { viewModel.undoCutoutStroke() }
+                                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                        ) {
+                                            Icon(Icons.Default.Undo, contentDescription = "Undo Brush", tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
+                                            Spacer(Modifier.width(3.dp))
+                                            Text("Undo", color = Color(0xFF38BDF8), fontSize = 10.sp)
+                                        }
+                                    }
+                                    if (viewModel.cutoutProtectionMask != null) {
+                                        Text(
+                                            "Clear",
+                                            color = Color(0xFFF87171),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(7.dp))
+                                                .background(Color(0xFF1E293B))
+                                                .clickable { viewModel.clearCutoutMask() }
+                                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        3 -> {
                             VirtualLightingStudioPanel(
                                 light = adj.virtualLight,
                                 onLightChange = { viewModel.adjustments = adj.copy(virtualLight = it) },
@@ -1173,7 +1557,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             )
                         }
 
-                        3 -> {
+                        4 -> {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Size ${(adj.scale * 100).toInt()}%", color = Color(0xFFE2E8F0), fontSize = 11.sp, modifier = Modifier.width(88.dp))
                                 Slider(
@@ -1202,7 +1586,13 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                     Spacer(Modifier.width(6.dp))
                                     Switch(
                                         checked = adj.showGeometricMesh,
-                                        onCheckedChange = { viewModel.adjustments = adj.copy(showGeometricMesh = it) }
+                                        onCheckedChange = { checked ->
+                                            if (checked) {
+                                                viewModel.isSkinSamplingMode = false
+                                                viewModel.isCutoutBrushMode = false
+                                            }
+                                            viewModel.adjustments = adj.copy(showGeometricMesh = checked)
+                                        }
                                     )
                                 }
                                 Button(

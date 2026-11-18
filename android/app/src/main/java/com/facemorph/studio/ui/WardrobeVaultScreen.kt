@@ -241,7 +241,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(asset.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("${asset.category.label} · ${asset.anchorPoint.label}", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                        Text("${asset.subCategory.label} · ${asset.anchorPoint.label}", color = Color(0xFF94A3B8), fontSize = 10.sp)
                     }
                     Button(
                         onClick = {

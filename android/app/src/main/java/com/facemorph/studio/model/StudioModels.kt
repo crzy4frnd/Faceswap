@@ -26,7 +26,9 @@ data class SourceFaceMetrics(
     val eyeMidXRatio: Float,
     val eyeMidYRatio: Float,
     val eyeDistRatio: Float,
-    val rollDeg: Float
+    val rollDeg: Float,
+    val noseYRatio: Float = 0.56f,
+    val mouthYRatio: Float = 0.75f
 )
 
 data class DetectedFaceData(
@@ -39,7 +41,7 @@ data class DetectedFaceData(
     val originalLandmarks: FaceLandmarksData,
     val assignedProfileId: String? = null,
     val enabled: Boolean = true,
-    val strength: Int = 92,
+    val strength: Int = 100,
     val smileScore: Float = 0.5f,
     val isLandmarksEdited: Boolean = false
 )
@@ -77,13 +79,17 @@ data class VirtualLightConfig(
 )
 
 data class FaceAdjustments(
-    val swapStrength: Int = 92,
+    val swapStrength: Int = 100,
     val skinToneMatch: Boolean = true,
-    val featherRadius: Int = 28,
+    val featherRadius: Int = 22,
+    val brightness: Float = 0f,
+    val contrast: Float = 14f,
+    val saturation: Float = 6f,
+    val warmth: Float = 0f,
     val autoMaskHair: Boolean = true,
     val autoMaskAccessories: Boolean = true,
     val smartBlend: Boolean = true,
-    val smartBlendIntensity: Int = 82,
+    val smartBlendIntensity: Int = 78,
     val showGeometricMesh: Boolean = false,
     val scale: Float = 1.0f,
     val rotation: Float = 0f,
@@ -97,6 +103,39 @@ enum class WardrobeCategory(val label: String) {
     CLOTHING("Clothing"),
     JEWELRY("Jewelry"),
     ACCESSORY("Accessory")
+}
+
+enum class WardrobeSubCategory(
+    val label: String,
+    val parentCategory: WardrobeCategory
+) {
+    SUIT("Suit", WardrobeCategory.CLOTHING),
+    SHIRT("Shirt", WardrobeCategory.CLOTHING),
+    ETHNIC("Ethnic", WardrobeCategory.CLOTHING),
+    JACKET("Jacket", WardrobeCategory.CLOTHING),
+    NECKLACE("Necklace", WardrobeCategory.JEWELRY),
+    WATCH("Watch", WardrobeCategory.JEWELRY),
+    GLASSES("Glasses", WardrobeCategory.ACCESSORY),
+    HEADWEAR("Headwear", WardrobeCategory.ACCESSORY)
+}
+
+fun defaultSubCategoryFor(
+    category: WardrobeCategory,
+    anchorPoint: BodyAnchorPoint
+): WardrobeSubCategory {
+    return when (category) {
+        WardrobeCategory.CLOTHING -> WardrobeSubCategory.SUIT
+        WardrobeCategory.JEWELRY -> if (anchorPoint == BodyAnchorPoint.WRIST) {
+            WardrobeSubCategory.WATCH
+        } else {
+            WardrobeSubCategory.NECKLACE
+        }
+        WardrobeCategory.ACCESSORY -> when (anchorPoint) {
+            BodyAnchorPoint.WRIST -> WardrobeSubCategory.WATCH
+            BodyAnchorPoint.NECK -> WardrobeSubCategory.NECKLACE
+            else -> WardrobeSubCategory.GLASSES
+        }
+    }
 }
 
 enum class BodyAnchorPoint(val label: String) {
@@ -133,6 +172,7 @@ data class WardrobeAssetItem(
     val name: String,
     val category: WardrobeCategory,
     val anchorPoint: BodyAnchorPoint,
+    val subCategory: WardrobeSubCategory = defaultSubCategoryFor(category, anchorPoint),
     val fabricType: FabricType = FabricType.COTTON,
     val drawableResId: Int? = null,
     val customFilePath: String? = null,
