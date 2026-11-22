@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { PanelRightOpen, ChevronDown, ChevronUp, SlidersHorizontal } from 'lucide-react';
+import React, { useEffect, useRef } from 'react';
+import { PanelRightOpen } from 'lucide-react';
 import { FaceStudioProvider, useFaceStudio } from './context/FaceStudioContext';
 import { AndroidFrame } from './components/AndroidFrame';
 import { TopBar } from './components/TopBar';
@@ -20,10 +20,33 @@ import { HistoryDrawer } from './components/HistoryDrawer';
 import { ExportModal } from './components/ExportModal';
 import { GitHubPushModal } from './components/GitHubPushModal';
 import { CustomAssetCaptureModal } from './components/CustomAssetCaptureModal';
+import { ExitConfirmModal } from './components/ExitConfirmModal';
 
 const AppContent: React.FC = () => {
-  const { activeTab, viewMode, isInspectorOpen, setIsInspectorOpen } = useFaceStudio();
-  const [isMobileDeckOpen, setIsMobileDeckOpen] = useState(true);
+  const {
+    activeTab,
+    isInspectorOpen,
+    setIsInspectorOpen,
+    showExitConfirmModal,
+    cancelExitAction,
+    onBackPress,
+  } = useFaceStudio();
+
+  const studioStageRef = useRef<HTMLDivElement | null>(null);
+
+  // Route hardware/keyboard Escape through global onBackPress or dismiss Exit modal
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (showExitConfirmModal) {
+        cancelExitAction();
+        return;
+      }
+      onBackPress();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showExitConfirmModal, cancelExitAction, onBackPress]);
 
   return (
     <AndroidFrame>
@@ -31,99 +54,47 @@ const AppContent: React.FC = () => {
 
       <main className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
         {activeTab === 'studio' && (
-          <>
-            {viewMode === 'expanded' ? (
-              /* Expanded Full-Screen Responsive Studio Split Layout */
-              <div className="flex-1 flex flex-col lg:flex-row min-h-0 relative">
-                {/* Main Big Canvas Stage */}
-                <div
-                  className={`flex-1 flex flex-col min-w-0 min-h-0 relative ${
-                    isInspectorOpen ? 'lg:border-r border-slate-200 dark:border-slate-800' : ''
-                  }`}
-                >
-                  <CanvasViewport />
+          <div
+            ref={studioStageRef}
+            className="flex-1 flex flex-col min-w-0 min-h-0 relative overflow-hidden"
+          >
+            {/* Full-Bleed Canvas Viewport behind translucent floating AdjustmentPanel */}
+            <div className="flex-1 flex flex-col min-w-0 min-h-0 relative z-0">
+              <CanvasViewport />
+            </div>
 
-                  {/* Floating Re-open Controls trigger when collapsed on desktop */}
-                  {!isInspectorOpen && (
-                    <button
-                      type="button"
-                      onClick={() => setIsInspectorOpen(true)}
-                      className="hidden lg:flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/95 dark:bg-slate-900/95 hover:bg-indigo-600 hover:text-white text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-lg backdrop-blur-md text-xs font-semibold absolute right-4 bottom-14 z-30 transition-all duration-150"
-                      title="Show editing controls"
-                    >
-                      <PanelRightOpen className="w-4 h-4" />
-                      <span>Controls</span>
-                    </button>
-                  )}
-                </div>
-
-                {/* Collapsible Inspector: Bottom Sheet on Mobile/Tablet (< lg), Sidebar on Desktop (>= lg) */}
-                {isInspectorOpen && (
-                  <aside
-                    className={`w-full lg:w-[400px] xl:w-[430px] flex flex-col bg-white dark:bg-slate-900 overflow-hidden shrink-0 border-t lg:border-t-0 border-slate-200 dark:border-slate-800 transition-all ${
-                      isMobileDeckOpen ? 'max-h-[42vh] lg:max-h-none' : 'lg:max-h-none'
-                    }`}
-                  >
-                    {/* Mobile / Tablet Collapse Bar */}
-                    <button
-                      type="button"
-                      onClick={() => setIsMobileDeckOpen((prev) => !prev)}
-                      className="lg:hidden w-full px-3 py-1.5 bg-slate-100 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200 shrink-0"
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-500" />
-                        <span>{isMobileDeckOpen ? 'Hide Controls for Larger View' : 'Faces & Adjustments'}</span>
-                      </span>
-                      {isMobileDeckOpen ? (
-                        <ChevronDown className="w-4 h-4 text-slate-500" />
-                      ) : (
-                        <ChevronUp className="w-4 h-4 text-indigo-500" />
-                      )}
-                    </button>
-
-                    <div
-                      className={`${
-                        isMobileDeckOpen ? 'flex flex-col flex-1 min-h-0 overflow-y-auto' : 'hidden lg:flex lg:flex-col lg:flex-1 lg:min-h-0'
-                      }`}
-                    >
-                      <MultiFaceSelector />
-                      <AdjustmentPanel />
-                    </div>
-                  </aside>
-                )}
+            {/* Draggable Floating Glass-Morphism Adjustment & Face Inspector Container with Slide Transition */}
+            <div className="pointer-events-none absolute inset-0 z-30 overflow-hidden">
+              <div
+                className={`pointer-events-none absolute inset-0 transition-[transform,opacity] duration-250 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none will-change-transform ${
+                  isInspectorOpen
+                    ? 'translate-x-0 opacity-100'
+                    : 'translate-x-[calc(100%+24px)] opacity-0'
+                }`}
+              >
+                <AdjustmentPanel
+                  facesSlot={<MultiFaceSelector />}
+                  stageRef={studioStageRef}
+                />
               </div>
-            ) : (
-              /* Phone Preview Frame Layout with collapsible control deck */
-              <div className="flex-1 flex flex-col min-h-0">
-                <div className="flex-1 min-h-0 relative">
-                  <CanvasViewport />
-                </div>
-                <div className="shrink-0 flex flex-col bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setIsMobileDeckOpen((prev) => !prev)}
-                    className="w-full px-3 py-1.5 bg-slate-100 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200"
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-500" />
-                      <span>{isMobileDeckOpen ? 'Collapse Editing Controls' : 'Expand Faces & Controls'}</span>
-                    </span>
-                    {isMobileDeckOpen ? (
-                      <ChevronDown className="w-4 h-4 text-slate-500" />
-                    ) : (
-                      <ChevronUp className="w-4 h-4 text-indigo-500" />
-                    )}
-                  </button>
-                  {isMobileDeckOpen && (
-                    <div className="max-h-[38vh] overflow-y-auto flex flex-col">
-                      <MultiFaceSelector />
-                      <AdjustmentPanel />
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsInspectorOpen(true)}
+              tabIndex={isInspectorOpen ? -1 : 0}
+              aria-hidden={isInspectorOpen}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/80 hover:bg-indigo-600/90 text-slate-100 hover:text-white border border-white/15 backdrop-blur-md shadow-xl text-xs font-semibold absolute right-3.5 bottom-10 z-30 transition-[transform,opacity,background-color] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none whitespace-nowrap ${
+                isInspectorOpen
+                  ? 'translate-y-3 opacity-0 pointer-events-none'
+                  : 'translate-y-0 opacity-100 pointer-events-auto'
+              }`}
+              title="Open floating glass adjustments panel"
+            >
+              <PanelRightOpen className="w-4 h-4 shrink-0" />
+              <span>Adjustments</span>
+            </button>
+          </div>
         )}
 
         {activeTab === 'body' && <BodyFitStudio />}
@@ -137,6 +108,7 @@ const AppContent: React.FC = () => {
       <ExportModal />
       <GitHubPushModal />
       <CustomAssetCaptureModal />
+      <ExitConfirmModal />
     </AndroidFrame>
   );
 };

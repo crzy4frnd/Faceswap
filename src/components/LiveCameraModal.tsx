@@ -47,12 +47,15 @@ import {
   applyLiveHairAndBlemishRemoval,
   CanvasVideoRecorder,
   CameraMotionAnalyzer,
+  applyDirectionalMotionBlurOnContext,
   getStaticHighQualityProfile,
   AdaptiveSwapQualityProfile,
   LiveFaceBoxTracker,
   LiveBodyTracker,
   NormalizedFaceBox,
   TemporalMotionSmoother,
+  BoundaryMatteTemporalStabilizer,
+  applyLiveBoundaryLuminanceMatch,
 } from '../utils/liveCameraEngine';
 
 export const LiveCameraModal: React.FC = () => {
@@ -91,6 +94,9 @@ export const LiveCameraModal: React.FC = () => {
     mesh: ClothMeshState;
   } | null>(null);
   const temporalSmootherRef = useRef<TemporalMotionSmoother | null>(null);
+  const boundaryStabilizerRef = useRef<BoundaryMatteTemporalStabilizer | null>(null);
+  const bgBoundaryPatchCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const activeStabilizedFramesRef = useRef<number>(0);
   const aaScratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const aaMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pendingForceRefocusRef = useRef<boolean>(false);
@@ -357,6 +363,9 @@ export const LiveCameraModal: React.FC = () => {
           ),
           motionLevel: activeQuality.motionLevel,
           qualityMode: activeQuality.qualityMode,
+          motionBlurPx: Math.round(activeQuality.motionBlurPx * 10) / 10,
+          motionAngleDeg: Math.round((activeQuality.motionAngleRad * 180) / Math.PI),
+          stabilizedBoundaryFrames: activeStabilizedFramesRef.current,
         }));
       }
 
@@ -367,19 +376,32 @@ export const LiveCameraModal: React.FC = () => {
 
         const motionSensitivityEnabled =
           config.motionSensitivity ?? adjustments.motionSensitivity;
+        const motionBlurEnabled = Boolean(config.motionBlur ?? adjustments.motionBlur);
 
         let qualityProfile: AdaptiveSwapQualityProfile;
-        if (motionSensitivityEnabled) {
+        if (motionSensitivityEnabled || motionBlurEnabled) {
           if (!motionAnalyzerRef.current) {
             motionAnalyzerRef.current = new CameraMotionAnalyzer();
           }
-          qualityProfile = motionAnalyzerRef.current.analyze(
+          const analyzed = motionAnalyzerRef.current.analyze(
             video,
             isLiveVideoReady,
             imuImpulseRef.current,
             timestamp
           );
           imuImpulseRef.current *= 0.85;
+          if (motionSensitivityEnabled) {
+            qualityProfile = analyzed;
+          } else {
+            // Preserve static high-quality pass while keeping real-time optical motion vector for Motion Blur
+            qualityProfile = {
+              ...getStaticHighQualityProfile(),
+              motionLevel: analyzed.motionLevel,
+              motionScore: analyzed.motionScore,
+              motionBlurPx: analyzed.motionBlurPx,
+              motionAngleRad: analyzed.motionAngleRad,
+            };
+          }
         } else {
           motionAnalyzerRef.current?.reset();
           qualityProfile = getStaticHighQualityProfile();
@@ -480,7 +502,11 @@ export const LiveCameraModal: React.FC = () => {
 
           // Anchor parameters for face and body placement (tracked largest-face bounding box when Auto-Refocus is active)
           const autoRefocusEnabled = config.autoRefocus ?? adjustments.autoRefocus;
-          const motionSmoothingVal = config.motionSmoothing ?? adjustments.motionSmoothing ?? 0;
+          const motionSmoothingEnabled =
+            (config.motionSmoothingEnabled ?? adjustments.motionSmoothingEnabled) !== false;
+          const motionSmoothingVal = motionSmoothingEnabled
+            ? (config.motionSmoothing ?? adjustments.motionSmoothing ?? 35)
+            : 0;
           const forceRefocus = pendingForceRefocusRef.current;
           if (forceRefocus) {
             pendingForceRefocusRef.current = false;
@@ -569,8 +595,28 @@ export const LiveCameraModal: React.FC = () => {
               (config.antiAliasing ?? adjustments.antiAliasing) &&
               qualityProfile.qualityMode !== 'light';
             const edgeSoftnessVal = config.edgeSoftness ?? adjustments.edgeSoftness ?? 50;
+            const boundaryRefinementEnabled =
+              (config.boundaryRefinement ?? adjustments.boundaryRefinement) !== false;
+            const boundaryStrengthVal =
+              config.boundaryRefinementStrength ?? adjustments.boundaryRefinementStrength ?? 78;
+            const boundaryStabilizerEnabled =
+              (config.boundaryTemporalStabilizer ?? adjustments.boundaryTemporalStabilizer) !== false;
+            const boundaryStabilizerFramesVal = Math.max(
+              3,
+              Math.min(
+                5,
+                Math.round(
+                  config.boundaryStabilizerFrames ?? adjustments.boundaryStabilizerFrames ?? 4
+                )
+              )
+            );
             const useOffscreenSwapBuffer =
-              antiAliasingEnabled || motionSmoothingVal > 2 || edgeSoftnessVal > 2;
+              antiAliasingEnabled ||
+              motionSmoothingVal > 2 ||
+              edgeSoftnessVal > 2 ||
+              motionBlurEnabled ||
+              boundaryRefinementEnabled ||
+              boundaryStabilizerEnabled;
 
             ctx.save();
             ctx.imageSmoothingEnabled = true;
@@ -679,7 +725,9 @@ export const LiveCameraModal: React.FC = () => {
             const sinY = Math.sin(yawRad);
             const cosY = Math.max(0.75, Math.cos(yawRad));
 
-            // Helper to draw cached profile face with subtle jawline/brow morph and 3D head orientation (pitch & yaw)
+            const flipHoriz = Boolean(config.flipHorizontal ?? adjustments.flipHorizontal);
+
+            // Helper to draw cached profile face with subtle jawline/brow morph, horizontal flip, and 3D head orientation (pitch & yaw)
             const drawMorphedFaceImage = (
               drawCtx: CanvasRenderingContext2D,
               dx: number,
@@ -687,11 +735,18 @@ export const LiveCameraModal: React.FC = () => {
               dw: number,
               dh: number
             ) => {
+              if (!cachedProfileImg) return;
+              drawCtx.save();
+              if (flipHoriz) {
+                const flipPivotX = dx + dw / 2;
+                drawCtx.translate(flipPivotX, 0);
+                drawCtx.scale(-1, 1);
+                drawCtx.translate(-flipPivotX, 0);
+              }
               const hasOrientation = Math.abs(pitchVal) >= 0.25 || Math.abs(yawVal) >= 0.25;
-              if ((Math.abs(morphT) < 0.02 && !hasOrientation) || !cachedProfileImg) {
-                if (cachedProfileImg) {
-                  drawCtx.drawImage(cachedProfileImg, dx, dy, dw, dh);
-                }
+              if (Math.abs(morphT) < 0.02 && !hasOrientation) {
+                drawCtx.drawImage(cachedProfileImg, dx, dy, dw, dh);
+                drawCtx.restore();
                 return;
               }
 
@@ -740,6 +795,7 @@ export const LiveCameraModal: React.FC = () => {
                   dyH
                 );
               }
+              drawCtx.restore();
             };
 
             if (useOffscreenSwapBuffer) {
@@ -923,16 +979,105 @@ export const LiveCameraModal: React.FC = () => {
                   sCtx.restore();
                 }
 
+                // Boundary Refinement + 3-5 Frame Temporal Alpha-Matte Stabilization for video output
+                if (boundaryRefinementEnabled || boundaryStabilizerEnabled) {
+                  try {
+                    const maskImg = mCtx.getImageData(0, 0, targetDrawW, targetDrawH);
+
+                    if (
+                      boundaryRefinementEnabled &&
+                      boundaryStrengthVal > 2 &&
+                      qualityProfile.qualityMode !== 'light'
+                    ) {
+                      if (!bgBoundaryPatchCanvasRef.current) {
+                        bgBoundaryPatchCanvasRef.current = document.createElement('canvas');
+                      }
+                      const bgPatch = bgBoundaryPatchCanvasRef.current;
+                      if (bgPatch.width !== targetDrawW || bgPatch.height !== targetDrawH) {
+                        bgPatch.width = targetDrawW;
+                        bgPatch.height = targetDrawH;
+                      }
+                      const bgPatchCtx = bgPatch.getContext('2d', { willReadFrequently: true });
+                      if (bgPatchCtx) {
+                        bgPatchCtx.clearRect(0, 0, targetDrawW, targetDrawH);
+                        bgPatchCtx.save();
+                        bgPatchCtx.translate(targetDrawW / 2, targetDrawH / 2);
+                        bgPatchCtx.rotate((-smoothedRotation * Math.PI) / 180);
+                        bgPatchCtx.drawImage(canvas, -cx, -cy);
+                        bgPatchCtx.restore();
+
+                        const sImg = sCtx.getImageData(0, 0, targetDrawW, targetDrawH);
+                        const bgImg = bgPatchCtx.getImageData(0, 0, targetDrawW, targetDrawH);
+                        applyLiveBoundaryLuminanceMatch(
+                          sImg.data,
+                          bgImg.data,
+                          maskImg.data,
+                          targetDrawW,
+                          targetDrawH,
+                          boundaryStrengthVal
+                        );
+                        sCtx.putImageData(sImg, 0, 0);
+                      }
+                    }
+
+                    if (boundaryStabilizerEnabled) {
+                      if (!boundaryStabilizerRef.current) {
+                        boundaryStabilizerRef.current = new BoundaryMatteTemporalStabilizer();
+                      }
+                      const stabRes = boundaryStabilizerRef.current.stabilizeMaskRgba(
+                        maskImg.data,
+                        targetDrawW,
+                        targetDrawH,
+                        {
+                          windowFrames: boundaryStabilizerFramesVal,
+                          strengthPct: boundaryStrengthVal,
+                          poseSpeedPx: smoothedPose.speedPx,
+                          sensitivityPct: motionSmoothingEnabled ? motionSmoothingVal : 15,
+                          faceKey: 'live-primary',
+                          timestampMs: timestamp,
+                          forceReset: forceRefocus,
+                        }
+                      );
+                      activeStabilizedFramesRef.current = stabRes.activeFrames;
+                    } else {
+                      boundaryStabilizerRef.current?.reset();
+                      activeStabilizedFramesRef.current = 0;
+                    }
+
+                    mCtx.putImageData(maskImg, 0, 0);
+                  } catch {
+                    // Fallback gracefully to unstabilized radial alpha mask
+                  }
+                } else {
+                  boundaryStabilizerRef.current?.reset();
+                  activeStabilizedFramesRef.current = 0;
+                }
+
                 sCtx.globalCompositeOperation = 'destination-in';
                 sCtx.drawImage(mask, 0, 0);
                 sCtx.restore();
 
-                ctx.globalAlpha = config.swapStrength / 100;
-                ctx.save();
-                ctx.translate(cx, cy);
-                ctx.rotate((smoothedRotation * Math.PI) / 180);
-                ctx.drawImage(scratch, -targetDrawW / 2, -targetDrawH / 2, targetDrawW, targetDrawH);
-                ctx.restore();
+                if (motionBlurEnabled && qualityProfile.motionBlurPx >= 0.45) {
+                  applyDirectionalMotionBlurOnContext(
+                    ctx,
+                    scratch,
+                    cx,
+                    cy,
+                    targetDrawW,
+                    targetDrawH,
+                    smoothedRotation,
+                    qualityProfile.motionBlurPx,
+                    qualityProfile.motionAngleRad,
+                    config.swapStrength / 100
+                  );
+                } else {
+                  ctx.globalAlpha = config.swapStrength / 100;
+                  ctx.save();
+                  ctx.translate(cx, cy);
+                  ctx.rotate((smoothedRotation * Math.PI) / 180);
+                  ctx.drawImage(scratch, -targetDrawW / 2, -targetDrawH / 2, targetDrawW, targetDrawH);
+                  ctx.restore();
+                }
               }
             } else {
               // Fast direct clip path when Anti-Aliasing and Motion Smoothing are disabled
@@ -1361,6 +1506,7 @@ export const LiveCameraModal: React.FC = () => {
     adjustments.antiAliasing,
     adjustments.genderMorph,
     adjustments.edgeContrast,
+    adjustments.motionSmoothingEnabled,
     adjustments.motionSmoothing,
     adjustments.edgeSoftness,
     adjustments.showFaceLandmarks,
@@ -1368,6 +1514,11 @@ export const LiveCameraModal: React.FC = () => {
     adjustments.vibrance,
     adjustments.headPitch,
     adjustments.headYaw,
+    adjustments.motionBlur,
+    adjustments.boundaryRefinement,
+    adjustments.boundaryRefinementStrength,
+    adjustments.boundaryTemporalStabilizer,
+    adjustments.boundaryStabilizerFrames,
     wardrobeAssets,
   ]);
 
@@ -1686,19 +1837,97 @@ export const LiveCameraModal: React.FC = () => {
             })}
           </div>
 
-          {/* Quick Skin Tone matching toggle */}
-          <button
-            onClick={() =>
-              setConfig((prev) => ({ ...prev, skinToneMatch: !prev.skinToneMatch }))
-            }
-            className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors shrink-0 ${
-              config.skinToneMatch
-                ? 'border-emerald-500/50 bg-emerald-950/60 text-emerald-400'
-                : 'border-slate-800 text-slate-500'
-            }`}
-          >
-            Auto Tone
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Adaptive Directional Motion Blur quick toggle */}
+            <button
+              onClick={() => {
+                const next = !(config.motionBlur ?? adjustments.motionBlur);
+                setConfig((prev) => ({ ...prev, motionBlur: next }));
+                updateAdjustments(
+                  { motionBlur: next },
+                  next ? 'Adaptive Motion Blur Enabled' : 'Adaptive Motion Blur Disabled'
+                );
+              }}
+              className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors shrink-0 tabular-nums whitespace-nowrap ${
+                config.motionBlur ?? adjustments.motionBlur
+                  ? 'border-cyan-500/50 bg-cyan-950/60 text-cyan-300'
+                  : 'border-slate-800 text-slate-500'
+              }`}
+              title="Adaptive directional motion blur synced with camera movement"
+            >
+              Motion Blur
+              {(config.motionBlur ?? adjustments.motionBlur) &&
+              (trackingState.motionBlurPx ?? 0) >= 0.5
+                ? ` · ${trackingState.motionBlurPx}px`
+                : ''}
+            </button>
+
+            {/* Motion Smoothing Toggle (Temporal Video Stabilizer Sensitivity) */}
+            <button
+              onClick={() => {
+                const next = !(
+                  (config.motionSmoothingEnabled ?? adjustments.motionSmoothingEnabled) !==
+                  false
+                );
+                setConfig((prev) => ({ ...prev, motionSmoothingEnabled: next }));
+                updateAdjustments(
+                  { motionSmoothingEnabled: next },
+                  next ? 'Motion Smoothing Enabled' : 'Motion Smoothing Disabled'
+                );
+              }}
+              className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors shrink-0 tabular-nums whitespace-nowrap ${
+                (config.motionSmoothingEnabled ?? adjustments.motionSmoothingEnabled) !== false
+                  ? 'border-teal-500/50 bg-teal-950/60 text-teal-300'
+                  : 'border-slate-800 text-slate-500'
+              }`}
+              title="Toggle temporal motion stabilizer for dynamic video capture"
+            >
+              Motion Stab{' '}
+              {(config.motionSmoothingEnabled ?? adjustments.motionSmoothingEnabled) !== false
+                ? `${config.motionSmoothing ?? adjustments.motionSmoothing ?? 35}%`
+                : 'Off'}
+            </button>
+
+            {/* Boundary Temporal Stabilizer (3-5 Frame Alpha-Matte Averaging) */}
+            <button
+              onClick={() => {
+                const next = !(
+                  (config.boundaryTemporalStabilizer ?? adjustments.boundaryTemporalStabilizer) !==
+                  false
+                );
+                setConfig((prev) => ({ ...prev, boundaryTemporalStabilizer: next }));
+                updateAdjustments(
+                  { boundaryTemporalStabilizer: next },
+                  next
+                    ? 'Boundary Temporal Stabilizer Enabled'
+                    : 'Boundary Temporal Stabilizer Disabled'
+                );
+              }}
+              className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors shrink-0 tabular-nums whitespace-nowrap ${
+                (config.boundaryTemporalStabilizer ?? adjustments.boundaryTemporalStabilizer) !==
+                false
+                  ? 'border-teal-500/50 bg-teal-950/60 text-teal-300'
+                  : 'border-slate-800 text-slate-500'
+              }`}
+              title="Average boundary alpha-matte across 3-5 consecutive video frames to prevent edge flicker"
+            >
+              Edge Stab {config.boundaryStabilizerFrames ?? adjustments.boundaryStabilizerFrames ?? 4}F
+            </button>
+
+            {/* Quick Skin Tone matching toggle */}
+            <button
+              onClick={() =>
+                setConfig((prev) => ({ ...prev, skinToneMatch: !prev.skinToneMatch }))
+              }
+              className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors shrink-0 whitespace-nowrap ${
+                config.skinToneMatch
+                  ? 'border-emerald-500/50 bg-emerald-950/60 text-emerald-400'
+                  : 'border-slate-800 text-slate-500'
+              }`}
+            >
+              Auto Tone
+            </button>
+          </div>
         </div>
 
         {/* DRAWER 1: VIRTUAL BACKGROUNDS */}
@@ -2095,6 +2324,55 @@ export const LiveCameraModal: React.FC = () => {
                   }
                   className="w-full accent-indigo-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
                 />
+              </div>
+            </div>
+
+            {/* Boundary Refinement Temporal Stabilizer (3-5 Frames) */}
+            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <span className="block text-[11px] font-semibold text-slate-200">
+                  Temporal Boundary Stabilizer
+                </span>
+                <span className="block text-[10px] text-slate-400">
+                  Averages alpha-matte edges across 3–5 consecutive video frames
+                </span>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {[3, 4, 5].map((fCount) => {
+                  const activeFrames =
+                    config.boundaryStabilizerFrames ?? adjustments.boundaryStabilizerFrames ?? 4;
+                  const isOn =
+                    (config.boundaryTemporalStabilizer ??
+                      adjustments.boundaryTemporalStabilizer) !== false;
+                  const selected = isOn && activeFrames === fCount;
+                  return (
+                    <button
+                      key={fCount}
+                      type="button"
+                      onClick={() => {
+                        setConfig((prev) => ({
+                          ...prev,
+                          boundaryTemporalStabilizer: true,
+                          boundaryStabilizerFrames: fCount,
+                        }));
+                        updateAdjustments(
+                          {
+                            boundaryTemporalStabilizer: true,
+                            boundaryStabilizerFrames: fCount,
+                          },
+                          `Temporal Edge Stabilizer: ${fCount} Frames`
+                        );
+                      }}
+                      className={`min-w-[34px] py-1 px-2 rounded-lg text-[10px] font-mono tabular-nums font-semibold transition-colors ${
+                        selected
+                          ? 'bg-teal-600 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {fCount}F
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </div>

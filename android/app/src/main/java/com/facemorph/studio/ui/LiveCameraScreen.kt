@@ -202,7 +202,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
         onDispose {
             thermalMonitor.stopMonitoring()
             activeRecording?.stop()
-            frameBridge.frameSignal.close()
+            frameBridge.release()
             cameraExecutor.shutdown()
         }
     }
@@ -248,9 +248,11 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                     processingDurationMs = frameDurationMs,
                     droppedFromBridge = decoded.droppedSinceLast
                 )
+                frameBridge.markOutputCommitted(out)
                 lastEmittedBitmap = out
                 withContext(Dispatchers.Main.immediate) {
                     processedBitmap = out
+                    frameBridge.markOutputPresented(out)
                 }
             }
         }

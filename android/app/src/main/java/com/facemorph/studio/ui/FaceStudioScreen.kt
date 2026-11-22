@@ -23,12 +23,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Brush
@@ -63,7 +65,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -97,6 +98,7 @@ import androidx.compose.ui.unit.sp
 import com.facemorph.studio.engine.NativeFaceSwapEngine
 import com.facemorph.studio.engine.NativeStorageHelper
 import com.facemorph.studio.engine.VirtualLightingStudioShader
+import com.facemorph.studio.model.CutoutLayerKind
 import com.facemorph.studio.model.FaceAdjustments
 import com.facemorph.studio.viewmodel.StudioViewModel
 import java.io.File
@@ -109,6 +111,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     val targetBmp = viewModel.targetBitmap
     val faces = viewModel.detectedFaces
     val adj = viewModel.adjustments
+    val segmentedLayers = viewModel.segmentedTargetLayers
     val profileCache = viewModel.profileBitmapCache.toMap()
     val metricsCache = viewModel.profileMetricsCache.toMap()
 
@@ -214,7 +217,8 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
         viewModel.splitCompareEnabled,
         viewModel.splitComparePercent,
         viewModel.cutoutMaskVersion,
-        viewModel.cutoutProtectionMask
+        viewModel.cutoutProtectionMask,
+        viewModel.segmentedTargetLayers
     ) {
         targetBmp?.let {
             NativeFaceSwapEngine.renderFaceSwapComposite(
@@ -224,7 +228,8 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 profileMetrics = metricsCache,
                 adjustments = adj,
                 splitPercent = if (viewModel.splitCompareEnabled) viewModel.splitComparePercent else null,
-                protectionMask = viewModel.cutoutProtectionMask
+                protectionMask = viewModel.cutoutProtectionMask,
+                segmentedLayers = viewModel.segmentedTargetLayers
             )
         }
     }
@@ -401,7 +406,208 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
             }
         }
 
-        // Spacious Main Canvas Viewport (Expands to ~85% height when bottom deck is collapsed)
+        // Slim Non-Floating Tool Strip Docked Above Canvas (zero overlap on photo)
+        if (renderedBitmap != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF070C18))
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(
+                            when {
+                                isCutoutBrush -> Color(0xFF9F1239)
+                                viewModel.cutoutProtectionMask != null -> Color(0xFF4C0519)
+                                else -> Color(0xFF111827)
+                            }
+                        )
+                        .border(
+                            1.dp,
+                            if (isCutoutBrush || viewModel.cutoutProtectionMask != null) Color(0xFFF43F5E) else Color(0xFF334155),
+                            RoundedCornerShape(7.dp)
+                        )
+                        .clickable {
+                            val nextCutout = !isCutoutBrush
+                            if (nextCutout) {
+                                viewModel.isSkinSamplingMode = false
+                                viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                                activeDeckTab = 2
+                                isDeckExpanded = true
+                            }
+                            viewModel.isCutoutBrushMode = nextCutout
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Cutout", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(
+                            when {
+                                isSamplingSkin -> Color(0xFFD97706)
+                                adj.manualSkinPatch != null -> Color(0xFF312E81)
+                                else -> Color(0xFF111827)
+                            }
+                        )
+                        .border(
+                            1.dp,
+                            if (isSamplingSkin || adj.manualSkinPatch != null) Color(0xFFFBBF24) else Color(0xFF334155),
+                            RoundedCornerShape(7.dp)
+                        )
+                        .clickable {
+                            val nextSample = !isSamplingSkin
+                            if (nextSample) {
+                                viewModel.isCutoutBrushMode = false
+                                viewModel.adjustments = adj.copy(showGeometricMesh = false)
+                            }
+                            viewModel.isSkinSamplingMode = nextSample
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Icon(Icons.Default.Colorize, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Skin", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (adj.showGeometricMesh) Color(0xFF0891B2) else Color(0xFF111827))
+                        .border(
+                            1.dp,
+                            if (adj.showGeometricMesh) Color(0xFF22D3EE) else Color(0xFF334155),
+                            RoundedCornerShape(7.dp)
+                        )
+                        .clickable {
+                            val nextMesh = !adj.showGeometricMesh
+                            if (nextMesh) {
+                                viewModel.isSkinSamplingMode = false
+                                viewModel.isCutoutBrushMode = false
+                            }
+                            viewModel.adjustments = adj.copy(showGeometricMesh = nextMesh)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Icon(Icons.Default.GridOn, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Mesh", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (viewModel.splitCompareEnabled) Color(0xFF4F46E5) else Color(0xFF111827))
+                        .border(
+                            1.dp,
+                            if (viewModel.splitCompareEnabled) Color(0xFF818CF8) else Color(0xFF334155),
+                            RoundedCornerShape(7.dp)
+                        )
+                        .clickable { viewModel.splitCompareEnabled = !viewModel.splitCompareEnabled }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Icon(Icons.Default.Compare, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Compare", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                }
+
+                CompactToggleChip(
+                    label = "${segmentedLayers?.summary?.totalLayerCount ?: 2}-Layer",
+                    checked = adj.preserveTargetLayers,
+                    activeColor = Color(0xFF10B981),
+                    onToggle = {
+                        viewModel.adjustments = adj.copy(preserveTargetLayers = !adj.preserveTargetLayers)
+                    }
+                )
+
+                if (isCutoutBrush) {
+                    if (viewModel.canUndoCutoutMask) {
+                        Text(
+                            "Undo",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(Color(0xFF1E293B))
+                                .clickable { viewModel.undoCutoutStroke() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    Text(
+                        "Done",
+                        color = Color(0xFFFDA4AF),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(Color(0xFF4C0519))
+                            .clickable { viewModel.isCutoutBrushMode = false }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+
+                if (isSamplingSkin) {
+                    if (adj.manualSkinPatch != null) {
+                        Text(
+                            "Clear Skin",
+                            color = Color(0xFFF87171),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(Color(0xFF1E293B))
+                                .clickable { viewModel.clearManualSkinPatch() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    Text(
+                        "Done",
+                        color = Color(0xFFFBBF24),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(Color(0xFF451A03))
+                            .clickable { viewModel.isSkinSamplingMode = false }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+
+                if (viewportZoom > 1.04f) {
+                    Text(
+                        "${(viewportZoom * 100).toInt()}% · Reset",
+                        color = Color(0xFF22D3EE),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(Color(0xFF0F172A))
+                            .border(1.dp, Color(0xFF155E75), RoundedCornerShape(7.dp))
+                            .clickable {
+                                viewportZoom = 1f
+                                viewportPan = Offset.Zero
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
+
+        // Spacious Main Canvas Viewport (Unobstructed — zero floating tool pills over photo)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -732,226 +938,6 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 }
             }
 
-            if (viewportZoom > 1.05f) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xCC0B1120))
-                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                        .clickable {
-                            viewportZoom = 1f
-                            viewportPan = Offset.Zero
-                        }
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                ) {
-                    Text("${(viewportZoom * 100).toInt()}% · Reset", color = Color(0xFF22D3EE), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            if (renderedBitmap != null && isCutoutBrush) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xDD0B1120))
-                        .border(1.dp, Color(0xFFF43F5E), RoundedCornerShape(10.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFFF43F5E), modifier = Modifier.size(14.dp))
-                    Text(
-                        if (viewModel.cutoutBrushProtect) "Brush: Protect Hair/Jewelry" else "Brush: Restore Swap",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (viewModel.canUndoCutoutMask) {
-                        Text(
-                            "Undo",
-                            color = Color(0xFF38BDF8),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable { viewModel.undoCutoutStroke() }
-                        )
-                    }
-                    Text(
-                        "Done",
-                        color = Color(0xFFF43F5E),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.clickable { viewModel.isCutoutBrushMode = false }
-                    )
-                }
-            }
-
-            if (renderedBitmap != null && isSamplingSkin) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xDD0B1120))
-                        .border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(10.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    val patch = adj.manualSkinPatch
-                    if (patch != null) {
-                        Box(
-                            modifier = Modifier
-                                .size(14.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    Color(
-                                        (patch.sampledRed / 255f).coerceIn(0f, 1f),
-                                        (patch.sampledGreen / 255f).coerceIn(0f, 1f),
-                                        (patch.sampledBlue / 255f).coerceIn(0f, 1f)
-                                    )
-                                )
-                                .border(1.dp, Color.White, CircleShape)
-                        )
-                    } else {
-                        Icon(Icons.Default.Colorize, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
-                    }
-                    Text(
-                        if (patch != null) "Drag skin to adjust" else "Tap or drag skin",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (patch != null) {
-                        Text(
-                            "Clear",
-                            color = Color(0xFFF87171),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable { viewModel.clearManualSkinPatch() }
-                        )
-                    }
-                    Text(
-                        "Done",
-                        color = Color(0xFFFBBF24),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.clickable { viewModel.isSkinSamplingMode = false }
-                    )
-                }
-            }
-
-            // Minimal Bottom-Right Quick View Toggles when image loaded
-            if (renderedBitmap != null) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(
-                                when {
-                                    isCutoutBrush -> Color(0xDD9F1239)
-                                    viewModel.cutoutProtectionMask != null -> Color(0xCC4C0519)
-                                    else -> Color(0xCC0B1120)
-                                }
-                            )
-                            .border(
-                                1.dp,
-                                if (isCutoutBrush || viewModel.cutoutProtectionMask != null) Color(0xFFF43F5E) else Color(0xFF334155),
-                                RoundedCornerShape(9.dp)
-                            )
-                            .clickable {
-                                val nextCutout = !isCutoutBrush
-                                if (nextCutout) {
-                                    viewModel.isSkinSamplingMode = false
-                                    viewModel.adjustments = adj.copy(showGeometricMesh = false)
-                                    activeDeckTab = 2
-                                    isDeckExpanded = true
-                                }
-                                viewModel.isCutoutBrushMode = nextCutout
-                            }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Cutout", color = Color.White, fontSize = 10.sp)
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(
-                                when {
-                                    isSamplingSkin -> Color(0xDDD97706)
-                                    adj.manualSkinPatch != null -> Color(0xCC312E81)
-                                    else -> Color(0xCC0B1120)
-                                }
-                            )
-                            .border(
-                                1.dp,
-                                if (isSamplingSkin || adj.manualSkinPatch != null) Color(0xFFFBBF24) else Color(0xFF334155),
-                                RoundedCornerShape(9.dp)
-                            )
-                            .clickable {
-                                val nextSample = !isSamplingSkin
-                                if (nextSample) {
-                                    viewModel.isCutoutBrushMode = false
-                                    viewModel.adjustments = adj.copy(showGeometricMesh = false)
-                                }
-                                viewModel.isSkinSamplingMode = nextSample
-                            }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.Colorize, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Skin", color = Color.White, fontSize = 10.sp)
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(if (adj.showGeometricMesh) Color(0xDD0891B2) else Color(0xCC0B1120))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
-                            .clickable {
-                                val nextMesh = !adj.showGeometricMesh
-                                if (nextMesh) {
-                                    viewModel.isSkinSamplingMode = false
-                                    viewModel.isCutoutBrushMode = false
-                                }
-                                viewModel.adjustments = adj.copy(showGeometricMesh = nextMesh)
-                            }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.GridOn, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Mesh", color = Color.White, fontSize = 10.sp)
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(if (viewModel.splitCompareEnabled) Color(0xDD4F46E5) else Color(0xCC0B1120))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
-                            .clickable { viewModel.splitCompareEnabled = !viewModel.splitCompareEnabled }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Default.Compare, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Compare", color = Color.White, fontSize = 10.sp)
-                    }
-                }
-            }
 
             // Landmark Nudge Bar (only visible when Mesh is active)
             if (adj.showGeometricMesh && faces.isNotEmpty()) {
@@ -1060,8 +1046,10 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .heightIn(max = 186.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     when (activeDeckTab) {
                         0 -> {
@@ -1270,20 +1258,30 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 }
                             }
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Skin Match", color = Color(0xFFCBD5E1), fontSize = 11.sp)
-                                    Spacer(Modifier.width(6.dp))
-                                    Switch(checked = adj.skinToneMatch, onCheckedChange = { viewModel.adjustments = adj.copy(skinToneMatch = it) })
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Smart Edge", color = Color(0xFFCBD5E1), fontSize = 11.sp)
-                                    Spacer(Modifier.width(6.dp))
-                                    Switch(checked = adj.smartBlend, onCheckedChange = { viewModel.adjustments = adj.copy(smartBlend = it) })
-                                }
+                                CompactToggleChip(
+                                    label = "Skin Match",
+                                    checked = adj.skinToneMatch,
+                                    activeColor = Color(0xFF6366F1),
+                                    onToggle = { viewModel.adjustments = adj.copy(skinToneMatch = !adj.skinToneMatch) }
+                                )
+                                CompactToggleChip(
+                                    label = "Smart Edge",
+                                    checked = adj.smartBlend,
+                                    activeColor = Color(0xFF0EA5E9),
+                                    onToggle = { viewModel.adjustments = adj.copy(smartBlend = !adj.smartBlend) }
+                                )
+                                CompactToggleChip(
+                                    label = "${segmentedLayers?.summary?.totalLayerCount ?: 2}-Layer Cut",
+                                    checked = adj.preserveTargetLayers,
+                                    activeColor = Color(0xFF10B981),
+                                    onToggle = { viewModel.adjustments = adj.copy(preserveTargetLayers = !adj.preserveTargetLayers) }
+                                )
                             }
                             if (renderedBitmap != null) {
                                 val manualPatch = adj.manualSkinPatch
@@ -1468,21 +1466,138 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 )
                             }
 
+                            // Adaptive N-Layer Object-Scanning Cutout Stack (Bg + Face + K Dynamic Object Layers)
+                            Text(
+                                text = segmentedLayers?.summary?.decisionNote ?: "2 Base Layers · Tap Auto-Scan to detect objects",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CompactToggleChip(
+                                    label = "Bg",
+                                    checked = adj.showBackgroundLayer,
+                                    activeColor = Color(0xFF64748B),
+                                    onToggle = {
+                                        viewModel.adjustments = adj.copy(showBackgroundLayer = !adj.showBackgroundLayer)
+                                    }
+                                )
+                                CompactToggleChip(
+                                    label = "Face",
+                                    checked = adj.showFaceLayer,
+                                    activeColor = Color(0xFF6366F1),
+                                    onToggle = {
+                                        viewModel.adjustments = adj.copy(showFaceLayer = !adj.showFaceLayer)
+                                    }
+                                )
+                                CompactToggleChip(
+                                    label = "All Cutouts (${segmentedLayers?.objectLayers?.size ?: 0})",
+                                    checked = adj.showForeLayers && adj.preserveTargetLayers,
+                                    activeColor = Color(0xFF10B981),
+                                    onToggle = {
+                                        viewModel.adjustments = adj.copy(showForeLayers = !adj.showForeLayers)
+                                    }
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .background(if (viewModel.isSegmentingLayers) Color(0xFF312E81) else Color(0xFF1E293B))
+                                        .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(7.dp))
+                                        .clickable(enabled = renderedBitmap != null && !viewModel.isSegmentingLayers) {
+                                            viewModel.resegmentTargetLayers()
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Scan Object Layers", tint = Color(0xFF818CF8), modifier = Modifier.size(13.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        if (viewModel.isSegmentingLayers) "Scanning..." else "Auto-Scan",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            val detectedObjects = segmentedLayers?.objectLayers ?: emptyList()
+                            if (detectedObjects.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    detectedObjects.forEach { objLayer ->
+                                        val layerColor = when (objLayer.kind) {
+                                            CutoutLayerKind.FOREHEAD -> Color(0xFF10B981)
+                                            CutoutLayerKind.HAIR -> Color(0xFFF43F5E)
+                                            CutoutLayerKind.HAND_FINGER -> Color(0xFFF59E0B)
+                                            CutoutLayerKind.ACCESSORY -> Color(0xFF0EA5E9)
+                                            CutoutLayerKind.OBJECT -> Color(0xFF8B5CF6)
+                                        }
+                                        val isVisible = adj.preserveTargetLayers && adj.showForeLayers && (objLayer.id !in adj.hiddenLayerIds)
+                                        CompactToggleChip(
+                                            label = "${objLayer.name} ${objLayer.coveragePct}%",
+                                            checked = isVisible,
+                                            activeColor = layerColor,
+                                            onToggle = {
+                                                viewModel.toggleCutoutObjectLayer(objLayer.id)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Auto Hair/Jewel", color = Color(0xFFCBD5E1), fontSize = 11.sp)
-                                    Spacer(Modifier.width(6.dp))
-                                    Switch(
+                                Row(
+                                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CompactToggleChip(
+                                        label = "${segmentedLayers?.summary?.totalLayerCount ?: 2}-Layer",
+                                        checked = adj.preserveTargetLayers,
+                                        activeColor = Color(0xFF10B981),
+                                        onToggle = {
+                                            viewModel.adjustments = adj.copy(preserveTargetLayers = !adj.preserveTargetLayers)
+                                            viewModel.resegmentTargetLayers()
+                                        }
+                                    )
+                                    CompactToggleChip(
+                                        label = "Hair/Jewel",
                                         checked = adj.autoMaskHair || adj.autoMaskAccessories,
-                                        onCheckedChange = { enabled ->
+                                        activeColor = Color(0xFFF43F5E),
+                                        onToggle = {
+                                            val enabled = !(adj.autoMaskHair || adj.autoMaskAccessories)
                                             viewModel.adjustments = adj.copy(
                                                 autoMaskHair = enabled,
                                                 autoMaskAccessories = enabled
                                             )
+                                            viewModel.resegmentTargetLayers()
+                                        }
+                                    )
+                                    CompactToggleChip(
+                                        label = "Hands/Obj",
+                                        checked = adj.autoMaskObjects,
+                                        activeColor = Color(0xFFF59E0B),
+                                        onToggle = {
+                                            viewModel.adjustments = adj.copy(autoMaskObjects = !adj.autoMaskObjects)
+                                            viewModel.resegmentTargetLayers()
                                         }
                                     )
                                 }
@@ -1581,24 +1696,23 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Landmark Mesh", color = Color(0xFFCBD5E1), fontSize = 11.sp)
-                                    Spacer(Modifier.width(6.dp))
-                                    Switch(
-                                        checked = adj.showGeometricMesh,
-                                        onCheckedChange = { checked ->
-                                            if (checked) {
-                                                viewModel.isSkinSamplingMode = false
-                                                viewModel.isCutoutBrushMode = false
-                                            }
-                                            viewModel.adjustments = adj.copy(showGeometricMesh = checked)
+                                CompactToggleChip(
+                                    label = "Landmark Mesh",
+                                    checked = adj.showGeometricMesh,
+                                    activeColor = Color(0xFF0891B2),
+                                    onToggle = {
+                                        val checked = !adj.showGeometricMesh
+                                        if (checked) {
+                                            viewModel.isSkinSamplingMode = false
+                                            viewModel.isCutoutBrushMode = false
                                         }
-                                    )
-                                }
+                                        viewModel.adjustments = adj.copy(showGeometricMesh = checked)
+                                    }
+                                )
                                 Button(
                                     onClick = { viewModel.adjustments = adj.copy(scale = 1.0f, rotation = 0f, offsetX = 0f, offsetY = 0f) },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
-                                    modifier = Modifier.height(30.dp),
+                                    modifier = Modifier.height(28.dp),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                                 ) {
                                     Text("Reset", fontSize = 11.sp)
@@ -1609,5 +1723,38 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CompactToggleChip(
+    label: String,
+    checked: Boolean,
+    activeColor: Color,
+    onToggle: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(if (checked) activeColor.copy(alpha = 0.22f) else Color(0xFF111827))
+            .border(1.dp, if (checked) activeColor else Color(0xFF334155), RoundedCornerShape(7.dp))
+            .clickable { onToggle() }
+            .padding(horizontal = 9.dp, vertical = 5.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(if (checked) activeColor else Color(0xFF475569))
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = label,
+            color = if (checked) Color.White else Color(0xFF94A3B8),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
     }
 }

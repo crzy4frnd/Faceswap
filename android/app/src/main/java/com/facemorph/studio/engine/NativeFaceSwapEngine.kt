@@ -17,8 +17,10 @@ import com.facemorph.studio.model.DetectedFaceData
 import com.facemorph.studio.model.FaceAdjustments
 import com.facemorph.studio.model.FaceLandmarksData
 import com.facemorph.studio.model.Point2D
+import com.facemorph.studio.model.SegmentedTargetLayers
 import com.facemorph.studio.model.SourceFaceMetrics
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
@@ -36,6 +38,7 @@ object NativeFaceSwapEngine {
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
             .build()
         FaceDetection.getClient(options)
@@ -76,15 +79,34 @@ object NativeFaceSwapEngine {
                                 hypot((viewerRe.x - viewerLe.x).toDouble(), (viewerRe.y - viewerLe.y).toDouble()).toFloat()
                             } else bw * 0.44f
 
-                            // Anatomical crop anchored cleanly around eyes, cheeks, and chin
-                            val halfWidthPx = max(bw * 0.40f, eyeDistPx * 1.12f)
-                            val topPx = min(b.top + bh * 0.09f, eyeMidPxY - eyeDistPx * 0.78f)
-                            val bottomPx = max(b.bottom - bh * 0.02f, eyeMidPxY + eyeDistPx * 1.48f)
+                            val faceContourPts = f.getContour(FaceContour.FACE)?.points
+                            val hasContour = faceContourPts != null && faceContourPts.size >= 12
+                            val cMinX = faceContourPts?.minOfOrNull { it.x }
+                            val cMaxX = faceContourPts?.maxOfOrNull { it.x }
+                            val cMinY = faceContourPts?.minOfOrNull { it.y }
+                            val cMaxY = faceContourPts?.maxOfOrNull { it.y }
 
-                            val cropL = ((eyeMidPxX - halfWidthPx) / w).coerceIn(0.01f, 0.85f)
-                            val cropR = ((eyeMidPxX + halfWidthPx) / w).coerceIn(cropL + 0.10f, 0.99f)
-                            val cropT = (topPx / h).coerceIn(0.01f, 0.85f)
-                            val cropB = (bottomPx / h).coerceIn(cropT + 0.12f, 0.99f)
+                            // Clean contour-anchored crop preserving exact donor face aspect ratio & jawline cutout
+                            val rawHalfW = if (hasContour && cMinX != null && cMaxX != null) {
+                                max(eyeDistPx * 1.05f, (cMaxX - cMinX) * 0.54f)
+                            } else {
+                                max(bw * 0.40f, eyeDistPx * 1.12f)
+                            }
+                            val rawTopPx = if (hasContour && cMinY != null) {
+                                min(cMinY - eyeDistPx * 0.08f, eyeMidPxY - eyeDistPx * 0.72f)
+                            } else {
+                                min(b.top + bh * 0.09f, eyeMidPxY - eyeDistPx * 0.78f)
+                            }
+                            val rawBottomPx = if (hasContour && cMaxY != null) {
+                                max(cMaxY + eyeDistPx * 0.06f, eyeMidPxY + eyeDistPx * 1.42f)
+                            } else {
+                                max(b.bottom - bh * 0.02f, eyeMidPxY + eyeDistPx * 1.48f)
+                            }
+
+                            val cropL = ((eyeMidPxX - rawHalfW) / w).coerceIn(0.01f, 0.85f)
+                            val cropR = ((eyeMidPxX + rawHalfW) / w).coerceIn(cropL + 0.10f, 0.99f)
+                            val cropT = (rawTopPx / h).coerceIn(0.01f, 0.85f)
+                            val cropB = (rawBottomPx / h).coerceIn(cropT + 0.12f, 0.99f)
 
                             val cropW = max(1f, (cropR - cropL) * w)
                             val cropH = max(1f, (cropB - cropT) * h)
@@ -103,6 +125,12 @@ object NativeFaceSwapEngine {
                             }
                             val noseY = nosePos?.let { (it.y - cropT * h) / cropH } ?: 0.56f
                             val mouthY = mouthPos?.let { ((it.y - bh * 0.05f) - cropT * h) / cropH } ?: 0.74f
+                            val contourNorm = faceContourPts?.map { pt ->
+                                Point2D(
+                                    x = ((pt.x - cropL * w) / cropW).coerceIn(0.01f, 0.99f),
+                                    y = ((pt.y - cropT * h) / cropH).coerceIn(0.01f, 0.99f)
+                                )
+                            } ?: emptyList()
 
                             if (cont.isActive) {
                                 cont.resume(
@@ -116,7 +144,9 @@ object NativeFaceSwapEngine {
                                         eyeDistRatio = eyeDist.coerceIn(0.28f, 0.76f),
                                         rollDeg = roll.coerceIn(-45f, 45f),
                                         noseYRatio = noseY.coerceIn(0.40f, 0.72f),
-                                        mouthYRatio = mouthY.coerceIn(0.58f, 0.88f)
+                                        mouthYRatio = mouthY.coerceIn(0.58f, 0.88f),
+                                        aspectRatio = (cropW / cropH).coerceIn(0.60f, 1.15f),
+                                        contourNorm = contourNorm
                                     )
                                 )
                             }
@@ -178,6 +208,9 @@ object NativeFaceSwapEngine {
                                         ?: Point2D(cx, cy + fh * 0.24f),
                                     chin = Point2D(cx, b.bottom - fh * 0.04f)
                                 )
+                                val contourPts = f.getContour(FaceContour.FACE)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val lbPts = f.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val rbPts = f.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
                                 DetectedFaceData(
                                     id = "face-$idx",
                                     boxLeft = b.left.toFloat(),
@@ -189,7 +222,10 @@ object NativeFaceSwapEngine {
                                     assignedProfileId = defaultProfileId,
                                     enabled = true,
                                     strength = 100,
-                                    smileScore = f.smilingProbability ?: 0.5f
+                                    smileScore = f.smilingProbability ?: 0.5f,
+                                    faceContour = contourPts,
+                                    leftBrowTop = lbPts,
+                                    rightBrowTop = rbPts
                                 )
                             }
                             if (cont.isActive) cont.resume(mapped)
@@ -590,19 +626,71 @@ object NativeFaceSwapEngine {
         profileMetrics: Map<String, SourceFaceMetrics>,
         adjustments: FaceAdjustments,
         splitPercent: Float? = null,
-        protectionMask: Bitmap? = null
+        protectionMask: Bitmap? = null,
+        segmentedLayers: SegmentedTargetLayers? = null
     ): Bitmap {
         val w = targetBitmap.width
         val h = targetBitmap.height
         val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
-        canvas.drawBitmap(targetBitmap, 0f, 0f, null)
+
+        val hasDiscreteLayers = adjustments.preserveTargetLayers &&
+            segmentedLayers != null &&
+            !segmentedLayers.backgroundLayer.isRecycled &&
+            !segmentedLayers.foreLayer.isRecycled
+
+        val splitX = splitPercent?.let { w * (it / 100f) }
+
+        // LAYER 1 (Background): Target photo with cheek-toned eye/lash cavity, or checkerboard when hidden
+        if (adjustments.showBackgroundLayer) {
+            if (splitX != null) {
+                canvas.drawBitmap(targetBitmap, 0f, 0f, null)
+                if (hasDiscreteLayers) {
+                    val bgSave = canvas.save()
+                    canvas.clipRect(splitX, 0f, w.toFloat(), h.toFloat())
+                    canvas.drawBitmap(segmentedLayers!!.backgroundLayer, 0f, 0f, null)
+                    canvas.restoreToCount(bgSave)
+                }
+            } else {
+                val bgBmp = if (hasDiscreteLayers) segmentedLayers!!.backgroundLayer else targetBitmap
+                canvas.drawBitmap(bgBmp, 0f, 0f, null)
+            }
+        } else {
+            if (splitX != null) {
+                canvas.drawBitmap(targetBitmap, 0f, 0f, null)
+            }
+            val bgSave = canvas.save()
+            if (splitX != null) {
+                canvas.clipRect(splitX, 0f, w.toFloat(), h.toFloat())
+            }
+            val darkPaint = Paint().apply { color = Color.rgb(15, 23, 42) }
+            val lightPaint = Paint().apply { color = Color.rgb(30, 41, 59) }
+            canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), darkPaint)
+            val tile = max(18, min(w, h) / 26)
+            var y = 0
+            while (y < h) {
+                var x = if ((y / tile) % 2 == 0) 0 else tile
+                while (x < w) {
+                    canvas.drawRect(
+                        x.toFloat(),
+                        y.toFloat(),
+                        min(w, x + tile).toFloat(),
+                        min(h, y + tile).toFloat(),
+                        lightPaint
+                    )
+                    x += tile * 2
+                }
+                y += tile
+            }
+            canvas.restoreToCount(bgSave)
+        }
 
         val swapLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         swapLayer.setHasAlpha(true)
         val swapCanvas = Canvas(swapLayer)
 
         for (face in faces) {
+            if (!adjustments.showFaceLayer) break
             if (!face.enabled) continue
             val profId = face.assignedProfileId ?: continue
             val srcBitmap = profileBitmaps[profId] ?: continue
@@ -623,33 +711,31 @@ object NativeFaceSwapEngine {
             val targetEyeMidX = (viewerLeft.x + viewerRight.x) * 0.5f + adjustments.offsetX
             val targetEyeMidY = (viewerLeft.y + viewerRight.y) * 0.5f + adjustments.offsetY
 
-            // Fit width via inter-eye distance AND vertical aspect via eye-to-mouth proportion
-            val faceW = max(32f, eyeDist / max(0.24f, metrics.eyeDistRatio)) * adjustments.scale
-            val browToChin = max(face.boxBottom - face.boxTop, (lm.chin.y - lm.forehead.y) * 1.08f)
-            val targetEyeToLips = max(browToChin * 0.30f, lm.lips.y - targetEyeMidY)
-            val verticalRatioSpan = max(0.24f, metrics.mouthYRatio - metrics.eyeMidYRatio)
-            val mouthDerivedH = targetEyeToLips / verticalRatioSpan
-            val faceH = max(38f, (mouthDerivedH * 0.62f + browToChin * 0.38f) * adjustments.scale)
+            // Strict isotropic scaling locked to donor aspectRatio -> keeps donor's true proportions (never stretched!)
+            val safeAspect = metrics.aspectRatio.coerceIn(0.60f, 1.15f)
+            val faceW = max(32f, eyeDist / max(0.22f, metrics.eyeDistRatio)) * adjustments.scale
+            val faceH = max(36f, faceW / safeAspect)
 
             val patchW = max(20, faceW.toInt())
             val patchH = max(24, faceH.toInt())
 
             val manualPatch = adjustments.manualSkinPatch
+            val autoCheekRgb = sampleFacialSkinOnlyRgb(
+                targetBitmap,
+                lm.nose.x.toInt(),
+                (targetEyeMidY + (lm.nose.y - targetEyeMidY) * 0.55f).toInt(),
+                max(6, (faceW * 0.24f).toInt()),
+                max(6, (faceH * 0.16f).toInt())
+            )
             val targetSkinRgb = if (adjustments.skinToneMatch) {
                 if (manualPatch != null) {
                     Triple(manualPatch.sampledRed, manualPatch.sampledGreen, manualPatch.sampledBlue)
                 } else {
-                    sampleFacialSkinOnlyRgb(
-                        targetBitmap,
-                        lm.nose.x.toInt(),
-                        (targetEyeMidY + (lm.nose.y - targetEyeMidY) * 0.35f).toInt(),
-                        max(6, (faceW * 0.24f).toInt()),
-                        max(6, (faceH * 0.16f).toInt())
-                    )
+                    autoCheekRgb
                 }
             } else null
 
-            val featherRatio = (adjustments.featherRadius / 50f).coerceIn(0.12f, 0.85f)
+            val featherRatio = (adjustments.featherRadius / 50f).coerceIn(0.10f, 0.85f)
             val patch = createFeatheredInnerFacePatch(
                 srcBitmap = srcBitmap,
                 metrics = metrics,
@@ -684,14 +770,31 @@ object NativeFaceSwapEngine {
                 postTranslate(targetEyeMidX, targetEyeMidY)
             }
 
-            FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
+            // Determine clean brow-top cut line in donor patch [0..1] so target's forehead/maang tikka/hair sits ON TOP
+            val targetBrowAvgY = (face.leftBrowTop + face.rightBrowTop)
+                .takeIf { it.isNotEmpty() }
+                ?.let { pts -> pts.map { it.y }.average().toFloat() }
+            val browBasedCut = if (targetBrowAvgY != null) {
+                val offsetAboveEyes = (targetEyeMidY - targetBrowAvgY).coerceIn(eyeDist * 0.14f, eyeDist * 0.42f)
+                (metrics.eyeMidYRatio - (offsetAboveEyes / max(1f, faceH)) - 0.035f).coerceIn(0.11f, 0.28f)
+            } else {
+                (metrics.eyeMidYRatio - metrics.eyeDistRatio * 0.34f).coerceIn(0.11f, 0.27f)
+            }
+
+            val autoOcclusions = (adjustments.autoMaskHair || adjustments.autoMaskAccessories || adjustments.autoMaskObjects) && !hasDiscreteLayers
+            val useFallbackLayers = adjustments.preserveTargetLayers && !hasDiscreteLayers
+            val foregroundPunch = FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
                 patch = patch,
                 targetSource = targetBitmap,
                 swapMatrix = swapMatrix,
                 featherRatio = featherRatio,
                 smartBlend = adjustments.smartBlend,
                 blendIntensity = (adjustments.smartBlendIntensity / 100f).coerceIn(0f, 1f),
-                preserveHighContrastOcclusions = adjustments.autoMaskHair || adjustments.autoMaskAccessories
+                preserveHighContrastOcclusions = autoOcclusions,
+                donorContourNorm = metrics.contourNorm,
+                foreheadCutYRatio = browBasedCut,
+                preserveTargetLayers = useFallbackLayers,
+                returnForegroundPunch = useFallbackLayers || autoOcclusions
             )
 
             val alpha = ((adjustments.swapStrength / 100f) * (face.strength / 100f) * 255f)
@@ -701,8 +804,58 @@ object NativeFaceSwapEngine {
                 this.alpha = alpha
             }
 
+            // Fallback cavity fill only when discrete ML Kit backgroundLayer isn't active
+            if (useFallbackLayers && alpha > 75) {
+                val (sr, sg, sb) = targetSkinRgb ?: autoCheekRgb
+                val cavityColor = Color.argb(
+                    (alpha * 0.92f).toInt().coerceIn(0, 255),
+                    sr.toInt().coerceIn(0, 255),
+                    sg.toInt().coerceIn(0, 255),
+                    sb.toInt().coerceIn(0, 255)
+                )
+                val cavityTrans = Color.argb(
+                    0,
+                    sr.toInt().coerceIn(0, 255),
+                    sg.toInt().coerceIn(0, 255),
+                    sb.toInt().coerceIn(0, 255)
+                )
+                val cavX = targetEyeMidX * 0.56f + lm.lips.x * 0.44f
+                val cavY = targetEyeMidY * 0.58f + lm.lips.y * 0.42f
+                val cavRx = max(10f, eyeDist * 0.78f * adjustments.scale)
+                val cavRy = max(12f, abs(lm.lips.y - targetEyeMidY) * 0.86f * adjustments.scale)
+                val cavShader = RadialGradient(
+                    0f,
+                    0f,
+                    1f,
+                    intArrayOf(cavityColor, cavityColor, cavityTrans),
+                    floatArrayOf(0f, 0.56f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+                val cavPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    shader = cavShader
+                }
+                val cSave = swapCanvas.save()
+                swapCanvas.translate(cavX, cavY)
+                swapCanvas.rotate(targetAngleDeg)
+                swapCanvas.scale(cavRx, cavRy)
+                swapCanvas.drawCircle(0f, 0f, 1f, cavPaint)
+                swapCanvas.restoreToCount(cSave)
+            }
+
+            // LAYER 2 (Face-behind-hair): Unstretched, sharp, color-matched donor face
             swapCanvas.drawBitmap(patch, swapMatrix, compositePaint)
             patch.recycle()
+
+            if (foregroundPunch != null && !foregroundPunch.isRecycled) {
+                if (adjustments.showForeLayers) {
+                    val punchPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+                        this.alpha = alpha
+                    }
+                    swapCanvas.drawBitmap(foregroundPunch, swapMatrix, punchPaint)
+                }
+                foregroundPunch.recycle()
+            }
         }
 
         // Apply manual Cutout Protection Mask (protects original hair, maang tikka, jewelry, veil)
@@ -723,11 +876,25 @@ object NativeFaceSwapEngine {
         }
 
         val saveCount = canvas.save()
-        if (splitPercent != null) {
-            val splitX = w * (splitPercent / 100f)
+        if (splitX != null) {
             canvas.clipRect(splitX, 0f, w.toFloat(), h.toFloat())
         }
-        canvas.drawBitmap(swapLayer, 0f, 0f, null)
+        if (adjustments.showFaceLayer) {
+            canvas.drawBitmap(swapLayer, 0f, 0f, null)
+        }
+        // LAYERS 3..N (Dynamic Object Cutouts: z-ordered forehead/hair/jewelry/hands/objects placed ON TOP non-destructively)
+        if (hasDiscreteLayers && adjustments.showForeLayers) {
+            val dynamicLayers = segmentedLayers!!.objectLayers
+            if (dynamicLayers.isNotEmpty()) {
+                for (objLayer in dynamicLayers) {
+                    if (objLayer.id !in adjustments.hiddenLayerIds && !objLayer.bitmap.isRecycled) {
+                        canvas.drawBitmap(objLayer.bitmap, 0f, 0f, null)
+                    }
+                }
+            } else {
+                canvas.drawBitmap(segmentedLayers.foreLayer, 0f, 0f, null)
+            }
+        }
         canvas.restoreToCount(saveCount)
         swapLayer.recycle()
 

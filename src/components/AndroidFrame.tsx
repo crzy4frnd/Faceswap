@@ -1,9 +1,9 @@
 import React from 'react';
-import { Wifi, BatteryMedium, Signal } from 'lucide-react';
+import { Wifi, BatteryMedium, Signal, ChevronLeft } from 'lucide-react';
 import { useFaceStudio } from '../context/FaceStudioContext';
 
 export const AndroidFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { viewMode } = useFaceStudio();
+  const { viewMode, onBackPress } = useFaceStudio();
 
   // Default full-screen adaptive studio mode
   if (viewMode === 'expanded') {
@@ -44,9 +44,24 @@ export const AndroidFrame: React.FC<{ children: React.ReactNode }> = ({ children
           {children}
         </div>
 
-        {/* Android Gesture Navigation Pill */}
-        <div className="h-4 bg-white/95 dark:bg-slate-900/95 flex items-center justify-center shrink-0 z-30 transition-colors">
-          <div className="w-28 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+        {/* Android System Navigation Bar (Triggers global onBackPress) */}
+        <div className="h-5 px-8 bg-white/95 dark:bg-slate-900/95 flex items-center justify-between shrink-0 z-30 transition-colors">
+          <button
+            type="button"
+            onClick={() => onBackPress()}
+            aria-label="Android system back"
+            title="Android Back (onBackPress)"
+            className="p-0.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onBackPress()}
+            aria-label="Gesture navigation home or back"
+            className="w-28 h-1 rounded-full bg-slate-300 dark:bg-slate-700 hover:bg-indigo-500 transition-colors"
+          />
+          <span className="w-4" aria-hidden="true" />
         </div>
       </div>
     </div>

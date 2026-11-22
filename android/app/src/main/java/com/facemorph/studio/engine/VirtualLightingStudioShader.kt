@@ -204,25 +204,36 @@ object VirtualLightingStudioShader {
                 ny /= nLen
                 val nzn = nz / nLen
 
+                val lumPx = lum[idx]
+                // Smoothstep luminance gate: preserves deep black pupils, irises, eyelashes, and brows
+                val lumT = ((lumPx - 0.22f) / 0.34f).coerceIn(0f, 1f)
+                val lumGate = lumT * lumT * (3f - 2f * lumT)
+                val shadowLock = 0.28f + 0.72f * lumGate
+
                 val nDotL = (nx * lx + ny * ly + nzn * lz).coerceIn(-1f, 1f)
                 // Wrap Half-Lambert soft skin falloff
                 val halfLambert = ((nDotL + 0.50f) / 1.50f).coerceIn(0f, 1f)
                 val diffResponse = (halfLambert - 0.54f - neutralShift)
 
-                // Asymmetric directional shading: gentle highlight boost on lit side, soft ambient shadow on shaded side
-                val shadeGain = if (diffResponse >= 0f) {
-                    1f + diffResponse * 0.78f * intensity
+                // Asymmetric directional shading with shadow-lock on dark ocular features
+                val rawShadeGain = if (diffResponse >= 0f) {
+                    1f + diffResponse * 0.74f * intensity
                 } else {
-                    1f + diffResponse * 0.92f * intensity
-                }.coerceIn(0.48f, 1.46f)
+                    1f + diffResponse * 0.88f * intensity
+                }.coerceIn(0.50f, 1.42f)
+                val shadeGain = if (rawShadeGain > 1f) {
+                    1f + (rawShadeGain - 1f) * shadowLock
+                } else {
+                    rawShadeGain
+                }
 
-                // Blinn-Phong skin specular highlight weighted toward central nose/cheek ridge
+                // Blinn-Phong skin specular highlight gated off dark pupils/lashes (no milky eye haze)
                 val nDotH = max(0f, nx * hx + ny * hy + nzn * hz)
-                val specHighlight = nDotH.pow(20f) * 16f * intensity * max(0f, nDotL + 0.2f)
+                val specHighlight = nDotH.pow(22f) * 14f * intensity * max(0f, nDotL + 0.15f) * lumGate
 
                 // Blend key light warmth on illuminated side & ambient bounce tint on shadow side
-                val keyWeight = halfLambert * intensity
-                val ambWeight = (1f - halfLambert) * intensity * 0.65f
+                val keyWeight = halfLambert * intensity * shadowLock
+                val ambWeight = (1f - halfLambert) * intensity * 0.55f * shadowLock
                 val rMul = shadeGain * (1f + (keyWarmR - 1f) * keyWeight + (shadowTintR - 1f) * ambWeight)
                 val gMul = shadeGain * (1f + (keyWarmG - 1f) * keyWeight + (shadowTintG - 1f) * ambWeight)
                 val bMul = shadeGain * (1f + (keyWarmB - 1f) * keyWeight + (shadowTintB - 1f) * ambWeight)

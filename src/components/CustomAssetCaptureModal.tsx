@@ -14,24 +14,33 @@ import {
   Eraser,
   Paintbrush,
   Wind,
-  Pipette,
   Plus,
   Package,
   Glasses,
   Tag,
-  Wand2,
   Undo2,
+  Eye,
+  Contrast,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import { useFaceStudio } from '../context/FaceStudioContext';
 import { WardrobeAsset, WardrobeCategory } from '../types/body';
 import {
-  segmentAssetDetailed,
-  applyBrushToCanvas,
-  applyMagicWandRemoval,
+  createNormalizedWorkingCanvas,
+  createInitialCutoutMask,
+  fillCutoutMask,
+  invertCutoutMask,
+  applyLassoCutoutToMask,
+  strokeMaskBrush,
+  computeSmartClotheMask,
+  renderCutoutCompositePreview,
+  extractTrimmedTransparentCutout,
   exportTransparentAssetDataUrl,
-  SegmentationOptions,
-  SegmentationResult,
-  DEFAULT_SEGMENTATION_OPTIONS,
+  Point2D,
+  LassoApplyMode,
+  OverlayTintColor,
+  BrushToolSettings,
 } from '../utils/customAssetSegmenter';
 import {
   ClothMeshState,
@@ -53,7 +62,14 @@ interface Props {
   onAssetAdded?: (assetId: string) => void;
 }
 
-const JEWELRY_SUBTYPES: { id: WardrobeAsset['subCategory']; label: string; anchor: WardrobeAsset['anchorPoint']; scale: number }[] = [
+type CutoutTool = 'outline' | 'brush' | 'erase';
+
+const JEWELRY_SUBTYPES: {
+  id: WardrobeAsset['subCategory'];
+  label: string;
+  anchor: WardrobeAsset['anchorPoint'];
+  scale: number;
+}[] = [
   { id: 'necklace', label: 'Necklace', anchor: 'neck', scale: 0.65 },
   { id: 'watch', label: 'Watch', anchor: 'wrist', scale: 0.4 },
   { id: 'bracelet', label: 'Bracelet', anchor: 'wrist', scale: 0.42 },
@@ -61,7 +77,12 @@ const JEWELRY_SUBTYPES: { id: WardrobeAsset['subCategory']; label: string; ancho
   { id: 'ring', label: 'Ring', anchor: 'wrist', scale: 0.35 },
 ];
 
-const OBJECT_SUBTYPES: { id: WardrobeAsset['subCategory']; label: string; anchor: WardrobeAsset['anchorPoint']; scale: number }[] = [
+const OBJECT_SUBTYPES: {
+  id: WardrobeAsset['subCategory'];
+  label: string;
+  anchor: WardrobeAsset['anchorPoint'];
+  scale: number;
+}[] = [
   { id: 'glasses', label: 'Glasses', anchor: 'head', scale: 0.68 },
   { id: 'hat', label: 'Hat / Cap', anchor: 'head', scale: 0.92 },
   { id: 'crown', label: 'Crown', anchor: 'head', scale: 0.85 },
@@ -90,21 +111,49 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
   const [cameraError, setCameraError] = useState<string | null>(null);
 
-  // Source & Segmentation buffers
+  // Non-destructive dual canvas cutout buffers
   const rawImageRef = useRef<HTMLImageElement | null>(null);
-  const segResultRef = useRef<SegmentationResult | null>(null);
-  const [rawImageUrl, setRawImageUrl] = useState<string | null>(null);
+  const workingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const displayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const segmentCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [rawImageUrl, setRawImageUrl] = useState<string | null>(null);
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [cutoutDimensions, setCutoutDimensions] = useState<{ w: number; h: number } | null>(null);
 
-  // Segmentation options & brush tools
-  const [segOptions, setSegOptions] = useState<SegmentationOptions>(DEFAULT_SEGMENTATION_OPTIONS);
-  const [brushMode, setBrushMode] = useState<'none' | 'wand' | 'erase' | 'restore' | 'eyedropper'>('none');
-  const [brushRadius, setBrushRadius] = useState<number>(22);
-  const [isDrawing, setIsDrawing] = useState(false);
+  // Picsart-style Cutout Clothe tool & independent Brush / Erase settings
+  const [activeTool, setActiveTool] = useState<CutoutTool>('outline');
+  const [lassoMode, setLassoMode] = useState<LassoApplyMode>('replace');
+  const [outlineHardness, setOutlineHardness] = useState<number>(85);
+  const [outlineOverlay, setOutlineOverlay] = useState<number>(62);
+
+  const [brushSettings, setBrushSettings] = useState<BrushToolSettings>({
+    size: 26,
+    hardness: 72,
+    overlay: 68,
+  });
+
+  const [eraseSettings, setEraseSettings] = useState<BrushToolSettings>({
+    size: 26,
+    hardness: 80,
+    overlay: 68,
+  });
+
+  const [overlayTint, setOverlayTint] = useState<OverlayTintColor>('rose');
+  const [peekPureCutout, setPeekPureCutout] = useState<boolean>(false);
   const [canvasBgPreview, setCanvasBgPreview] = useState<'checker' | 'dark' | 'light'>('checker');
+
+  // Pointer & lasso tracking refs
+  const isDrawingRef = useRef<boolean>(false);
+  const lastStrokePtRef = useRef<Point2D | null>(null);
+  const lassoPointsRef = useRef<Point2D[]>([]);
+  const [cursorRing, setCursorRing] = useState<{ x: number; y: number; visible: boolean }>({
+    x: 0,
+    y: 0,
+    visible: false,
+  });
+
+  // Undo history (stores ImageData snapshots of maskCanvas)
   const undoStackRef = useRef<ImageData[]>([]);
   const [undoCount, setUndoCount] = useState(0);
 
@@ -127,6 +176,14 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
   const previewClothMeshRef = useRef<ClothMeshState | null>(null);
   const previewPendantRef = useRef<PendantPhysicsState | null>(null);
 
+  const activeOverlayOpacity = peekPureCutout
+    ? 0
+    : activeTool === 'brush'
+    ? brushSettings.overlay
+    : activeTool === 'erase'
+    ? eraseSettings.overlay
+    : outlineOverlay;
+
   const stopActiveStream = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -141,15 +198,18 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
       setCategory(initCat);
       setSourceType(customAssetInitialSource || 'camera');
       setActiveStep('source');
-      setBrushMode('none');
+      setActiveTool('outline');
+      setLassoMode('replace');
+      setPeekPureCutout(false);
       setCameraError(null);
-      setSegOptions(DEFAULT_SEGMENTATION_OPTIONS);
       setRawImageUrl(null);
       setPreviewDataUrl(null);
       setCutoutDimensions(null);
       rawImageRef.current = null;
-      segResultRef.current = null;
+      workingCanvasRef.current = null;
+      maskCanvasRef.current = null;
       undoStackRef.current = [];
+      lassoPointsRef.current = [];
       setUndoCount(0);
     } else {
       stopActiveStream();
@@ -197,6 +257,130 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     };
   }, [showCustomAssetModal, activeStep, sourceType, facingMode, stopActiveStream]);
 
+  // Render composite preview (source + mask + Picsart overlay + active outline trace)
+  const redrawCutoutCanvas = useCallback(() => {
+    const display = displayCanvasRef.current;
+    const working = workingCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    if (!display || !working || !mask) return;
+
+    renderCutoutCompositePreview(display, working, mask, {
+      overlayOpacity: activeOverlayOpacity,
+      overlayTint,
+    });
+
+    // Draw live freehand Outline / Lasso path while tracing
+    const pts = lassoPointsRef.current;
+    if (pts.length > 1) {
+      const ctx = display.getContext('2d');
+      if (ctx) {
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Outer high-contrast dark stroke + inner bright dashed/solid stroke
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
+
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.78)';
+        ctx.lineWidth = Math.max(4, Math.round(display.width / 160));
+        ctx.stroke();
+
+        ctx.strokeStyle =
+          lassoMode === 'subtract'
+            ? '#fb7185'
+            : lassoMode === 'add'
+            ? '#34d399'
+            : '#f8fafc';
+        ctx.lineWidth = Math.max(2, Math.round(display.width / 260));
+        ctx.setLineDash([8, 6]);
+        ctx.stroke();
+
+        // Start point anchor dot to guide closing loop
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(pts[0].x, pts[0].y, Math.max(5, display.width / 110), 0, Math.PI * 2);
+        ctx.fillStyle = '#f43f5e';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }, [activeOverlayOpacity, overlayTint, lassoMode]);
+
+  // Redraw whenever Step 2 mounts or overlay settings change
+  useEffect(() => {
+    if (activeStep === 'segment') {
+      redrawCutoutCanvas();
+    }
+  }, [activeStep, redrawCutoutCanvas]);
+
+  // Initialize non-destructive cutout buffers from loaded image (NO forced background deletion)
+  const initializeCutoutWorkspace = useCallback(
+    (sourceImg: HTMLImageElement) => {
+      const working = createNormalizedWorkingCanvas(sourceImg, 880);
+      const { maskCanvas, hasSourceAlpha } = createInitialCutoutMask(working, 'preserve-alpha');
+
+      workingCanvasRef.current = working;
+      maskCanvasRef.current = maskCanvas;
+      undoStackRef.current = [];
+      lassoPointsRef.current = [];
+      setUndoCount(0);
+      setCutoutDimensions({ w: working.width, h: working.height });
+      setActiveTool('outline');
+      setLassoMode('replace');
+      setPeekPureCutout(hasSourceAlpha);
+
+      const trimmed = extractTrimmedTransparentCutout(working, maskCanvas, 4);
+      setPreviewDataUrl(exportTransparentAssetDataUrl(trimmed.canvas));
+      requestAnimationFrame(() => redrawCutoutCanvas());
+    },
+    [redrawCutoutCanvas]
+  );
+
+  // Compute finalized tight transparent PNG for Step 3 & Saved Assets
+  const refreshFinalTrimmedExport = useCallback(() => {
+    const working = workingCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    if (!working || !mask) return;
+    const trimmed = extractTrimmedTransparentCutout(working, mask, 4);
+    setCutoutDimensions({ w: trimmed.canvas.width, h: trimmed.canvas.height });
+    setPreviewDataUrl(exportTransparentAssetDataUrl(trimmed.canvas));
+  }, []);
+
+  // Push mask snapshot onto undo stack before each stroke / cutout edit
+  const pushMaskUndo = useCallback(() => {
+    const mask = maskCanvasRef.current;
+    if (!mask) return;
+    const mctx = mask.getContext('2d', { willReadFrequently: true });
+    if (!mctx) return;
+    try {
+      const snap = mctx.getImageData(0, 0, mask.width, mask.height);
+      undoStackRef.current = [...undoStackRef.current.slice(-14), snap];
+      setUndoCount(undoStackRef.current.length);
+    } catch {
+      // Ignore read failures
+    }
+  }, []);
+
+  const handleUndoMask = useCallback(() => {
+    const mask = maskCanvasRef.current;
+    if (!mask || undoStackRef.current.length === 0) return;
+    const prev = undoStackRef.current.pop();
+    setUndoCount(undoStackRef.current.length);
+    if (!prev) return;
+    const mctx = mask.getContext('2d', { willReadFrequently: true });
+    if (!mctx) return;
+    mctx.putImageData(prev, 0, 0);
+    redrawCutoutCanvas();
+    refreshFinalTrimmedExport();
+  }, [redrawCutoutCanvas, refreshFinalTrimmedExport]);
+
   // Sync defaults cleanly when top-level category switches
   const handleCategorySwitch = (nextCat: WardrobeCategory) => {
     setCategory(nextCat);
@@ -224,51 +408,6 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     }
   };
 
-  // Paint segmented canvas result whenever Step 2 mounts or segmentation updates
-  const syncCanvasFromSegResult = useCallback((result: SegmentationResult) => {
-    const dest = segmentCanvasRef.current;
-    if (dest) {
-      dest.width = result.canvas.width;
-      dest.height = result.canvas.height;
-      const sctx = dest.getContext('2d', { willReadFrequently: true });
-      if (sctx) {
-        sctx.clearRect(0, 0, dest.width, dest.height);
-        sctx.drawImage(result.canvas, 0, 0);
-      }
-    }
-    setCutoutDimensions({ w: result.canvas.width, h: result.canvas.height });
-    setPreviewDataUrl(exportTransparentAssetDataUrl(result.canvas));
-  }, []);
-
-  useEffect(() => {
-    if (activeStep === 'segment' && segResultRef.current && segmentCanvasRef.current) {
-      syncCanvasFromSegResult(segResultRef.current);
-    }
-  }, [activeStep, syncCanvasFromSegResult]);
-
-  // Execute segmentation on source image
-  const processSegmentation = useCallback(
-    (sourceImg: HTMLImageElement, opts: SegmentationOptions) => {
-      const w = sourceImg.naturalWidth || sourceImg.width;
-      const h = sourceImg.naturalHeight || sourceImg.height;
-      if (!w || !h) return;
-
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = w;
-      offCanvas.height = h;
-      const octx = offCanvas.getContext('2d');
-      if (!octx) return;
-      octx.drawImage(sourceImg, 0, 0, w, h);
-
-      const result = segmentAssetDetailed(offCanvas, opts);
-      segResultRef.current = result;
-      undoStackRef.current = [];
-      setUndoCount(0);
-      syncCanvasFromSegResult(result);
-    },
-    [syncCanvasFromSegResult]
-  );
-
   // Camera snapshot
   const handleCaptureCamera = () => {
     if (!videoRef.current) return;
@@ -292,7 +431,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     loadImage(dataUrl).then((img) => {
       rawImageRef.current = img;
       setRawImageUrl(dataUrl);
-      processSegmentation(img, segOptions);
+      initializeCutoutWorkspace(img);
       setActiveStep('segment');
     });
     stopActiveStream();
@@ -311,7 +450,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
       loadImage(dataUrl).then((img) => {
         rawImageRef.current = img;
         setRawImageUrl(dataUrl);
-        processSegmentation(img, segOptions);
+        initializeCutoutWorkspace(img);
         setActiveStep('segment');
       });
     };
@@ -338,118 +477,151 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
       setAnchorPoint(anchor);
       if (mat) setFabricType(mat);
       setTags([sub.charAt(0).toUpperCase() + sub.slice(1), 'Sample']);
-      processSegmentation(img, segOptions);
+      initializeCutoutWorkspace(img);
       setActiveStep('segment');
     });
   };
 
-  const updateSegOptionsAndRun = (partial: Partial<SegmentationOptions>) => {
-    const updated = { ...segOptions, ...partial };
-    setSegOptions(updated);
-    if (rawImageRef.current) {
-      processSegmentation(rawImageRef.current, updated);
-    }
-  };
-
-  const pushUndoSnapshot = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
-    try {
-      const snap = ctx.getImageData(0, 0, w, h);
-      undoStackRef.current = [...undoStackRef.current.slice(-11), snap];
-      setUndoCount(undoStackRef.current.length);
-    } catch {
-      // Ignore if canvas cannot be read
-    }
-  }, []);
-
-  const handleUndoBrush = useCallback(() => {
-    const canvas = segmentCanvasRef.current;
-    if (!canvas || undoStackRef.current.length === 0) return;
-    const prev = undoStackRef.current.pop();
-    setUndoCount(undoStackRef.current.length);
-    if (!prev) return;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return;
-    ctx.putImageData(prev, 0, 0);
-    const seg = segResultRef.current;
-    if (seg) {
-      const sctx = seg.canvas.getContext('2d');
-      if (sctx) {
-        sctx.clearRect(0, 0, seg.canvas.width, seg.canvas.height);
-        sctx.drawImage(canvas, 0, 0);
-      }
-    }
-    setPreviewDataUrl(canvas.toDataURL('image/png'));
-  }, []);
-
-  // Canvas interaction: manual brush, magic wand hole/object removal, or eyedropper background pick
-  const applyPointerOnCanvas = (e: React.PointerEvent<HTMLCanvasElement>, isClickStart: boolean) => {
-    const canvas = segmentCanvasRef.current;
-    if (!canvas) return;
+  // Map pointer event to mask canvas coordinates + screen-space cursor position inside container
+  const getCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>): Point2D | null => {
+    const canvas = displayCanvasRef.current;
+    if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-
+    if (!rect.width || !rect.height) return null;
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const x = Math.max(0, Math.min(canvas.width - 1, (e.clientX - rect.left) * scaleX));
-    const y = Math.max(0, Math.min(canvas.height - 1, (e.clientY - rect.top) * scaleY));
+    return {
+      x: Math.max(0, Math.min(canvas.width, (e.clientX - rect.left) * scaleX)),
+      y: Math.max(0, Math.min(canvas.height, (e.clientY - rect.top) * scaleY)),
+    };
+  };
 
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return;
+  const updateCursorOverlay = (e: React.PointerEvent<HTMLCanvasElement>, show: boolean) => {
+    const canvas = displayCanvasRef.current;
+    const parent = canvas?.parentElement;
+    if (!canvas || !parent) return;
+    const parentRect = parent.getBoundingClientRect();
+    setCursorRing({
+      x: e.clientX - parentRect.left,
+      y: e.clientY - parentRect.top,
+      visible: show && activeTool !== 'outline',
+    });
+  };
 
-    if (brushMode === 'eyedropper' && isClickStart && segResultRef.current) {
-      // Sample color from the original un-erased workingCanvas at the cropped coordinates
-      const crop = segResultRef.current.cropRect;
-      const wCtx = segResultRef.current.workingCanvas.getContext('2d', { willReadFrequently: true });
-      if (wCtx) {
-        const sx = Math.max(0, Math.min(segResultRef.current.workingCanvas.width - 1, Math.round(crop.x + x)));
-        const sy = Math.max(0, Math.min(segResultRef.current.workingCanvas.height - 1, Math.round(crop.y + y)));
-        const px = wCtx.getImageData(sx, sy, 1, 1).data;
-        updateSegOptionsAndRun({ customBgColor: { r: px[0], g: px[1], b: px[2] } });
-        setBrushMode('none');
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const pt = getCanvasPoint(e);
+    const mask = maskCanvasRef.current;
+    if (!pt || !mask) return;
+
+    e.currentTarget.setPointerCapture(e.pointerId);
+    isDrawingRef.current = true;
+    updateCursorOverlay(e, true);
+
+    if (activeTool === 'outline') {
+      lassoPointsRef.current = [pt];
+      redrawCutoutCanvas();
+      return;
+    }
+
+    pushMaskUndo();
+    lastStrokePtRef.current = pt;
+
+    const settings = activeTool === 'brush' ? brushSettings : eraseSettings;
+    strokeMaskBrush(mask, pt, pt, settings.size, settings.hardness, activeTool);
+    redrawCutoutCanvas();
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    updateCursorOverlay(e, true);
+    if (!isDrawingRef.current) return;
+
+    const pt = getCanvasPoint(e);
+    const mask = maskCanvasRef.current;
+    if (!pt || !mask) return;
+
+    if (activeTool === 'outline') {
+      const pts = lassoPointsRef.current;
+      const last = pts[pts.length - 1];
+      if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) >= 3) {
+        pts.push(pt);
+        redrawCutoutCanvas();
       }
       return;
     }
 
-    if (brushMode === 'wand' && isClickStart) {
-      pushUndoSnapshot(ctx, canvas.width, canvas.height);
-      const removed = applyMagicWandRemoval(ctx, x, y, segOptions.tolerance);
-      if (removed) {
-        const seg = segResultRef.current;
-        if (seg) {
-          const sctx = seg.canvas.getContext('2d');
-          if (sctx) {
-            sctx.clearRect(0, 0, seg.canvas.width, seg.canvas.height);
-            sctx.drawImage(canvas, 0, 0);
-          }
-        }
-        setPreviewDataUrl(canvas.toDataURL('image/png'));
-      }
-      return;
+    const fromPt = lastStrokePtRef.current || pt;
+    const settings = activeTool === 'brush' ? brushSettings : eraseSettings;
+    strokeMaskBrush(mask, fromPt, pt, settings.size, settings.hardness, activeTool);
+    lastStrokePtRef.current = pt;
+    redrawCutoutCanvas();
+  };
+
+  const finishPointerStroke = (e?: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawingRef.current) return;
+    isDrawingRef.current = false;
+    lastStrokePtRef.current = null;
+
+    if (e && e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
     }
 
-    if ((brushMode === 'erase' || brushMode === 'restore') && (isDrawing || isClickStart)) {
-      if (isClickStart) {
-        pushUndoSnapshot(ctx, canvas.width, canvas.height);
+    const mask = maskCanvasRef.current;
+    if (activeTool === 'outline' && mask) {
+      const pts = lassoPointsRef.current;
+      lassoPointsRef.current = [];
+      if (pts.length >= 3) {
+        pushMaskUndo();
+        applyLassoCutoutToMask(mask, pts, lassoMode, outlineHardness);
       }
-      const seg = segResultRef.current;
-      applyBrushToCanvas(
-        ctx,
-        x,
-        y,
-        brushRadius,
-        brushMode,
-        seg?.workingCanvas || rawImageRef.current || undefined,
-        seg?.cropRect || { x: 0, y: 0 }
-      );
-      if (seg) {
-        const sctx = seg.canvas.getContext('2d');
-        if (sctx) {
-          sctx.clearRect(0, 0, seg.canvas.width, seg.canvas.height);
-          sctx.drawImage(canvas, 0, 0);
-        }
-      }
-      setPreviewDataUrl(canvas.toDataURL('image/png'));
+      redrawCutoutCanvas();
     }
+
+    refreshFinalTrimmedExport();
+  };
+
+  // 1-Tap Picsart Smart Clothe auto-seed (non-destructive, editable via Brush/Erase)
+  const handleSmartClotheCutout = () => {
+    const working = workingCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    if (!working || !mask) return;
+    pushMaskUndo();
+    computeSmartClotheMask(working, mask);
+    setPeekPureCutout(false);
+    redrawCutoutCanvas();
+    refreshFinalTrimmedExport();
+  };
+
+  const handleMaskQuickAction = (action: 'all' | 'clear' | 'invert' | 'reset') => {
+    const working = workingCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    if (!working || !mask) return;
+
+    pushMaskUndo();
+    if (action === 'all' || action === 'reset') {
+      fillCutoutMask(mask, true);
+      if (action === 'reset') {
+        setActiveTool('outline');
+        setLassoMode('replace');
+        setPeekPureCutout(false);
+      }
+    } else if (action === 'clear') {
+      fillCutoutMask(mask, false);
+      setPeekPureCutout(false);
+    } else if (action === 'invert') {
+      invertCutoutMask(mask);
+    }
+    redrawCutoutCanvas();
+    refreshFinalTrimmedExport();
+  };
+
+  // Compute scaled preview cursor diameter on screen
+  const getScreenCursorDiameter = () => {
+    const canvas = displayCanvasRef.current;
+    const settings = activeTool === 'brush' ? brushSettings : eraseSettings;
+    if (!canvas) return settings.size * 2;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !canvas.width) return settings.size * 2;
+    return settings.size * 2 * (rect.width / canvas.width);
   };
 
   // Select built-in or custom clothing tag in Step 3
@@ -466,7 +638,10 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     setFabricType(tagDef.defaultFabric);
     setDefaultScale(tagDef.defaultScale);
     if (!tags.some((t) => t.toLowerCase() === tagDef.label.toLowerCase())) {
-      setTags((prev) => [tagDef.label, ...prev.filter((p) => !allClothingTags.some((a) => a.label === p))]);
+      setTags((prev) => [
+        tagDef.label,
+        ...prev.filter((p) => !allClothingTags.some((a) => a.label === p)),
+      ]);
     }
     previewClothMeshRef.current = null;
   };
@@ -530,7 +705,6 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
           const breathe = Math.sin(t * 1.8) * 2.5;
           const windX = Math.sin(t * 1.6) * 1.6;
 
-          // Mannequin skeletal landmarks
           const shoulderL = { x: w / 2 - 64, y: 140 };
           const shoulderR = { x: w / 2 + 64, y: 140 };
           const chestL = { x: w / 2 - 58, y: 185 };
@@ -540,7 +714,6 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
           const sternum = { x: w / 2, y: 190 };
           const throat = { x: w / 2, y: 128 };
 
-          // Mannequin silhouette
           ctx.fillStyle = '#334155';
           ctx.strokeStyle = '#475569';
           ctx.lineWidth = 1.5;
@@ -579,7 +752,10 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
             const aL = anchorMode === 'waist' ? waistL : anchorMode === 'chest' ? chestL : shoulderL;
             const aR = anchorMode === 'waist' ? waistR : anchorMode === 'chest' ? chestR : shoulderR;
             const span = Math.hypot(aR.x - aL.x, aR.y - aL.y);
-            const gW = span * (anchorMode === 'shoulders' ? 1.42 : anchorMode === 'chest' ? 1.18 : 1.32) * defaultScale;
+            const gW =
+              span *
+              (anchorMode === 'shoulders' ? 1.42 : anchorMode === 'chest' ? 1.18 : 1.32) *
+              defaultScale;
             const gH = Math.min(240, gW * aspect);
             const startY =
               anchorMode === 'waist'
@@ -635,7 +811,10 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
               previewPendantRef.current = createPendantPhysics(throat, throat, nW * 0.65, 6);
             }
             stepPendantPhysics(previewPendantRef.current, throat, throat, { x: windX, y: 0 }, 0.94);
-            const midPt = previewPendantRef.current.links[Math.floor(previewPendantRef.current.links.length / 2)];
+            const midPt =
+              previewPendantRef.current.links[
+                Math.floor(previewPendantRef.current.links.length / 2)
+              ];
             ctx.translate(midPt.x, midPt.y - nH * 0.2);
             ctx.shadowColor = 'rgba(0,0,0,0.4)';
             ctx.shadowBlur = 8;
@@ -681,9 +860,18 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     previewMeshWireframe,
   ]);
 
-  // Save asset with tag & physics configuration
+  // Save asset with tight transparent cutout, tag & physics configuration
   const handleSaveAsset = () => {
-    if (!previewDataUrl) return;
+    let finalUrl = previewDataUrl;
+    if (workingCanvasRef.current && maskCanvasRef.current) {
+      const trimmed = extractTrimmedTransparentCutout(
+        workingCanvasRef.current,
+        maskCanvasRef.current,
+        4
+      );
+      finalUrl = exportTransparentAssetDataUrl(trimmed.canvas);
+    }
+    if (!finalUrl) return;
 
     const finalTagId = category === 'clothing' ? clothingTag : String(subCategory);
     const matchedTagLabel =
@@ -701,7 +889,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
       category,
       subCategory: finalTagId,
       clothingTag: category === 'clothing' ? finalTagId : undefined,
-      imageUrl: previewDataUrl,
+      imageUrl: finalUrl,
       anchorPoint,
       defaultScale,
       tags: finalTags,
@@ -718,26 +906,38 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
     setActiveStep('source');
     setRawImageUrl(null);
     setPreviewDataUrl(null);
-    segResultRef.current = null;
+    workingCanvasRef.current = null;
+    maskCanvasRef.current = null;
   };
 
   if (!showCustomAssetModal) return null;
 
+  const activeBrushConfig = activeTool === 'brush' ? brushSettings : eraseSettings;
+  const setActiveBrushConfig = (patch: Partial<BrushToolSettings>) => {
+    if (activeTool === 'brush') {
+      setBrushSettings((prev) => ({ ...prev, ...patch }));
+    } else if (activeTool === 'erase') {
+      setEraseSettings((prev) => ({ ...prev, ...patch }));
+    }
+  };
+
+  const screenDiameter = getScreenCursorDiameter();
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-fadeIn">
-      <div className="relative w-full max-w-4xl max-h-[92vh] flex flex-col bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
+      <div className="relative w-full max-w-5xl max-h-[94vh] flex flex-col bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-gradient-to-tr from-amber-500 to-rose-500 text-white shadow-md">
-              <Sparkles className="w-5 h-5" />
+        <div className="flex items-center justify-between px-5 sm:px-6 py-3.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="p-2 rounded-xl bg-gradient-to-tr from-rose-500 to-indigo-600 text-white shadow-md shrink-0">
+              <Scissors className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                Scan &amp; Create Cloth, Jewelry &amp; Object Assets
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
+                Scan &amp; Cutout Clothe, Jewelry &amp; Object Assets
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Edge-clean cutout, tag by clothing category (or create custom tags), and build a body-fitted cloth mesh
+              <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 truncate">
+                Picsart-style Cutout Clothe outline with manual Brush &amp; Erase hardness and overlay controls
               </p>
             </div>
           </div>
@@ -746,17 +946,18 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
               stopActiveStream();
               setShowCustomAssetModal(false);
             }}
-            className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
+            title="Close"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Step Progress Tabs */}
-        <div className="flex border-b border-slate-100 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-950/40 px-6 py-2 gap-2 overflow-x-auto">
+        <div className="flex border-b border-slate-100 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-950/40 px-4 sm:px-6 py-2 gap-2 overflow-x-auto no-scrollbar">
           {[
             { id: 'source', label: '1. Capture / Select', icon: Camera },
-            { id: 'segment', label: '2. Clean Edge Cutout', icon: Scissors },
+            { id: 'segment', label: '2. Cutout Clothe & Touch-Up', icon: Scissors },
             { id: 'configure', label: '3. Tag, Mesh & Fit', icon: Sliders },
           ].map((s) => {
             const Icon = s.icon;
@@ -768,8 +969,11 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
               <button
                 key={s.id}
                 disabled={s.id !== 'source' && !rawImageUrl}
-                onClick={() => setActiveStep(s.id as 'source' | 'segment' | 'configure')}
-                className={`flex items-center gap-2 py-2 px-4 rounded-xl text-xs font-semibold transition-all whitespace-nowrap ${
+                onClick={() => {
+                  if (s.id === 'configure') refreshFinalTrimmedExport();
+                  setActiveStep(s.id as 'source' | 'segment' | 'configure');
+                }}
+                className={`flex items-center gap-2 py-2 px-3.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                   isActive
                     ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
                     : isCompleted
@@ -777,7 +981,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                     : 'text-slate-400 cursor-not-allowed opacity-60'
                 }`}
               >
-                <Icon className="w-3.5 h-3.5" />
+                <Icon className="w-3.5 h-3.5 shrink-0" />
                 <span>{s.label}</span>
               </button>
             );
@@ -785,11 +989,11 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
           {/* STEP 1: CAPTURE / SOURCE SELECTION */}
           {activeStep === 'source' && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <button
                   onClick={() => setSourceType('camera')}
                   className={`p-4 rounded-2xl border text-center transition-all flex flex-col items-center gap-2 ${
@@ -802,7 +1006,9 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                     <Camera className="w-6 h-6" />
                   </div>
                   <span className="font-bold text-sm">Live Camera Scan</span>
-                  <span className="text-[11px] text-slate-500">Snap suit, shirt, bikini, jewelry or object</span>
+                  <span className="text-[11px] text-slate-500">
+                    Snap a shirt, suit, bikini, jewelry or object
+                  </span>
                 </button>
 
                 <button
@@ -817,7 +1023,9 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                     <Upload className="w-6 h-6" />
                   </div>
                   <span className="font-bold text-sm">Upload from Gallery</span>
-                  <span className="text-[11px] text-slate-500">JPG, WEBP, or transparent PNG</span>
+                  <span className="text-[11px] text-slate-500">
+                    Full photo loaded for Cutout Clothe &amp; Brush editing
+                  </span>
                 </button>
 
                 <button
@@ -832,12 +1040,14 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                     <Sparkles className="w-6 h-6" />
                   </div>
                   <span className="font-bold text-sm">Sample Presets</span>
-                  <span className="text-[11px] text-slate-500">Test cutout &amp; physics mesh instantly</span>
+                  <span className="text-[11px] text-slate-500">
+                    Test Cutout Clothe, Brush &amp; Physics Mesh instantly
+                  </span>
                 </button>
               </div>
 
               {sourceType === 'camera' && (
-                <div className="relative flex flex-col items-center justify-center bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 min-h-[380px]">
+                <div className="relative flex flex-col items-center justify-center bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 min-h-[360px]">
                   {cameraError ? (
                     <div className="p-6 text-center text-rose-400 space-y-3">
                       <p className="font-semibold text-sm">{cameraError}</p>
@@ -854,21 +1064,25 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                         ref={videoRef}
                         playsInline
                         muted
-                        className={`w-full max-h-[420px] object-contain ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`}
+                        className={`w-full max-h-[400px] object-contain ${
+                          facingMode === 'user' ? 'scale-x-[-1]' : ''
+                        }`}
                       />
                       <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6">
-                        <div className="w-64 h-72 border-2 border-dashed border-amber-400/80 rounded-3xl flex flex-col items-center justify-between p-4 bg-black/10">
-                          <span className="text-[11px] font-bold text-amber-300 bg-black/60 px-2.5 py-0.5 rounded-full">
-                            Center Item Inside Frame
+                        <div className="w-60 h-68 border-2 border-dashed border-rose-400/80 rounded-3xl flex flex-col items-center justify-between p-4 bg-black/10">
+                          <span className="text-[11px] font-bold text-rose-300 bg-black/65 px-2.5 py-0.5 rounded-full">
+                            Frame Cloth or Item
                           </span>
-                          <span className="text-[10px] text-white/80 bg-black/50 px-2 py-0.5 rounded text-center">
-                            Place on a plain wall or table for cleanest edge cutout
+                          <span className="text-[10px] text-white/85 bg-black/55 px-2.5 py-1 rounded text-center">
+                            Next step opens Cutout Clothe outline, Brush &amp; Erase tools
                           </span>
                         </div>
                       </div>
                       <div className="absolute bottom-4 inset-x-0 flex items-center justify-center gap-4">
                         <button
-                          onClick={() => setFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'))}
+                          onClick={() =>
+                            setFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'))
+                          }
                           className="p-3 rounded-full bg-black/60 hover:bg-black/80 text-white border border-white/20 backdrop-blur-md"
                           title="Switch Camera"
                         >
@@ -876,10 +1090,10 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                         </button>
                         <button
                           onClick={handleCaptureCamera}
-                          className="px-6 py-3 rounded-full bg-gradient-to-r from-amber-500 via-rose-500 to-indigo-600 hover:brightness-110 text-white font-bold text-sm shadow-xl flex items-center gap-2"
+                          className="px-6 py-3 rounded-full bg-gradient-to-r from-rose-500 to-indigo-600 hover:brightness-110 text-white font-bold text-sm shadow-xl flex items-center gap-2 whitespace-nowrap"
                         >
-                          <Camera className="w-5 h-5" />
-                          Snap &amp; Extract Edge
+                          <Camera className="w-4 h-4 shrink-0" />
+                          <span>Capture &amp; Cutout</span>
                         </button>
                       </div>
                     </>
@@ -895,8 +1109,8 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                   <h3 className="text-base font-bold text-slate-900 dark:text-white mb-1">
                     Select a cloth, jewelry, or object photo
                   </h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mb-6 max-w-sm mx-auto">
-                    Supports transparent PNGs or regular photos — edge flood-fill removes the background while protecting inner details.
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mb-6 max-w-md mx-auto">
+                    Your full photo opens intact in the Cutout Studio — trace your clothe outline directly or refine cleanly with Brush &amp; Erase.
                   </p>
                   <label className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs cursor-pointer shadow-lg">
                     <Upload className="w-4 h-4" />
@@ -908,7 +1122,9 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
 
               {sourceType === 'samples' && (
                 <div className="space-y-3">
-                  <span className="text-xs font-semibold text-slate-500">Pick a sample to test edge cleanup and cloth mesh fitting:</span>
+                  <span className="text-xs font-semibold text-slate-500">
+                    Pick a sample to open in Cutout Clothe &amp; Brush Studio:
+                  </span>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {[
                       {
@@ -981,12 +1197,13 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
             </div>
           )}
 
-          {/* STEP 2: EDGE-CLEAN TRANSPARENCY EXTRACTION */}
+          {/* STEP 2: PICSART-STYLE CUTOUT CLOTHE + BRUSH & ERASE STUDIO */}
           {activeStep === 'segment' && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="md:col-span-2 flex flex-col items-center justify-center p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 min-h-[380px] relative overflow-hidden">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              {/* Interactive Cutout Canvas */}
+              <div className="lg:col-span-2 flex flex-col items-center justify-center p-3 sm:p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 min-h-[380px] relative overflow-hidden">
                 <div
-                  className={`w-full h-[360px] flex items-center justify-center rounded-xl overflow-hidden ${
+                  className={`relative w-full h-[360px] sm:h-[420px] flex items-center justify-center rounded-xl overflow-hidden select-none ${
                     canvasBgPreview === 'checker'
                       ? 'bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] dark:bg-[radial-gradient(#334155_1px,transparent_1px)] bg-[size:14px_14px]'
                       : canvasBgPreview === 'dark'
@@ -995,212 +1212,408 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                   }`}
                 >
                   <canvas
-                    ref={segmentCanvasRef}
-                    onPointerDown={(e) => {
-                      setIsDrawing(true);
-                      applyPointerOnCanvas(e, true);
+                    ref={displayCanvasRef}
+                    onPointerDown={handleCanvasPointerDown}
+                    onPointerMove={handleCanvasPointerMove}
+                    onPointerUp={finishPointerStroke}
+                    onPointerCancel={finishPointerStroke}
+                    onPointerLeave={(e) => {
+                      setCursorRing((prev) => ({ ...prev, visible: false }));
+                      if (isDrawingRef.current) finishPointerStroke(e);
                     }}
-                    onPointerUp={() => setIsDrawing(false)}
-                    onPointerLeave={() => setIsDrawing(false)}
-                    onPointerMove={(e) => applyPointerOnCanvas(e, false)}
-                    className={`max-w-full max-h-[340px] object-contain shadow-lg ${
-                      brushMode === 'eyedropper'
-                        ? 'cursor-copy'
-                        : brushMode !== 'none'
-                        ? 'cursor-crosshair'
-                        : 'cursor-default'
+                    className={`max-w-full max-h-[345px] sm:max-h-[405px] object-contain shadow-lg touch-none ${
+                      activeTool === 'outline' ? 'cursor-crosshair' : 'cursor-none'
                     }`}
                   />
-                </div>
 
-                {/* Cutout dimensions & preview bg switcher */}
-                <div className="absolute top-6 left-6 bg-black/65 backdrop-blur-md px-2.5 py-1 rounded-lg border border-white/10 text-[10px] font-mono text-emerald-300">
-                  {cutoutDimensions ? `${cutoutDimensions.w} × ${cutoutDimensions.h} px · Auto-Trimmed` : 'Ready'}
-                </div>
-
-                <div className="absolute top-6 right-6 flex items-center gap-1.5 bg-black/60 backdrop-blur-md p-1 rounded-xl border border-white/10">
-                  {(['checker', 'dark', 'light'] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      onClick={() => setCanvasBgPreview(mode)}
-                      className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize transition-colors ${
-                        canvasBgPreview === mode ? 'bg-indigo-600 text-white' : 'text-slate-300'
-                      }`}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Refinement Sidebar */}
-              <div className="space-y-3.5 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60">
-                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2">
-                  <Scissors className="w-4 h-4 text-amber-500" />
-                  Precision Edge &amp; Size Cutout
-                </h4>
-
-                {/* Background Tolerance */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-                    <span>Background Tolerance</span>
-                    <span className="font-mono text-indigo-500 font-bold">{segOptions.tolerance}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="8"
-                    max="85"
-                    step="2"
-                    value={segOptions.tolerance}
-                    onChange={(e) => updateSegOptionsAndRun({ tolerance: Number(e.target.value) })}
-                    className="w-full accent-indigo-600 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-
-                {/* Edge Softness / Anti-Aliasing */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-                    <span>Edge Feather Smoothness</span>
-                    <span className="font-mono text-indigo-500 font-bold">{segOptions.featherRadius} px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="6"
-                    step="1"
-                    value={segOptions.featherRadius}
-                    onChange={(e) => updateSegOptionsAndRun({ featherRadius: Number(e.target.value) })}
-                    className="w-full accent-indigo-600 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-
-                {/* Segmentation Behavior Toggles */}
-                <div className="space-y-1.5 pt-1 border-t border-slate-100 dark:border-slate-800">
-                  <label className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer">
-                    <span>Remove Stray Objects</span>
-                    <input
-                      type="checkbox"
-                      checked={segOptions.removeExtraneousObjects ?? true}
-                      onChange={(e) => updateSegOptionsAndRun({ removeExtraneousObjects: e.target.checked })}
-                      className="accent-indigo-600 rounded"
+                  {/* Live Brush / Erase Hardness & Size Ring Cursor */}
+                  {cursorRing.visible && (activeTool === 'brush' || activeTool === 'erase') && (
+                    <div
+                      className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 shadow-sm"
+                      style={{
+                        left: `${cursorRing.x}px`,
+                        top: `${cursorRing.y}px`,
+                        width: `${Math.max(8, screenDiameter)}px`,
+                        height: `${Math.max(8, screenDiameter)}px`,
+                        borderColor: activeTool === 'brush' ? '#10b981' : '#f43f5e',
+                        background:
+                          activeTool === 'brush'
+                            ? `radial-gradient(circle, rgba(16,185,129,0.28) ${Math.round(
+                                activeBrushConfig.hardness * 0.9
+                              )}%, rgba(16,185,129,0) 100%)`
+                            : `radial-gradient(circle, rgba(244,63,94,0.28) ${Math.round(
+                                activeBrushConfig.hardness * 0.9
+                              )}%, rgba(244,63,94,0) 100%)`,
+                      }}
                     />
-                  </label>
-                  <label className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer">
-                    <span>Protect Inner White / Details</span>
-                    <input
-                      type="checkbox"
-                      checked={segOptions.preserveInnerHoles}
-                      onChange={(e) => updateSegOptionsAndRun({ preserveInnerHoles: e.target.checked })}
-                      className="accent-indigo-600 rounded"
-                    />
-                  </label>
-                  <label className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer">
-                    <span>Auto-Crop to Tight Bounds</span>
-                    <input
-                      type="checkbox"
-                      checked={segOptions.cropToBoundingBox}
-                      onChange={(e) => updateSegOptionsAndRun({ cropToBoundingBox: e.target.checked })}
-                      className="accent-indigo-600 rounded"
-                    />
-                  </label>
-                </div>
-
-                {/* Eyedropper + Magic Wand + Manual Brushes */}
-                <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => setBrushMode((prev) => (prev === 'wand' ? 'none' : 'wand'))}
-                      className={`py-2 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
-                        brushMode === 'wand'
-                          ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-300 ring-2 ring-indigo-500/20'
-                          : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
-                      }`}
-                    >
-                      <Wand2 className="w-3.5 h-3.5 shrink-0" />
-                      <span>{brushMode === 'wand' ? 'Tap Region...' : 'Tap Remove'}</span>
-                    </button>
-
-                    <button
-                      onClick={() => setBrushMode((prev) => (prev === 'eyedropper' ? 'none' : 'eyedropper'))}
-                      className={`py-2 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
-                        brushMode === 'eyedropper'
-                          ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-300 ring-2 ring-amber-500/20'
-                          : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-amber-400'
-                      }`}
-                    >
-                      <Pipette className="w-3.5 h-3.5 shrink-0" />
-                      <span>{brushMode === 'eyedropper' ? 'Tap Color...' : 'Pick BG Color'}</span>
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => setBrushMode((prev) => (prev === 'erase' ? 'none' : 'erase'))}
-                      className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
-                        brushMode === 'erase'
-                          ? 'border-rose-500 bg-rose-50/70 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 ring-2 ring-rose-500/20'
-                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
-                      }`}
-                    >
-                      <Eraser className="w-3.5 h-3.5 shrink-0" />
-                      <span>Erase Stray</span>
-                    </button>
-
-                    <button
-                      onClick={() => setBrushMode((prev) => (prev === 'restore' ? 'none' : 'restore'))}
-                      className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
-                        brushMode === 'restore'
-                          ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 ring-2 ring-emerald-500/20'
-                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
-                      }`}
-                    >
-                      <Paintbrush className="w-3.5 h-3.5 shrink-0" />
-                      <span>Restore Detail</span>
-                    </button>
-                  </div>
-
-                  {(brushMode === 'erase' || brushMode === 'restore') && (
-                    <div className="space-y-1 pt-1">
-                      <div className="flex items-center justify-between text-[11px] text-slate-500">
-                        <span>Brush Radius</span>
-                        <span className="font-mono text-indigo-400 tabular-nums">{brushRadius}px</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="6"
-                        max="56"
-                        step="2"
-                        value={brushRadius}
-                        onChange={(e) => setBrushRadius(Number(e.target.value))}
-                        className="w-full accent-indigo-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer"
-                      />
-                    </div>
                   )}
                 </div>
 
-                <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+                {/* Top Status & Canvas Backdrop / Peek Final Controls */}
+                <div className="w-full mt-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="bg-slate-900/80 dark:bg-black/70 px-2.5 py-1 rounded-lg border border-slate-700/60 text-[10px] font-mono text-emerald-300 tabular-nums">
+                      {cutoutDimensions ? `${cutoutDimensions.w} × ${cutoutDimensions.h} px` : 'Ready'}
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {activeTool === 'outline'
+                        ? 'Trace around cloth & release to cutout'
+                        : activeTool === 'brush'
+                        ? 'Drag to paint/keep cloth pixels'
+                        : 'Drag to erase unwanted regions'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setPeekPureCutout((v) => !v)}
+                      className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border flex items-center gap-1 transition-colors whitespace-nowrap ${
+                        peekPureCutout
+                          ? 'bg-emerald-600 border-emerald-500 text-white'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
+                      }`}
+                      title="Toggle between Picsart Overlay view and pure transparent cutout"
+                    >
+                      <Eye className="w-3 h-3 shrink-0" />
+                      <span>{peekPureCutout ? 'Final Alpha' : 'Overlay On'}</span>
+                    </button>
+
+                    <div className="flex items-center gap-0.5 bg-slate-200/80 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-300/60 dark:border-slate-800">
+                      {(['checker', 'dark', 'light'] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setCanvasBgPreview(mode)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize transition-colors ${
+                            canvasBgPreview === mode
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Picsart Cutout Clothe + Brush & Erase Tool Panel */}
+              <div className="space-y-3.5 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 flex flex-col justify-between">
+                <div className="space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                      <Scissors className="w-4 h-4 text-rose-500 shrink-0" />
+                      <span>Cutout Clothe Studio</span>
+                    </h4>
+
+                    <button
+                      type="button"
+                      onClick={handleSmartClotheCutout}
+                      className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-rose-500 to-indigo-600 hover:brightness-110 text-white text-[10px] font-bold flex items-center gap-1 shadow-xs whitespace-nowrap shrink-0"
+                      title="1-tap smart clothe seed around centered garment (editable with Brush & Erase)"
+                    >
+                      <Sparkles className="w-3 h-3 shrink-0" />
+                      <span>Auto Clothe</span>
+                    </button>
+                  </div>
+
+                  {/* Primary 3 Cutout Tools: Outline Clothe | Manual Brush | Manual Erase */}
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTool('outline');
+                        setPeekPureCutout(false);
+                      }}
+                      className={`py-2 px-2 rounded-xl border text-xs font-bold flex flex-col items-center justify-center gap-1 transition-all whitespace-nowrap ${
+                        activeTool === 'outline'
+                          ? 'border-rose-500 bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-300 ring-2 ring-rose-500/20'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-rose-400'
+                      }`}
+                    >
+                      <Scissors className="w-4 h-4 shrink-0" />
+                      <span>Outline</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTool('brush');
+                        setPeekPureCutout(false);
+                      }}
+                      className={`py-2 px-2 rounded-xl border text-xs font-bold flex flex-col items-center justify-center gap-1 transition-all whitespace-nowrap ${
+                        activeTool === 'brush'
+                          ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-300 ring-2 ring-emerald-500/20'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-emerald-400'
+                      }`}
+                    >
+                      <Paintbrush className="w-4 h-4 shrink-0" />
+                      <span>Brush</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTool('erase');
+                        setPeekPureCutout(false);
+                      }}
+                      className={`py-2 px-2 rounded-xl border text-xs font-bold flex flex-col items-center justify-center gap-1 transition-all whitespace-nowrap ${
+                        activeTool === 'erase'
+                          ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-300 ring-2 ring-amber-500/20'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-amber-400'
+                      }`}
+                    >
+                      <Eraser className="w-4 h-4 shrink-0" />
+                      <span>Erase</span>
+                    </button>
+                  </div>
+
+                  {/* OUTLINE / CUTOUT CLOTHE SETTINGS */}
+                  {activeTool === 'outline' && (
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3">
+                      <div className="space-y-1.5">
+                        <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
+                          Cutout Clothe Mode
+                        </span>
+                        <div className="grid grid-cols-3 gap-1">
+                          {[
+                            { id: 'replace' as const, label: 'Cut Clothe' },
+                            { id: 'add' as const, label: '+ Add Part' },
+                            { id: 'subtract' as const, label: '− Cut Area' },
+                          ].map((m) => (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => setLassoMode(m.id)}
+                              className={`py-1.5 px-1.5 rounded-lg text-[10px] font-bold border transition-all whitespace-nowrap ${
+                                lassoMode === m.id
+                                  ? 'bg-rose-600 border-rose-500 text-white'
+                                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+                              }`}
+                            >
+                              {m.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
+                          <span>Outline Edge Hardness</span>
+                          <span className="font-mono font-bold text-rose-500 tabular-nums">
+                            {outlineHardness}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="10"
+                          max="100"
+                          step="2"
+                          value={outlineHardness}
+                          onChange={(e) => setOutlineHardness(Number(e.target.value))}
+                          className="w-full accent-rose-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer touch-pan-x"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
+                          <span>Outline Mask Overlay</span>
+                          <span className="font-mono font-bold text-rose-500 tabular-nums">
+                            {outlineOverlay}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="2"
+                          value={outlineOverlay}
+                          onChange={(e) => {
+                            setPeekPureCutout(false);
+                            setOutlineOverlay(Number(e.target.value));
+                          }}
+                          className="w-full accent-rose-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer touch-pan-x"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* MANUAL BRUSH & MANUAL ERASE SETTINGS (SIZE + HARDNESS + OVERLAY) */}
+                  {(activeTool === 'brush' || activeTool === 'erase') && (
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                          {activeTool === 'brush'
+                            ? 'Manual Brush Touch-Up'
+                            : 'Manual Erase Touch-Up'}
+                        </span>
+                        {/* Live radial hardness preview dot */}
+                        <div
+                          className="w-5 h-5 rounded-full border border-slate-400/50 shrink-0"
+                          style={{
+                            background:
+                              activeTool === 'brush'
+                                ? `radial-gradient(circle, #10b981 ${Math.round(
+                                    activeBrushConfig.hardness * 0.9
+                                  )}%, transparent 100%)`
+                                : `radial-gradient(circle, #f43f5e ${Math.round(
+                                    activeBrushConfig.hardness * 0.9
+                                  )}%, transparent 100%)`,
+                          }}
+                          title="Brush Edge Falloff Preview"
+                        />
+                      </div>
+
+                      {/* Size */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
+                          <span>{activeTool === 'brush' ? 'Brush Size' : 'Erase Size'}</span>
+                          <span className="font-mono font-bold text-indigo-500 tabular-nums">
+                            {activeBrushConfig.size} px
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="4"
+                          max="72"
+                          step="2"
+                          value={activeBrushConfig.size}
+                          onChange={(e) => setActiveBrushConfig({ size: Number(e.target.value) })}
+                          className="w-full accent-indigo-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer touch-pan-x"
+                        />
+                      </div>
+
+                      {/* Hardness */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
+                          <span>{activeTool === 'brush' ? 'Brush Hardness' : 'Erase Hardness'}</span>
+                          <span className="font-mono font-bold text-emerald-500 tabular-nums">
+                            {activeBrushConfig.hardness}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="2"
+                          value={activeBrushConfig.hardness}
+                          onChange={(e) =>
+                            setActiveBrushConfig({ hardness: Number(e.target.value) })
+                          }
+                          className="w-full accent-emerald-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer touch-pan-x"
+                        />
+                      </div>
+
+                      {/* Overlay */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
+                          <span>{activeTool === 'brush' ? 'Brush Overlay' : 'Erase Overlay'}</span>
+                          <span className="font-mono font-bold text-rose-500 tabular-nums">
+                            {activeBrushConfig.overlay}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="2"
+                          value={activeBrushConfig.overlay}
+                          onChange={(e) => {
+                            setPeekPureCutout(false);
+                            setActiveBrushConfig({ overlay: Number(e.target.value) });
+                          }}
+                          className="w-full accent-rose-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer touch-pan-x"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Overlay Tint Selector + Mask Actions */}
+                  <div className="space-y-2 pt-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                        Overlay Tint Color
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {[
+                          { id: 'rose' as const, bg: 'bg-rose-500', label: 'Red Overlay' },
+                          { id: 'indigo' as const, bg: 'bg-indigo-500', label: 'Indigo Overlay' },
+                          { id: 'emerald' as const, bg: 'bg-emerald-500', label: 'Green Overlay' },
+                        ].map((t) => (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => {
+                              setPeekPureCutout(false);
+                              setOverlayTint(t.id);
+                            }}
+                            title={t.label}
+                            className={`w-5 h-5 rounded-full ${t.bg} border-2 transition-transform ${
+                              overlayTint === t.id
+                                ? 'border-white ring-2 ring-indigo-500 scale-110'
+                                : 'border-transparent opacity-70 hover:opacity-100'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handleMaskQuickAction('all')}
+                        className="py-1.5 px-2 rounded-lg border border-slate-200 dark:border-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300 hover:border-indigo-400 flex items-center justify-center gap-1 whitespace-nowrap"
+                        title="Select Full Image"
+                      >
+                        <CheckSquare className="w-3 h-3 shrink-0" />
+                        <span>Select All</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMaskQuickAction('invert')}
+                        className="py-1.5 px-2 rounded-lg border border-slate-200 dark:border-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300 hover:border-indigo-400 flex items-center justify-center gap-1 whitespace-nowrap"
+                        title="Invert Selected & Excluded Area"
+                      >
+                        <Contrast className="w-3 h-3 shrink-0" />
+                        <span>Invert</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMaskQuickAction('clear')}
+                        className="py-1.5 px-2 rounded-lg border border-slate-200 dark:border-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300 hover:border-rose-400 flex items-center justify-center gap-1 whitespace-nowrap"
+                        title="Clear Mask to Paint Clothe with Brush"
+                      >
+                        <Square className="w-3 h-3 shrink-0" />
+                        <span>Clear</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bottom Undo & Reset */}
+                <div className="pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
                   <button
-                    onClick={handleUndoBrush}
+                    type="button"
+                    onClick={handleUndoMask}
                     disabled={undoCount === 0}
-                    className={`text-[11px] flex items-center gap-1 whitespace-nowrap ${
+                    className={`text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap ${
                       undoCount > 0
-                        ? 'text-slate-600 dark:text-slate-300 hover:text-indigo-500'
+                        ? 'text-slate-700 dark:text-slate-200 hover:text-indigo-500'
                         : 'text-slate-300 dark:text-slate-700 cursor-not-allowed'
                     }`}
                   >
-                    <Undo2 className="w-3 h-3" />
-                    <span>Undo Edit{undoCount > 0 ? ` (${undoCount})` : ''}</span>
+                    <Undo2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Undo{undoCount > 0 ? ` (${undoCount})` : ''}</span>
                   </button>
 
                   <button
-                    onClick={() => {
-                      setSegOptions(DEFAULT_SEGMENTATION_OPTIONS);
-                      setBrushMode('none');
-                      if (rawImageRef.current) processSegmentation(rawImageRef.current, DEFAULT_SEGMENTATION_OPTIONS);
-                    }}
-                    className="text-[11px] text-slate-500 hover:text-indigo-400 flex items-center gap-1 whitespace-nowrap"
+                    type="button"
+                    onClick={() => handleMaskQuickAction('reset')}
+                    className="text-[11px] font-semibold text-slate-500 hover:text-indigo-400 flex items-center gap-1 whitespace-nowrap"
                   >
-                    <RefreshCw className="w-3 h-3" />
+                    <RefreshCw className="w-3.5 h-3.5 shrink-0" />
                     <span>Reset Cutout</span>
                   </button>
                 </div>
@@ -1213,7 +1626,6 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* Left Column: Asset Configuration */}
               <div className="space-y-3.5">
-                {/* Asset Display Name */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
                     Asset Display Name
@@ -1266,7 +1678,9 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                         <Tag className="w-3.5 h-3.5 text-indigo-500" />
                         Cloth Type / Wardrobe Tab Tag
                       </span>
-                      <span className="text-[10px] font-mono text-indigo-500 capitalize">{clothingTag}</span>
+                      <span className="text-[10px] font-mono text-indigo-500 capitalize">
+                        {clothingTag}
+                      </span>
                     </div>
 
                     <div className="flex flex-wrap gap-1.5">
@@ -1289,7 +1703,6 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                       })}
                     </div>
 
-                    {/* Create New Clothing Tag if not in list */}
                     <div className="pt-1.5 border-t border-slate-200/70 dark:border-slate-800">
                       <label className="block text-[10px] font-semibold text-slate-500 mb-1">
                         Not in list? Create a new clothing category tag:
@@ -1375,7 +1788,9 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                   <div>
                     <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
                       <span>Body Proportion Scale</span>
-                      <span className="font-mono text-indigo-500">{defaultScale.toFixed(2)}x</span>
+                      <span className="font-mono text-indigo-500 tabular-nums">
+                        {defaultScale.toFixed(2)}x
+                      </span>
                     </div>
                     <input
                       type="range"
@@ -1384,7 +1799,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                       step="0.02"
                       value={defaultScale}
                       onChange={(e) => setDefaultScale(Number(e.target.value))}
-                      className="w-full accent-indigo-500 h-1.5 mt-2 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer"
+                      className="w-full accent-indigo-500 h-1.5 mt-2 bg-slate-200 dark:bg-slate-800 rounded-lg cursor-pointer touch-pan-x"
                     />
                   </div>
                 </div>
@@ -1464,7 +1879,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
               <div className="flex flex-col items-center justify-center p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 min-h-[360px] relative overflow-hidden">
                 <div className="absolute top-3 inset-x-4 flex items-center justify-between text-[11px] font-semibold text-cyan-400">
                   <span className="flex items-center gap-1.5">
-                    <Wind className="w-3.5 h-3.5 animate-pulse" />
+                    <Wind className="w-3.5 h-3.5" />
                     Live Cloth Mesh &amp; Physics Preview
                   </span>
                   {category === 'clothing' && (
@@ -1494,7 +1909,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
         </div>
 
         {/* Footer Controls */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60">
+        <div className="flex items-center justify-between px-5 sm:px-6 py-3.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60">
           <div>
             {activeStep !== 'source' && (
               <button
@@ -1502,7 +1917,7 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                   if (activeStep === 'configure') setActiveStep('segment');
                   else if (activeStep === 'segment') setActiveStep('source');
                 }}
-                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
               >
                 Back
               </button>
@@ -1515,15 +1930,18 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
                 stopActiveStream();
                 setShowCustomAssetModal(false);
               }}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 whitespace-nowrap"
             >
               Cancel
             </button>
 
             {activeStep === 'segment' && (
               <button
-                onClick={() => setActiveStep('configure')}
-                className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md flex items-center gap-2"
+                onClick={() => {
+                  refreshFinalTrimmedExport();
+                  setActiveStep('configure');
+                }}
+                className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md flex items-center gap-2 whitespace-nowrap"
               >
                 Configure Tag &amp; Mesh →
               </button>
@@ -1532,10 +1950,10 @@ export const CustomAssetCaptureModal: React.FC<Props> = ({ onAssetAdded }) => {
             {activeStep === 'configure' && (
               <button
                 onClick={handleSaveAsset}
-                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-indigo-600 hover:brightness-110 text-white text-xs font-bold shadow-xl flex items-center gap-2"
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-indigo-600 hover:brightness-110 text-white text-xs font-bold shadow-xl flex items-center gap-2 whitespace-nowrap"
               >
-                <Sparkles className="w-4 h-4" />
-                Save Asset &amp; Mesh
+                <Sparkles className="w-4 h-4 shrink-0" />
+                <span>Save Asset &amp; Mesh</span>
               </button>
             )}
           </div>

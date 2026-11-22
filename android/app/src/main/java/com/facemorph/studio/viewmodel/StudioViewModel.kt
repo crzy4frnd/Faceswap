@@ -21,6 +21,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.facemorph.studio.R
 import com.facemorph.studio.engine.BuiltInWardrobeFactory
+import com.facemorph.studio.engine.MlKitLayerSegmentationEngine
 import com.facemorph.studio.engine.NativeAssetSegmenter
 import com.facemorph.studio.engine.NativeClothPhysicsEngine
 import com.facemorph.studio.engine.NativeFaceSwapEngine
@@ -35,6 +36,7 @@ import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.FittedWardrobeLayer
 import com.facemorph.studio.model.LiveCameraConfig
 import com.facemorph.studio.model.Point2D
+import com.facemorph.studio.model.SegmentedTargetLayers
 import com.facemorph.studio.model.SkinSamplePatch
 import com.facemorph.studio.model.SourceFaceMetrics
 import com.facemorph.studio.model.StudioTab
@@ -75,6 +77,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var detectedFaces by mutableStateOf<List<DetectedFaceData>>(emptyList())
     var selectedFaceId by mutableStateOf<String?>(null)
     var adjustments by mutableStateOf(FaceAdjustments())
+    var segmentedTargetLayers by mutableStateOf<SegmentedTargetLayers?>(null)
+    var isSegmentingLayers by mutableStateOf(false)
     var isSkinSamplingMode by mutableStateOf(false)
     var splitCompareEnabled by mutableStateOf(false)
     var splitComparePercent by mutableFloatStateOf(50f)
@@ -303,6 +307,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun clearTargetPhoto() {
         activeTargetId = ""
         targetBitmap = null
+        segmentedTargetLayers = null
+        isSegmentingLayers = false
         detectedFaces = emptyList()
         selectedFaceId = null
         bodySubjectFaceId = null
@@ -310,15 +316,52 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         isSkinSamplingMode = false
         isCutoutBrushMode = false
         clearCutoutMask()
-        adjustments = adjustments.copy(manualSkinPatch = null)
+        adjustments = adjustments.copy(manualSkinPatch = null, hiddenLayerIds = emptySet())
     }
 
     fun rescanTargetFaces() {
         val bmp = targetBitmap ?: return
         viewModelScope.launch(Dispatchers.IO) {
             applyTargetBitmap(bmp)
-            withContext(Dispatchers.Main) { showToast("Faces rescanned") }
+            withContext(Dispatchers.Main) {
+                val count = segmentedTargetLayers?.summary?.totalLayerCount ?: 2
+                showToast("Scanned faces & $count non-destructive layers")
+            }
         }
+    }
+
+    fun resegmentTargetLayers() {
+        val bmp = targetBitmap ?: return
+        val facesSnapshot = detectedFaces
+        val adjSnapshot = adjustments
+        isSegmentingLayers = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val layers = MlKitLayerSegmentationEngine.extractTargetSceneLayers(
+                targetBitmap = bmp,
+                faces = facesSnapshot,
+                autoMaskHair = adjSnapshot.autoMaskHair,
+                autoMaskAccessories = adjSnapshot.autoMaskAccessories,
+                autoMaskObjects = adjSnapshot.autoMaskObjects,
+                preserveTargetLayers = adjSnapshot.preserveTargetLayers
+            )
+            withContext(Dispatchers.Main) {
+                if (targetBitmap === bmp) {
+                    segmentedTargetLayers = layers
+                    val validIds = layers.objectLayers.map { it.id }.toSet()
+                    adjustments = adjustments.copy(
+                        hiddenLayerIds = adjustments.hiddenLayerIds.intersect(validIds)
+                    )
+                    showToast(layers.summary.decisionNote)
+                }
+                isSegmentingLayers = false
+            }
+        }
+    }
+
+    fun toggleCutoutObjectLayer(layerId: String) {
+        val cur = adjustments.hiddenLayerIds
+        val next = if (layerId in cur) cur - layerId else cur + layerId
+        adjustments = adjustments.copy(hiddenLayerIds = next)
     }
 
     private suspend fun applyTargetBitmap(bmp: Bitmap) {
@@ -333,16 +376,27 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             firstFace?.let { it.boxRight - it.boxLeft },
             firstFace?.let { it.boxBottom - it.boxTop }
         )
+        val adjSnapshot = adjustments
+        val layers = MlKitLayerSegmentationEngine.extractTargetSceneLayers(
+            targetBitmap = bmp,
+            faces = faces,
+            autoMaskHair = adjSnapshot.autoMaskHair,
+            autoMaskAccessories = adjSnapshot.autoMaskAccessories,
+            autoMaskObjects = adjSnapshot.autoMaskObjects,
+            preserveTargetLayers = adjSnapshot.preserveTargetLayers
+        )
         withContext(Dispatchers.Main) {
             targetBitmap = bmp
             detectedFaces = faces
+            segmentedTargetLayers = layers
+            isSegmentingLayers = false
             selectedFaceId = firstFace?.id
             bodySubjectFaceId = firstFace?.id
             bodyScan = scan
             isSkinSamplingMode = false
             isCutoutBrushMode = false
             clearCutoutMask()
-            adjustments = adjustments.copy(manualSkinPatch = null)
+            adjustments = adjustments.copy(manualSkinPatch = null, hiddenLayerIds = emptySet())
         }
     }
 

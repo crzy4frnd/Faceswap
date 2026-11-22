@@ -1,5 +1,7 @@
 package com.facemorph.studio.model
 
+import android.graphics.Bitmap
+
 enum class StudioTab(val label: String) {
     FACE_STUDIO("Face Swap"),
     BODY_PHYSICS("Body Studio"),
@@ -28,7 +30,9 @@ data class SourceFaceMetrics(
     val eyeDistRatio: Float,
     val rollDeg: Float,
     val noseYRatio: Float = 0.56f,
-    val mouthYRatio: Float = 0.75f
+    val mouthYRatio: Float = 0.75f,
+    val aspectRatio: Float = 0.86f,
+    val contourNorm: List<Point2D> = emptyList()
 )
 
 data class DetectedFaceData(
@@ -43,7 +47,10 @@ data class DetectedFaceData(
     val enabled: Boolean = true,
     val strength: Int = 100,
     val smileScore: Float = 0.5f,
-    val isLandmarksEdited: Boolean = false
+    val isLandmarksEdited: Boolean = false,
+    val faceContour: List<Point2D> = emptyList(),
+    val leftBrowTop: List<Point2D> = emptyList(),
+    val rightBrowTop: List<Point2D> = emptyList()
 )
 
 data class FaceProfileItem(
@@ -74,22 +81,67 @@ data class VirtualLightConfig(
     val enabled: Boolean = true,
     val directionDeg: Float = 305f,
     val elevationDeg: Float = 38f,
-    val intensity: Float = 0.36f,
-    val warmth: Float = 0.08f
+    val intensity: Float = 0.14f,
+    val warmth: Float = 0.04f
+)
+
+enum class CutoutLayerKind(val label: String) {
+    FOREHEAD("Forehead"),
+    HAIR("Hair"),
+    HAND_FINGER("Hand/Finger"),
+    ACCESSORY("Jewelry/Veil"),
+    OBJECT("Object")
+}
+
+data class CutoutObjectLayer(
+    val id: String,
+    val name: String,
+    val kind: CutoutLayerKind,
+    val zOrder: Int,
+    val coveragePct: Int,
+    val pixelCount: Int,
+    val bitmap: Bitmap
+)
+
+data class LayerSegmentationSummary(
+    val hasHairLayer: Boolean = false,
+    val hasForeheadLayer: Boolean = false,
+    val hasForegroundObjects: Boolean = false,
+    val foregroundCoveragePct: Int = 0,
+    val segmentWidth: Int = 0,
+    val segmentHeight: Int = 0,
+    val totalLayerCount: Int = 2,
+    val objectLayerCount: Int = 0,
+    val handObjectCount: Int = 0,
+    val hairLayerCount: Int = 0,
+    val decisionNote: String = "2 Base Layers"
+)
+
+data class SegmentedTargetLayers(
+    val backgroundLayer: Bitmap,
+    val foreLayer: Bitmap,
+    val summary: LayerSegmentationSummary,
+    val objectLayers: List<CutoutObjectLayer> = emptyList()
 )
 
 data class FaceAdjustments(
     val swapStrength: Int = 100,
     val skinToneMatch: Boolean = true,
-    val featherRadius: Int = 22,
+    val featherRadius: Int = 18,
     val brightness: Float = 0f,
-    val contrast: Float = 14f,
+    val contrast: Float = 10f,
     val saturation: Float = 6f,
     val warmth: Float = 0f,
     val autoMaskHair: Boolean = true,
     val autoMaskAccessories: Boolean = true,
+    val autoMaskObjects: Boolean = true,
+    val preserveTargetLayers: Boolean = true,
+    val showBackgroundLayer: Boolean = true,
+    val showFaceLayer: Boolean = true,
+    val showForeLayers: Boolean = true,
+    val hiddenLayerIds: Set<String> = emptySet(),
     val smartBlend: Boolean = true,
-    val smartBlendIntensity: Int = 78,
+    val smartBlendIntensity: Int = 70,
     val showGeometricMesh: Boolean = false,
     val scale: Float = 1.0f,
     val rotation: Float = 0f,

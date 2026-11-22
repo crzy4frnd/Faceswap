@@ -15,8 +15,13 @@ import {
   Upload,
   Camera,
   Trash2,
+  FlipHorizontal2,
+  ScanFace,
+  AlertTriangle,
+  Plus,
 } from 'lucide-react';
 import { useFaceStudio } from '../context/FaceStudioContext';
+import { classifyFaceAngle } from '../utils/faceEngine';
 import { WebcamCaptureDialog } from './WebcamCaptureDialog';
 
 export const MultiFaceSelector: React.FC = () => {
@@ -30,7 +35,8 @@ export const MultiFaceSelector: React.FC = () => {
     setActiveProfileId,
     assignProfileToFace,
     assignProfileToAllFaces,
-    addFaceFromDataUrl,
+    createPersonProfile,
+    addAngleToProfile,
     removeFaceProfile,
     toggleFaceEnabled,
     rescanFaces,
@@ -38,9 +44,15 @@ export const MultiFaceSelector: React.FC = () => {
     autoAlignFace,
     liveSyncedFaceId,
     syncFaceToLive,
+    adjustments,
+    angleScanResults,
+    scanAndMatchFaceAngle,
+    overrideClosestAngleMatch,
+    flipFaceAndAdjust,
   } = useFaceStudio();
 
   const [aligningFaceId, setAligningFaceId] = useState<string | null>(null);
+  const [scanningFaceId, setScanningFaceId] = useState<string | null>(null);
   const [justSyncedFaceId, setJustSyncedFaceId] = useState<string | null>(null);
   const [alignedInfo, setAlignedInfo] = useState<{
     faceId: string;
@@ -48,18 +60,60 @@ export const MultiFaceSelector: React.FC = () => {
     scale: number;
   } | null>(null);
   const [showFaceCamera, setShowFaceCamera] = useState(false);
+  const [cameraModeTarget, setCameraModeTarget] = useState<'new-person' | 'add-angle'>('new-person');
+  const [cameraAngleProfileId, setCameraAngleProfileId] = useState<string | null>(null);
   const [isAddingFace, setIsAddingFace] = useState(false);
+  const [angleNotice, setAngleNotice] = useState<{
+    type: 'duplicate' | 'success';
+    message: string;
+  } | null>(null);
+
   const faceFileInputRef = useRef<HTMLInputElement>(null);
+  const addAngleFileInputRef = useRef<HTMLInputElement>(null);
+  const uploadAngleProfileIdRef = useRef<string | null>(null);
 
   const handleUploadFaceGallery = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setIsAddingFace(true);
+    setAngleNotice(null);
     const reader = new FileReader();
     reader.onload = async () => {
       if (typeof reader.result === 'string') {
         const cleanName = file.name.replace(/\.[^/.]+$/, '').slice(0, 18);
-        await addFaceFromDataUrl(reader.result, cleanName || undefined, 'Gallery');
+        await createPersonProfile(
+          reader.result,
+          cleanName || `Person ${profiles.length + 1}`,
+          'Gallery'
+        );
+      }
+      setIsAddingFace(false);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const handleUploadAngleForProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const targetProfId = uploadAngleProfileIdRef.current || activeProfileId;
+    if (!file || !targetProfId) return;
+    setIsAddingFace(true);
+    setAngleNotice(null);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result === 'string') {
+        const res = await addAngleToProfile(targetProfId, reader.result, 'Gallery');
+        if (!res.added) {
+          setAngleNotice({
+            type: 'duplicate',
+            message: res.duplicateCheck.reason || 'Duplicate angle photo blocked.',
+          });
+        } else if (res.angle) {
+          setAngleNotice({
+            type: 'success',
+            message: `Added unique "${res.angle.label}" angle to profile.`,
+          });
+        }
       }
       setIsAddingFace(false);
     };
@@ -69,8 +123,29 @@ export const MultiFaceSelector: React.FC = () => {
 
   const handleCaptureFaceCamera = async (dataUrl: string) => {
     setIsAddingFace(true);
-    await addFaceFromDataUrl(dataUrl, `Camera Face ${profiles.length + 1}`, 'Camera');
-    setIsAddingFace(false);
+    setAngleNotice(null);
+    try {
+      if (cameraModeTarget === 'add-angle' && (cameraAngleProfileId || activeProfileId)) {
+        const targetProfId = cameraAngleProfileId || activeProfileId;
+        const res = await addAngleToProfile(targetProfId, dataUrl, 'Camera');
+        if (!res.added) {
+          setAngleNotice({
+            type: 'duplicate',
+            message: res.duplicateCheck.reason || 'Duplicate angle photo blocked.',
+          });
+        } else if (res.angle) {
+          setAngleNotice({
+            type: 'success',
+            message: `Captured unique "${res.angle.label}" angle.`,
+          });
+        }
+      } else {
+        await createPersonProfile(dataUrl, `Person ${profiles.length + 1}`, 'Camera');
+      }
+    } finally {
+      setIsAddingFace(false);
+      setCameraAngleProfileId(null);
+    }
   };
 
   const handleAutoAlign = async (faceId?: string) => {
@@ -94,6 +169,17 @@ export const MultiFaceSelector: React.FC = () => {
     }
   };
 
+  const handleScanAngleMatch = async (faceId?: string, scope: 'current' | 'all' = 'current') => {
+    const targetId = faceId || selectedFaceId || detectedFaces[0]?.id;
+    if (!targetId) return;
+    setScanningFaceId(targetId);
+    try {
+      await scanAndMatchFaceAngle(targetId, scope === 'all' ? '__all__' : undefined);
+    } finally {
+      setScanningFaceId(null);
+    }
+  };
+
   const handleSyncToLive = (faceId?: string) => {
     const targetId = faceId || selectedFaceId || detectedFaces[0]?.id;
     if (!targetId) return;
@@ -107,14 +193,30 @@ export const MultiFaceSelector: React.FC = () => {
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId);
   const activeTargetId = selectedFaceId || detectedFaces[0]?.id;
+  const activeTargetFace = detectedFaces.find((f) => f.id === activeTargetId) || null;
+  const activeScan = activeTargetFace ? angleScanResults[activeTargetFace.id] : undefined;
+  const activeAssignedProfile =
+    profiles.find((p) => p.id === (activeTargetFace?.assignedProfileId || activeProfileId)) ||
+    activeProfile;
+
   const isHeaderAligning = Boolean(aligningFaceId && aligningFaceId === activeTargetId);
+  const isHeaderScanning = Boolean(scanningFaceId && scanningFaceId === activeTargetId);
   const isHeaderAligned = Boolean(alignedInfo && alignedInfo.faceId === activeTargetId);
   const isHeaderLiveSynced = Boolean(liveSyncedFaceId && liveSyncedFaceId === activeTargetId);
   const isHeaderJustSynced = Boolean(justSyncedFaceId && justSyncedFaceId === activeTargetId);
 
+  const isActiveUnmatched =
+    Boolean(adjustments.autoMatchAngle) &&
+    Boolean(activeTargetFace) &&
+    activeTargetFace?.angleMatchStatus === 'unmatched';
+
+  const requiredPose = activeTargetFace
+    ? classifyFaceAngle(activeTargetFace.yaw ?? 0, activeTargetFace.pitch ?? 0)
+    : null;
+
   return (
-    <div className="p-3 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 transition-colors space-y-3">
-      {/* Hidden Gallery Input for Source Faces */}
+    <div className="p-3 bg-transparent transition-colors space-y-3">
+      {/* Hidden Gallery Inputs */}
       <input
         ref={faceFileInputRef}
         type="file"
@@ -122,32 +224,87 @@ export const MultiFaceSelector: React.FC = () => {
         className="hidden"
         onChange={handleUploadFaceGallery}
       />
+      <input
+        ref={addAngleFileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleUploadAngleForProfile}
+      />
 
-      {/* 1. Source Faces Library — Always accessible with Gallery + Camera */}
+      {/* Duplicate / Success Angle Notice */}
+      {angleNotice && (
+        <div
+          className={`px-2.5 py-2 rounded-xl border flex items-center justify-between gap-2 text-[11px] ${
+            angleNotice.type === 'duplicate'
+              ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-400/70 text-amber-900 dark:text-amber-200'
+              : 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-400/70 text-emerald-900 dark:text-emerald-200'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            {angleNotice.type === 'duplicate' ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+            ) : (
+              <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            )}
+            <span className="font-medium truncate">{angleNotice.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAngleNotice(null)}
+            className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+
+      {/* 1. Person Profiles Library with Multi-Angle Counts */}
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <span className="text-xs font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-            Source Faces ({profiles.length})
+            Person Profiles ({profiles.length})
           </span>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+            {activeProfile && (
+              <button
+                type="button"
+                disabled={isAddingFace}
+                onClick={() => {
+                  uploadAngleProfileIdRef.current = activeProfile.id;
+                  addAngleFileInputRef.current?.click();
+                }}
+                className="min-h-[30px] px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+                title={`Add another head angle photo for ${activeProfile.name} (duplicates blocked)`}
+              >
+                <Plus className="w-3 h-3 shrink-0" />
+                <span>+ Angle ({activeProfile.name.split(' ')[0]})</span>
+              </button>
+            )}
+
             <button
               type="button"
               disabled={isAddingFace}
               onClick={() => faceFileInputRef.current?.click()}
-              className="min-h-[32px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
-              title="Add a source face from your gallery"
+              className="min-h-[30px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+              title="Create a new person profile from gallery"
             >
               <Upload className="w-3 h-3 shrink-0" />
-              <span>Gallery</span>
+              <span>New Person</span>
             </button>
 
             <button
               type="button"
               disabled={isAddingFace}
-              onClick={() => setShowFaceCamera(true)}
-              className="min-h-[32px] px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
-              title="Capture a source face with camera"
+              onClick={() => {
+                setCameraModeTarget('new-person');
+                setCameraAngleProfileId(null);
+                setShowFaceCamera(true);
+              }}
+              className="min-h-[30px] px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+              title="Capture a new person face with camera"
             >
               <Camera className="w-3 h-3 shrink-0" />
               <span>Camera</span>
@@ -157,12 +314,13 @@ export const MultiFaceSelector: React.FC = () => {
 
         {profiles.length === 0 ? (
           <div className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-dashed border-slate-300 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
-            Add a source face via <span className="font-semibold text-indigo-600 dark:text-indigo-400">Gallery</span> or <span className="font-semibold text-indigo-600 dark:text-indigo-400">Camera</span> to start swapping.
+            Create a person profile via <span className="font-semibold text-indigo-600 dark:text-indigo-400">New Person</span> or <span className="font-semibold text-indigo-600 dark:text-indigo-400">Camera</span>, then add multiple unique head angles.
           </div>
         ) : (
           <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
             {profiles.map((p) => {
               const isSelected = activeProfileId === p.id;
+              const angleCount = p.angles?.length || 1;
               return (
                 <div
                   key={p.id}
@@ -183,9 +341,14 @@ export const MultiFaceSelector: React.FC = () => {
                     alt={p.name}
                     className="w-7 h-7 rounded-full object-cover border border-indigo-400/50 shrink-0"
                   />
-                  <span className="text-[11px] font-semibold max-w-[90px] truncate whitespace-nowrap">
-                    {p.name}
-                  </span>
+                  <div className="min-w-0">
+                    <span className="block text-[11px] font-semibold max-w-[92px] truncate whitespace-nowrap leading-tight">
+                      {p.name}
+                    </span>
+                    <span className="block text-[9px] font-mono tabular-nums text-slate-500 dark:text-slate-400 whitespace-nowrap leading-tight">
+                      {angleCount} {angleCount === 1 ? 'angle' : 'angles'}
+                    </span>
+                  </div>
                   <button
                     type="button"
                     onClick={(e) => {
@@ -193,7 +356,7 @@ export const MultiFaceSelector: React.FC = () => {
                       removeFaceProfile(p.id);
                     }}
                     aria-label={`Remove ${p.name}`}
-                    title="Delete saved face"
+                    title="Delete person profile"
                     className="p-0.5 rounded text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -205,7 +368,109 @@ export const MultiFaceSelector: React.FC = () => {
         )}
       </div>
 
-      {/* 2. Detected Faces Section */}
+      {/* 2. Missing 96-100% Angle Prompt Banner (Instructs User to Create Matching Face Angle) */}
+      {isActiveUnmatched && activeTargetFace && (
+        <div className="p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-400/70 dark:border-amber-700/70 space-y-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-start gap-2 min-w-0">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="min-w-0 text-[11px]">
+                <p className="font-semibold text-amber-950 dark:text-amber-100 leading-snug">
+                  No {adjustments.minAngleMatchScore}–100% matching angle in{' '}
+                  {activeAssignedProfile?.name || 'profile'} (Closest:{' '}
+                  <span className="font-mono tabular-nums">
+                    {activeScan?.matchScore ?? activeTargetFace.angleMatchScore ?? 0}%
+                  </span>
+                  )
+                </p>
+                <p className="text-amber-800 dark:text-amber-300 mt-0.5 leading-snug">
+                  Create or upload a{' '}
+                  <span className="font-semibold">
+                    {activeScan?.requiredAngleLabel || requiredPose?.label || 'matching'}
+                  </span>{' '}
+                  angle face (Target Yaw{' '}
+                  <span className="font-mono tabular-nums">
+                    {(activeTargetFace.yaw ?? 0) >= 0
+                      ? `+${Math.round(activeTargetFace.yaw ?? 0)}`
+                      : Math.round(activeTargetFace.yaw ?? 0)}
+                    °
+                  </span>
+                  , Pitch{' '}
+                  <span className="font-mono tabular-nums">
+                    {(activeTargetFace.pitch ?? 0) >= 0
+                      ? `+${Math.round(activeTargetFace.pitch ?? 0)}`
+                      : Math.round(activeTargetFace.pitch ?? 0)}
+                    °
+                  </span>
+                  ).
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {activeAssignedProfile && (
+              <>
+                <button
+                  type="button"
+                  disabled={isAddingFace}
+                  onClick={() => {
+                    uploadAngleProfileIdRef.current = activeAssignedProfile.id;
+                    addAngleFileInputRef.current?.click();
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Upload className="w-3 h-3 shrink-0" />
+                  <span>Add Matching Angle (Gallery)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isAddingFace}
+                  onClick={() => {
+                    setCameraModeTarget('add-angle');
+                    setCameraAngleProfileId(activeAssignedProfile.id);
+                    setShowFaceCamera(true);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Camera className="w-3 h-3 shrink-0" />
+                  <span>Capture Angle</span>
+                </button>
+              </>
+            )}
+
+            {profiles.length > 1 && (
+              <button
+                type="button"
+                onClick={() => handleScanAngleMatch(activeTargetFace.id, 'all')}
+                className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <ScanFace className="w-3 h-3 shrink-0" />
+                <span>Scan All People</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => flipFaceAndAdjust(activeTargetFace.id)}
+              className="px-2 py-1 rounded-lg border border-amber-500/60 text-amber-900 dark:text-amber-200 hover:bg-amber-500/15 text-[11px] font-medium flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <FlipHorizontal2 className="w-3 h-3 shrink-0" />
+              <span>Flip &amp; Adjust</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => overrideClosestAngleMatch(activeTargetFace.id)}
+              className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-[11px] font-medium whitespace-nowrap shrink-0 transition-colors"
+            >
+              Use Closest ({activeTargetFace.angleMatchScore ?? '--'}%)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Detected Faces Section */}
       {detectedFaces.length === 0 ? (
         <div className="pt-2 border-t border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-2">
           <span className="text-xs text-slate-500">
@@ -234,6 +499,32 @@ export const MultiFaceSelector: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+              <button
+                type="button"
+                onClick={() => handleScanAngleMatch(activeTargetId, 'all')}
+                disabled={isHeaderScanning || profiles.length === 0}
+                className="text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-indigo-500/50 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-all flex items-center gap-1 whitespace-nowrap disabled:opacity-40"
+                title="Scan all saved person angles to find a 96-100% pose match with the target face"
+              >
+                <ScanFace className={`w-3 h-3 ${isHeaderScanning ? 'animate-spin' : ''}`} />
+                <span>{isHeaderScanning ? 'Scanning...' : `Scan ${adjustments.minAngleMatchScore}–100%`}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => flipFaceAndAdjust(activeTargetId)}
+                disabled={profiles.length === 0}
+                className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg border transition-all flex items-center gap-1 whitespace-nowrap disabled:opacity-40 ${
+                  adjustments.flipHorizontal
+                    ? 'border-fuchsia-500 bg-fuchsia-600 text-white'
+                    : 'border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
+                title="Flip source face horizontally and auto-adjust landmarks to match target face"
+              >
+                <FlipHorizontal2 className="w-3 h-3 shrink-0" />
+                <span>{adjustments.flipHorizontal ? 'Flipped · Adjust' : 'Flip & Adjust'}</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => handleAutoAlign(activeTargetId)}
@@ -270,7 +561,7 @@ export const MultiFaceSelector: React.FC = () => {
                 }`}
                 title="Sync current adjustment settings for the selected face to Live Camera preview in real-time"
               >
-                <Radio className={`w-3 h-3 ${isHeaderLiveSynced ? 'animate-pulse text-rose-500' : ''}`} />
+                <Radio className={`w-3 h-3 ${isHeaderLiveSynced ? 'text-rose-500' : ''}`} />
                 <span>
                   {isHeaderJustSynced
                     ? 'Synced!'
@@ -310,14 +601,16 @@ export const MultiFaceSelector: React.FC = () => {
             {detectedFaces.map((face, index) => {
               const isSelected = selectedFaceId === face.id;
               const assignedProfile = profiles.find((p) => p.id === face.assignedProfileId);
+              const assignedAngle = assignedProfile?.angles?.find((a) => a.id === face.assignedAngleId);
               const isCardAligning = aligningFaceId === face.id;
               const isCardAligned = alignedInfo?.faceId === face.id;
+              const targetAngleInfo = classifyFaceAngle(face.yaw ?? 0, face.pitch ?? 0);
 
               return (
                 <div
                   key={face.id}
                   onClick={() => setSelectedFaceId(face.id)}
-                  className={`min-w-[184px] sm:min-w-[196px] p-2 rounded-xl border transition-all cursor-pointer flex flex-col gap-2 ${
+                  className={`min-w-[196px] sm:min-w-[212px] p-2 rounded-xl border transition-all cursor-pointer flex flex-col gap-2 ${
                     isSelected
                       ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/40 shadow-sm'
                       : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/50 hover:border-slate-300 dark:hover:border-slate-700'
@@ -361,7 +654,28 @@ export const MultiFaceSelector: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Approximate Age & Expression Chip */}
+                  {/* Pose Angle + Match Status Readout */}
+                  <div className="flex items-center justify-between gap-1 text-[10px] font-mono tabular-nums">
+                    <span className="text-slate-600 dark:text-slate-400 truncate">
+                      {targetAngleInfo.label} (Y{Math.round(face.yaw ?? 0)}°)
+                    </span>
+                    {face.angleMatchScore !== undefined && (
+                      <span
+                        className={`font-semibold whitespace-nowrap ${
+                          face.angleMatchStatus === 'matched'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : face.angleMatchStatus === 'unmatched'
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-indigo-600 dark:text-indigo-400'
+                        }`}
+                      >
+                        {face.angleMatchScore}%
+                        {face.angleMatchFlipped ? ' · Flip' : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Approximate Age & Expression */}
                   {(face.estimatedAge !== undefined || face.expression) && (
                     <div className="flex items-center">
                       {(() => {
@@ -402,11 +716,11 @@ export const MultiFaceSelector: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Assigned Profile Indicator */}
+                  {/* Assigned Profile & Matched Angle Indicator */}
                   <div className="flex items-center gap-2">
                     {assignedProfile ? (
                       <img
-                        src={assignedProfile.avatarUrl}
+                        src={assignedAngle?.avatarUrl || assignedProfile.avatarUrl}
                         alt={assignedProfile.name}
                         className="w-8 h-8 rounded-full object-cover border border-indigo-400/50 shrink-0"
                       />
@@ -421,7 +735,13 @@ export const MultiFaceSelector: React.FC = () => {
                         {assignedProfile ? assignedProfile.name : 'Original Face'}
                       </span>
                       <span className="block text-[10px] text-slate-500 truncate">
-                        {assignedProfile ? 'Swapped Face' : 'Untouched'}
+                        {assignedProfile
+                          ? face.angleMatchStatus === 'unmatched'
+                            ? `Need ${targetAngleInfo.label}`
+                            : assignedAngle
+                            ? `Angle: ${assignedAngle.label}`
+                            : 'Swapped Face'
+                          : 'Untouched'}
                       </span>
                     </div>
                   </div>
@@ -472,7 +792,7 @@ export const MultiFaceSelector: React.FC = () => {
                         }}
                         className="w-full py-1 rounded text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-950/70 transition-colors"
                       >
-                        + Add Face to Swap
+                        + Add Person to Swap
                       </button>
                     )}
                   </div>
@@ -483,11 +803,14 @@ export const MultiFaceSelector: React.FC = () => {
         </div>
       )}
 
-      {/* Camera Dialog for Capturing a Source Face */}
+      {/* Camera Dialog for Creating Person or Adding New Angle */}
       <WebcamCaptureDialog
         isOpen={showFaceCamera}
         mode="face"
-        onClose={() => setShowFaceCamera(false)}
+        onClose={() => {
+          setShowFaceCamera(false);
+          setCameraAngleProfileId(null);
+        }}
         onCapture={handleCaptureFaceCamera}
       />
     </div>

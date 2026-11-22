@@ -103,7 +103,8 @@ export async function downloadCanvasImage(
   canvas: HTMLCanvasElement,
   format: 'png' | 'tiff' | 'jpeg',
   scale: number = 1,
-  filename: string = 'facemorph_export'
+  filename: string = 'facemorph_export',
+  options?: { omitTimestamp?: boolean }
 ): Promise<void> {
   let targetCanvas = canvas;
 
@@ -147,7 +148,9 @@ export async function downloadCanvasImage(
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${filename}_${Date.now()}.${extension}`;
+  a.download = options?.omitTimestamp
+    ? `${filename}.${extension}`
+    : `${filename}_${Date.now()}.${extension}`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

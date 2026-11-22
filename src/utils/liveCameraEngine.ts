@@ -317,6 +317,8 @@ export interface AdaptiveSwapQualityProfile {
   useFilterBlur: boolean;
   useSoftLightToneBlend: boolean;
   useDropShadows: boolean;
+  motionBlurPx: number; // computed directional camera-movement blur radius in pixels
+  motionAngleRad: number; // dominant camera motion direction in radians
 }
 
 export function getStaticHighQualityProfile(): AdaptiveSwapQualityProfile {
@@ -329,6 +331,8 @@ export function getStaticHighQualityProfile(): AdaptiveSwapQualityProfile {
     useFilterBlur: true,
     useSoftLightToneBlend: true,
     useDropShadows: true,
+    motionBlurPx: 0,
+    motionAngleRad: 0,
   };
 }
 
@@ -343,7 +347,10 @@ export class CameraMotionAnalyzer {
   private sampleCanvas: HTMLCanvasElement | null = null;
   private sampleCtx: CanvasRenderingContext2D | null = null;
   private prevLuma: Uint8Array | null = null;
+  private currLuma: Uint8Array | null = null;
   private smoothedMotion = 0;
+  private smoothedVx = 0;
+  private smoothedVy = 0;
   private currentMode: SwapQualityMode = 'high';
   private lastModeUpgradeBlockUntil = 0;
 
@@ -353,14 +360,23 @@ export class CameraMotionAnalyzer {
       this.sampleCanvas = document.createElement('canvas');
       this.sampleCanvas.width = this.sampleW;
       this.sampleCanvas.height = this.sampleH;
-      this.sampleCtx = this.sampleCanvas.getContext('2d', { willReadFrequently: true });
+      this.ctxInit();
     }
     return this.sampleCtx;
   }
 
+  private ctxInit(): void {
+    if (this.sampleCanvas) {
+      this.sampleCtx = this.sampleCanvas.getContext('2d', { willReadFrequently: true });
+    }
+  }
+
   public reset(): void {
     this.prevLuma = null;
+    this.currLuma = null;
     this.smoothedMotion = 0;
+    this.smoothedVx = 0;
+    this.smoothedVy = 0;
     this.currentMode = 'high';
     this.lastModeUpgradeBlockUntil = 0;
   }
@@ -372,6 +388,8 @@ export class CameraMotionAnalyzer {
     nowMs: number = performance.now()
   ): AdaptiveSwapQualityProfile {
     let opticalMotion = 0;
+    let estVx = 0;
+    let estVy = 0;
 
     if (isLiveVideoReady && video) {
       const ctx = this.ensureContext();
@@ -383,26 +401,58 @@ export class CameraMotionAnalyzer {
 
           if (!this.prevLuma) {
             this.prevLuma = new Uint8Array(total);
+            this.currLuma = new Uint8Array(total);
             for (let i = 0; i < total; i++) {
               const p = i * 4;
-              this.prevLuma[i] = (pixels[p] * 77 + pixels[p + 1] * 150 + pixels[p + 2] * 29) >> 8;
+              const l = (pixels[p] * 77 + pixels[p + 1] * 150 + pixels[p + 2] * 29) >> 8;
+              this.prevLuma[i] = l;
+              this.currLuma[i] = l;
             }
           } else {
+            if (!this.currLuma) this.currLuma = new Uint8Array(total);
             let diffSum = 0;
             let activeDiffCount = 0;
-            // Stride by 2 pixels for fast frame-to-frame delta
-            for (let i = 0; i < total; i += 2) {
+            for (let i = 0; i < total; i++) {
               const p = i * 4;
               const luma = (pixels[p] * 77 + pixels[p + 1] * 150 + pixels[p + 2] * 29) >> 8;
-              const delta = Math.abs(luma - this.prevLuma[i]);
-              this.prevLuma[i] = luma;
-              diffSum += delta;
-              if (delta > 14) activeDiffCount++;
+              this.currLuma[i] = luma;
+              if (i % 2 === 0) {
+                const delta = Math.abs(luma - this.prevLuma[i]);
+                diffSum += delta;
+                if (delta > 14) activeDiffCount++;
+              }
             }
+
+            // Fast coarse block-matching across central regions to detect camera pan direction
+            let bestDx = 0;
+            let bestDy = 0;
+            let bestSad = Number.MAX_SAFE_INTEGER;
+            for (let sy = -3; sy <= 3; sy += 2) {
+              for (let sx = -3; sx <= 3; sx += 2) {
+                let sad = 0;
+                for (let py = 8; py < this.sampleH - 8; py += 5) {
+                  for (let px = 8; px < this.sampleW - 8; px += 5) {
+                    const idxA = py * this.sampleW + px;
+                    const idxB = (py + sy) * this.sampleW + (px + sx);
+                    sad += Math.abs(this.currLuma[idxA] - this.prevLuma[idxB]);
+                  }
+                }
+                if (sad < bestSad) {
+                  bestSad = sad;
+                  bestDx = sx;
+                  bestDy = sy;
+                }
+              }
+            }
+            estVx = bestDx;
+            estVy = bestDy;
+
+            // Swap luma buffer snapshot for next frame
+            this.prevLuma.set(this.currLuma);
+
             const sampledCount = Math.ceil(total / 2);
             const meanDelta = diffSum / sampledCount;
             const activeRatio = activeDiffCount / sampledCount;
-            // Scale combined delta & moving-pixel ratio onto 0..100 scale
             opticalMotion = Math.min(100, meanDelta * 1.9 + activeRatio * 45);
           }
         } catch {
@@ -412,11 +462,17 @@ export class CameraMotionAnalyzer {
     }
 
     const rawImpulse = Math.min(100, Math.max(opticalMotion, imuImpulse));
-    // Fast attack when motion rises, smooth decay when camera settles
     const alpha = rawImpulse > this.smoothedMotion ? 0.42 : 0.14;
     this.smoothedMotion = this.smoothedMotion * (1 - alpha) + rawImpulse * alpha;
+    this.smoothedVx = this.smoothedVx * 0.65 + estVx * 0.35;
+    this.smoothedVy = this.smoothedVy * 0.65 + estVy * 0.35;
 
-    // Hysteresis switching: drop quality immediately on high motion, wait >=550ms before restoring
+    const motionAngleRad = Math.atan2(this.smoothedVy, this.smoothedVx);
+    const motionBlurPx =
+      this.smoothedMotion >= 5.5
+        ? Math.min(9.5, ((this.smoothedMotion - 5.5) / 36) * 8.5)
+        : 0;
+
     let targetMode: SwapQualityMode = 'high';
     if (this.smoothedMotion >= 22) {
       targetMode = 'light';
@@ -428,7 +484,10 @@ export class CameraMotionAnalyzer {
     if (modeRank[targetMode] < modeRank[this.currentMode]) {
       this.currentMode = targetMode;
       this.lastModeUpgradeBlockUntil = nowMs + 550;
-    } else if (modeRank[targetMode] > modeRank[this.currentMode] && nowMs >= this.lastModeUpgradeBlockUntil) {
+    } else if (
+      modeRank[targetMode] > modeRank[this.currentMode] &&
+      nowMs >= this.lastModeUpgradeBlockUntil
+    ) {
       this.currentMode = targetMode;
       this.lastModeUpgradeBlockUntil = nowMs + 350;
     }
@@ -446,6 +505,8 @@ export class CameraMotionAnalyzer {
         useFilterBlur: false,
         useSoftLightToneBlend: false,
         useDropShadows: false,
+        motionBlurPx,
+        motionAngleRad,
       };
     }
 
@@ -459,6 +520,8 @@ export class CameraMotionAnalyzer {
         useFilterBlur: true,
         useSoftLightToneBlend: false,
         useDropShadows: false,
+        motionBlurPx,
+        motionAngleRad,
       };
     }
 
@@ -471,7 +534,52 @@ export class CameraMotionAnalyzer {
       useFilterBlur: true,
       useSoftLightToneBlend: true,
       useDropShadows: true,
+      motionBlurPx,
+      motionAngleRad,
     };
+  }
+}
+
+/**
+ * Applies GPU-friendly multi-tap directional motion blur strictly onto the morphed face
+ * cutout canvas matching the live video camera movement vector.
+ */
+export function applyDirectionalMotionBlurOnContext(
+  ctx: CanvasRenderingContext2D,
+  faceCanvas: HTMLCanvasElement,
+  cx: number,
+  cy: number,
+  drawW: number,
+  drawH: number,
+  faceRotationDeg: number,
+  blurPx: number,
+  motionAngleRad: number,
+  baseAlpha: number
+): void {
+  if (blurPx < 0.45) {
+    ctx.save();
+    ctx.globalAlpha = baseAlpha;
+    ctx.translate(cx, cy);
+    ctx.rotate((faceRotationDeg * Math.PI) / 180);
+    ctx.drawImage(faceCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore();
+    return;
+  }
+
+  const taps = [-1, -0.66, -0.33, 0, 0.33, 0.66, 1];
+  const weights = [0.08, 0.13, 0.18, 0.22, 0.18, 0.13, 0.08];
+  const ux = Math.cos(motionAngleRad);
+  const uy = Math.sin(motionAngleRad);
+  const rotRad = (faceRotationDeg * Math.PI) / 180;
+
+  for (let i = 0; i < taps.length; i++) {
+    const offset = taps[i] * blurPx;
+    ctx.save();
+    ctx.globalAlpha = baseAlpha * weights[i];
+    ctx.translate(cx + ux * offset, cy + uy * offset);
+    ctx.rotate(rotRad);
+    ctx.drawImage(faceCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore();
   }
 }
 
@@ -1143,6 +1251,267 @@ export class LiveBodyTracker {
     };
   }
 }
+
+export interface TemporalAlphaFrame {
+  width: number;
+  height: number;
+  alpha: Uint8Array;
+  timestamp: number;
+}
+
+export interface BoundaryStabilizerOptions {
+  windowFrames?: number; // clamped 3..5 consecutive frames
+  strengthPct?: number; // 0..100 boundary refinement strength
+  poseSpeedPx?: number; // live camera movement speed for ghost-free damping
+  sensitivityPct?: number; // 0-100% Motion Smoothing sensitivity modulating temporal lock & dynamic-video tolerance
+  faceKey?: string; // supports multi-face video tracking
+  timestampMs?: number;
+  forceReset?: boolean;
+}
+
+export interface BoundaryStabilizerResult {
+  activeFrames: number;
+  windowFrames: number;
+  averagedBorderPixels: number;
+}
+
+function resampleAlphaBilinear(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number
+): Uint8Array {
+  if (srcW === dstW && srcH === dstH) return src;
+  const out = new Uint8Array(dstW * dstH);
+  const scaleX = srcW > 1 && dstW > 1 ? (srcW - 1) / (dstW - 1) : 1;
+  const scaleY = srcH > 1 && dstH > 1 ? (srcH - 1) / (dstH - 1) : 1;
+
+  for (let y = 0; y < dstH; y++) {
+    const sy = y * scaleY;
+    const y0 = Math.floor(sy);
+    const y1 = Math.min(srcH - 1, y0 + 1);
+    const fy = sy - y0;
+    const invFy = 1 - fy;
+    const row0 = y0 * srcW;
+    const row1 = y1 * srcW;
+
+    for (let x = 0; x < dstW; x++) {
+      const sx = x * scaleX;
+      const x0 = Math.floor(sx);
+      const x1 = Math.min(srcW - 1, x0 + 1);
+      const fx = sx - x0;
+      const invFx = 1 - fx;
+
+      const a00 = src[row0 + x0];
+      const a10 = src[row0 + x1];
+      const a01 = src[row1 + x0];
+      const a11 = src[row1 + x1];
+
+      const v =
+        a00 * invFx * invFy +
+        a10 * fx * invFy +
+        a01 * invFx * fy +
+        a11 * fx * fy;
+      out[y * dstW + x] = Math.max(0, Math.min(255, Math.round(v)));
+    }
+  }
+  return out;
+}
+
+/**
+ * Temporal stabilizer for boundary refinement in video and live camera output.
+ * Averages boundary alpha-matte values across a sliding window of 3–5 consecutive frames
+ * to eliminate inter-frame edge chatter, quantization shimmer, and perimeter flickering.
+ */
+export class BoundaryMatteTemporalStabilizer {
+  private queues: Map<string, TemporalAlphaFrame[]> = new Map();
+
+  public reset(faceKey?: string): void {
+    if (faceKey) {
+      this.queues.delete(faceKey);
+    } else {
+      this.queues.clear();
+    }
+  }
+
+  public stabilizeMaskRgba(
+    maskRgba: Uint8ClampedArray,
+    width: number,
+    height: number,
+    options: BoundaryStabilizerOptions = {}
+  ): BoundaryStabilizerResult {
+    const windowFrames = Math.max(3, Math.min(5, Math.round(options.windowFrames ?? 4)));
+    if (width < 4 || height < 4) {
+      return { activeFrames: 0, windowFrames, averagedBorderPixels: 0 };
+    }
+
+    const faceKey = options.faceKey || 'default';
+    const nowMs = options.timestampMs ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const strength = Math.max(0, Math.min(1, (options.strengthPct ?? 78) / 100));
+    const poseSpeedPx = Math.max(0, options.poseSpeedPx ?? 0);
+
+    let queue = this.queues.get(faceKey);
+    if (!queue || options.forceReset) {
+      queue = [];
+      this.queues.set(faceKey, queue);
+    }
+
+    // Reset stale ring buffer if stream paused > 650ms or drastic scene dimension jump (> 45%)
+    if (queue.length > 0) {
+      const latest = queue[queue.length - 1];
+      const dt = nowMs - latest.timestamp;
+      const wRatio = Math.abs(width - latest.width) / Math.max(1, latest.width);
+      const hRatio = Math.abs(height - latest.height) / Math.max(1, latest.height);
+      if (dt > 650 || dt < -50 || wRatio > 0.45 || hRatio > 0.45) {
+        queue = [];
+        this.queues.set(faceKey, queue);
+      }
+    }
+
+    const total = width * height;
+    const currentAlpha = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+      currentAlpha[i] = maskRgba[i * 4 + 3];
+    }
+
+    // Resample prior frames cleanly if minor scale/zoom drift occurred
+    if (queue.length > 0) {
+      for (let q = 0; q < queue.length; q++) {
+        if (queue[q].width !== width || queue[q].height !== height) {
+          queue[q] = {
+            width,
+            height,
+            alpha: resampleAlphaBilinear(queue[q].alpha, queue[q].width, queue[q].height, width, height),
+            timestamp: queue[q].timestamp,
+          };
+        }
+      }
+    }
+
+    queue.push({
+      width,
+      height,
+      alpha: currentAlpha,
+      timestamp: nowMs,
+    });
+    while (queue.length > windowFrames) {
+      queue.shift();
+    }
+
+    const count = queue.length;
+    if (count < 2) {
+      return { activeFrames: count, windowFrames, averagedBorderPixels: 0 };
+    }
+
+    // Motion-adaptive damping avoids trailing alpha ghosts on extreme head whips,
+    // scaled by Motion Smoothing sensitivity when capturing dynamic video.
+    const sensNorm =
+      options.sensitivityPct !== undefined
+        ? Math.max(0.15, Math.min(1, options.sensitivityPct / 100))
+        : 0.55;
+    const motionGatePx = 12 + sensNorm * 18;
+    const motionDamp = poseSpeedPx > 0.5 ? Math.exp(-Math.pow(poseSpeedPx / motionGatePx, 2)) : 1;
+    const stabilizationWeight = (0.38 + 0.40 * strength + 0.22 * sensNorm) * motionDamp;
+    if (stabilizationWeight <= 0.02) {
+      return { activeFrames: count, windowFrames, averagedBorderPixels: 0 };
+    }
+
+    const invCount = 1 / count;
+    let averagedBorderPixels = 0;
+
+    for (let i = 0; i < total; i++) {
+      const curr = currentAlpha[i];
+      let sum = 0;
+      for (let f = 0; f < count; f++) {
+        sum += queue[f].alpha[i];
+      }
+      const avg = sum * invCount;
+
+      // Focus temporal smoothing on the boundary transition band & jittering edge pixels,
+      // keeping pure opaque core and pure exterior crisp.
+      const isTransitionBand = (curr > 1 && curr < 254) || (avg > 1 && avg < 254);
+      const hasEdgeDelta = Math.abs(avg - curr) >= 1.25;
+      if (!isTransitionBand && !hasEdgeDelta) continue;
+
+      const stabilized = curr + (avg - curr) * stabilizationWeight;
+      maskRgba[i * 4 + 3] = Math.max(0, Math.min(255, Math.round(stabilized)));
+      averagedBorderPixels++;
+    }
+
+    return {
+      activeFrames: count,
+      windowFrames,
+      averagedBorderPixels,
+    };
+  }
+}
+
+/**
+ * Real-time perimeter boundary refinement for Live Camera face cutouts:
+ * applies C² quintic alpha shaping and luminance-based edge matching against the underlying
+ * video frame so borders integrate seamlessly with skin lighting before temporal stabilization.
+ */
+export function applyLiveBoundaryLuminanceMatch(
+  faceData: Uint8ClampedArray,
+  targetBgData: Uint8ClampedArray,
+  maskData: Uint8ClampedArray,
+  w: number,
+  h: number,
+  strengthPct: number
+): void {
+  const str = Math.max(0, Math.min(1, strengthPct / 100));
+  if (str <= 0.02 || w < 8 || h < 8) return;
+
+  const cx = w * 0.5;
+  const cy = h * 0.5;
+  const invRx = 1 / Math.max(1, w * 0.5);
+  const invRy = 1 / Math.max(1, h * 0.5);
+
+  for (let y = 0; y < h; y++) {
+    const dy = (y - cy) * invRy;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const p = i * 4;
+      const a0 = maskData[p + 3] / 255;
+      if (a0 <= 0.005) continue;
+
+      const dx = (x - cx) * invRx;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Quintic alpha smoothing along rim transition
+      let aFinal = a0;
+      if (dist > 0.64 || a0 < 0.96) {
+        const quintic = a0 * a0 * a0 * (a0 * (a0 * 6 - 15) + 10);
+        const rimFactor = dist > 0.64 ? Math.min(1, (dist - 0.64) / 0.34) : 0.72;
+        aFinal = a0 * (1 - 0.5 * str * rimFactor) + quintic * (0.5 * str * rimFactor);
+        maskData[p + 3] = Math.max(0, Math.min(255, Math.round(aFinal * 255)));
+      }
+
+      const radialRim = dist > 0.62 ? Math.min(1, (dist - 0.62) / 0.36) : 0;
+      const alphaRim = aFinal < 0.97 ? Math.pow(1 - aFinal, 1.05) : 0;
+      const edgeWeight = Math.max(radialRim * 0.48, alphaRim * 0.9) * str;
+      if (edgeWeight <= 0.02) continue;
+
+      const sr = faceData[p];
+      const sg = faceData[p + 1];
+      const sb = faceData[p + 2];
+      const tr = targetBgData[p];
+      const tg = targetBgData[p + 1];
+      const tb = targetBgData[p + 2];
+
+      const sLum = Math.max(6, 0.299 * sr + 0.587 * sg + 0.114 * sb);
+      const tLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
+      const gain = 1 + (Math.max(0.7, Math.min(1.38, tLum / sLum)) - 1) * Math.min(0.82, edgeWeight * 0.8);
+      const chromaBlend = Math.min(0.45, edgeWeight * 0.42);
+
+      faceData[p] = Math.max(0, Math.min(255, Math.round(sr * gain * (1 - chromaBlend) + tr * chromaBlend)));
+      faceData[p + 1] = Math.max(0, Math.min(255, Math.round(sg * gain * (1 - chromaBlend) + tg * chromaBlend)));
+      faceData[p + 2] = Math.max(0, Math.min(255, Math.round(sb * gain * (1 - chromaBlend) + tb * chromaBlend)));
+    }
+  }
+}
+
 
 
 
