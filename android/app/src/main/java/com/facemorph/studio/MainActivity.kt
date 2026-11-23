@@ -5,9 +5,11 @@ import android.app.Activity
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -22,17 +24,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessibilityNew
-import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checkroom
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
@@ -80,6 +84,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
 
         setContent {
             val palette = darkColorScheme(
@@ -144,12 +152,15 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
         containerColor = Color(0xFF020617),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            Column {
+            Column(
+                modifier = Modifier
+                    .background(Color(0xFF0A0F1E))
+                    .statusBarsPadding()
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(44.dp)
-                        .background(Color(0xFF0A0F1E))
+                        .height(48.dp)
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -157,8 +168,8 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(26.dp)
-                                .clip(RoundedCornerShape(7.dp))
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(8.dp))
                                 .background(Color(0xFF4F46E5)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -182,16 +193,16 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(9.dp))
                                 .background(Color(0xFF1E1B4B))
-                                .border(1.dp, Color(0xFF6366F1), RoundedCornerShape(8.dp))
+                                .border(1.dp, Color(0xFF6366F1), RoundedCornerShape(9.dp))
                                 .clickable { studioViewModel.showFaceProfileManager = true }
-                                .padding(horizontal = 9.dp, vertical = 5.dp)
+                                .padding(horizontal = 10.dp, vertical = 7.dp)
                         ) {
                             Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
@@ -207,15 +218,15 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(9.dp))
                                     .background(Color(0xFF111827))
-                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
                                     .clickable { studioViewModel.showCustomAssetDialog = true }
-                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
                             ) {
-                                Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
                                 Spacer(Modifier.width(5.dp))
-                                Text("Scan Item", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Cutout", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -224,11 +235,15 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
             }
         },
         bottomBar = {
-            Column {
+            Column(
+                modifier = Modifier
+                    .background(Color(0xFF0A0F1E))
+                    .navigationBarsPadding()
+            ) {
                 HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
                 NavigationBar(
                     containerColor = Color(0xFF0A0F1E),
-                    modifier = Modifier.height(58.dp)
+                    modifier = Modifier.height(62.dp)
                 ) {
                     StudioTab.entries.forEach { tab ->
                         val icon = when (tab) {
@@ -240,7 +255,7 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
                         NavigationBarItem(
                             selected = studioViewModel.activeTab == tab,
                             onClick = { studioViewModel.activeTab = tab },
-                            icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(19.dp)) },
+                            icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(20.dp)) },
                             label = { Text(tab.label, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = Color.White,

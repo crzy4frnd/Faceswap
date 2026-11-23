@@ -10,9 +10,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -775,151 +774,189 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
             contentAlignment = Alignment.Center
         ) {
             if (renderedBitmap != null) {
+                var lastCanvasTapTimeMs by remember { mutableStateOf(0L) }
+                var lastCanvasTapPos by remember { mutableStateOf(Offset.Zero) }
+
+                fun applyCanvasViewportTransform(
+                    centroid: Offset,
+                    panDelta: Offset,
+                    zoomDelta: Float,
+                    canvasSize: IntSize
+                ) {
+                    val prevZoom = latestZoom
+                    val nextZoom = (prevZoom * zoomDelta).coerceIn(1f, 5f)
+                    val cx = canvasSize.width / 2f
+                    val cy = canvasSize.height / 2f
+                    val scaleRatio = nextZoom / prevZoom
+                    val newPanX = (centroid.x - cx) - ((centroid.x - cx) - latestPan.x) * scaleRatio + panDelta.x
+                    val newPanY = (centroid.y - cy) - ((centroid.y - cy) - latestPan.y) * scaleRatio + panDelta.y
+                    viewportZoom = nextZoom
+                    if (nextZoom <= 1.02f) {
+                        viewportPan = Offset.Zero
+                    } else {
+                        val maxX = canvasSize.width * (nextZoom - 1f) * 0.6f
+                        val maxY = canvasSize.height * (nextZoom - 1f) * 0.6f
+                        viewportPan = Offset(
+                            newPanX.coerceIn(-maxX, maxX),
+                            newPanY.coerceIn(-maxY, maxY)
+                        )
+                    }
+                }
+
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
                         .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = { tapOffset ->
-                                    if (latestSamplingMode) {
-                                        sampleSkinAtPointer(
-                                            pos = tapOffset,
-                                            canvasW = size.width.toFloat(),
-                                            canvasH = size.height.toFloat(),
-                                            requireInsideBounds = true
-                                        )
-                                    } else if (latestCutoutMode) {
-                                        val imgPt = screenToImagePos(tapOffset, size.width.toFloat(), size.height.toFloat())
-                                        if (imgPt != null) {
-                                            viewModel.beginCutoutStroke()
-                                            viewModel.paintCutoutStrokeSegment(imgPt.x, imgPt.y, imgPt.x, imgPt.y)
+                            awaitEachGesture {
+                                val firstDown = awaitFirstDown(requireUnconsumed = false)
+                                val downPos = firstDown.position
+                                val downTime = System.currentTimeMillis()
+                                var isMultiTouch = false
+                                var tapCandidate = true
+                                var strokeBegun = false
+                                var prevCentroid: Offset? = null
+                                var prevSpan = 0f
+                                var prevSinglePos = downPos
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val pressed = event.changes.filter { it.pressed }
+
+                                    if (pressed.isEmpty()) {
+                                        lastBrushImgPos = null
+                                        brushCursorImgPos = null
+                                        if (tapCandidate && !isMultiTouch) {
+                                            if (latestSamplingMode) {
+                                                sampleSkinAtPointer(
+                                                    pos = downPos,
+                                                    canvasW = size.width.toFloat(),
+                                                    canvasH = size.height.toFloat(),
+                                                    requireInsideBounds = true
+                                                )
+                                            } else if (latestCutoutMode) {
+                                                val imgPt = screenToImagePos(downPos, size.width.toFloat(), size.height.toFloat())
+                                                if (imgPt != null) {
+                                                    viewModel.beginCutoutStroke()
+                                                    viewModel.paintCutoutStrokeSegment(imgPt.x, imgPt.y, imgPt.x, imgPt.y)
+                                                }
+                                            } else {
+                                                val dt = downTime - lastCanvasTapTimeMs
+                                                val distPrev = hypot(downPos.x - lastCanvasTapPos.x, downPos.y - lastCanvasTapPos.y)
+                                                if (dt in 40L..320L && distPrev < 64f) {
+                                                    if (latestZoom > 1.1f) {
+                                                        viewportZoom = 1f
+                                                        viewportPan = Offset.Zero
+                                                    } else {
+                                                        val cx = size.width / 2f
+                                                        val cy = size.height / 2f
+                                                        val newZoom = 2.4f
+                                                        viewportPan = Offset(
+                                                            (cx - downPos.x) * (newZoom - 1f) * 0.6f,
+                                                            (cy - downPos.y) * (newZoom - 1f) * 0.6f
+                                                        )
+                                                        viewportZoom = newZoom
+                                                    }
+                                                    lastCanvasTapTimeMs = 0L
+                                                } else {
+                                                    lastCanvasTapTimeMs = downTime
+                                                    lastCanvasTapPos = downPos
+                                                }
+                                            }
                                         }
+                                        break
                                     }
-                                },
-                                onDoubleTap = { tapOffset ->
-                                    if (viewportZoom > 1.1f) {
-                                        viewportZoom = 1f
-                                        viewportPan = Offset.Zero
-                                    } else {
-                                        val cx = size.width / 2f
-                                        val cy = size.height / 2f
-                                        val newZoom = 2.25f
-                                        viewportPan = Offset(
-                                            (cx - tapOffset.x) * (newZoom - 1f) * 0.6f,
-                                            (cy - tapOffset.y) * (newZoom - 1f) * 0.6f
-                                        )
-                                        viewportZoom = newZoom
-                                    }
-                                }
-                            )
-                        }
-                        .pointerInput(adj.showGeometricMesh, isSamplingSkin, isCutoutBrush) {
-                            if (adj.showGeometricMesh || isSamplingSkin || isCutoutBrush) {
-                                detectDragGestures(
-                                    onDragStart = { startPos ->
+
+                                    if (pressed.size >= 2) {
+                                        // 2-finger pinch-to-zoom & pan ALWAYS active across every tool!
+                                        isMultiTouch = true
+                                        tapCandidate = false
+                                        lastBrushImgPos = null
+                                        brushCursorImgPos = null
+                                        val p0 = pressed[0].position
+                                        val p1 = pressed[1].position
+                                        val centroid = Offset((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f)
+                                        val span = hypot(p1.x - p0.x, p1.y - p0.y).coerceAtLeast(12f)
+                                        if (prevCentroid != null && prevSpan > 0f) {
+                                            val zoomDelta = (span / prevSpan).coerceIn(0.7f, 1.4f)
+                                            val panDelta = centroid - prevCentroid!!
+                                            applyCanvasViewportTransform(centroid, panDelta, zoomDelta, size)
+                                        }
+                                        prevCentroid = centroid
+                                        prevSpan = span
+                                        pressed.forEach { it.consume() }
+                                    } else if (!isMultiTouch && pressed.size == 1) {
+                                        val ch = pressed[0]
+                                        val pos = ch.position
+                                        val distMoved = hypot(pos.x - downPos.x, pos.y - downPos.y)
+                                        if (distMoved > 7f) tapCandidate = false
+                                        val dragAmount = pos - prevSinglePos
+
                                         if (latestCutoutMode) {
-                                            val imgPt = screenToImagePos(startPos, size.width.toFloat(), size.height.toFloat())
+                                            val imgPt = screenToImagePos(pos, size.width.toFloat(), size.height.toFloat())
                                             if (imgPt != null) {
-                                                viewModel.beginCutoutStroke()
-                                                viewModel.paintCutoutStrokeSegment(imgPt.x, imgPt.y, imgPt.x, imgPt.y)
+                                                if (!strokeBegun && distMoved > 3f) {
+                                                    val startImg = screenToImagePos(downPos, size.width.toFloat(), size.height.toFloat()) ?: imgPt
+                                                    viewModel.beginCutoutStroke()
+                                                    viewModel.paintCutoutStrokeSegment(startImg.x, startImg.y, imgPt.x, imgPt.y)
+                                                    strokeBegun = true
+                                                } else if (strokeBegun) {
+                                                    val prev = lastBrushImgPos ?: imgPt
+                                                    viewModel.paintCutoutStrokeSegment(prev.x, prev.y, imgPt.x, imgPt.y)
+                                                }
                                                 lastBrushImgPos = imgPt
                                                 brushCursorImgPos = imgPt
                                             }
+                                            ch.consume()
                                         } else if (latestSamplingMode) {
-                                            sampleSkinAtPointer(
-                                                pos = startPos,
-                                                canvasW = size.width.toFloat(),
-                                                canvasH = size.height.toFloat(),
-                                                requireInsideBounds = false
-                                            )
-                                        }
-                                    },
-                                    onDragEnd = {
-                                        lastBrushImgPos = null
-                                        brushCursorImgPos = null
-                                    },
-                                    onDragCancel = {
-                                        lastBrushImgPos = null
-                                        brushCursorImgPos = null
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        if (latestCutoutMode) {
-                                            val imgPt = screenToImagePos(change.position, size.width.toFloat(), size.height.toFloat())
-                                            if (imgPt != null) {
-                                                val prev = lastBrushImgPos ?: imgPt
-                                                viewModel.paintCutoutStrokeSegment(prev.x, prev.y, imgPt.x, imgPt.y)
-                                                lastBrushImgPos = imgPt
-                                                brushCursorImgPos = imgPt
+                                            if (distMoved > 3f) {
+                                                sampleSkinAtPointer(
+                                                    pos = pos,
+                                                    canvasW = size.width.toFloat(),
+                                                    canvasH = size.height.toFloat(),
+                                                    requireInsideBounds = false
+                                                )
                                             }
-                                            return@detectDragGestures
-                                        }
-                                        if (latestSamplingMode) {
-                                            sampleSkinAtPointer(
-                                                pos = change.position,
-                                                canvasW = size.width.toFloat(),
-                                                canvasH = size.height.toFloat(),
-                                                requireInsideBounds = false
-                                            )
-                                            return@detectDragGestures
-                                        }
-                                        if (!latestShowMesh) return@detectDragGestures
-                                        val bmp = latestTargetBmp ?: return@detectDragGestures
-                                        val selId = latestSelectedFaceId ?: latestFaces.firstOrNull()?.id ?: return@detectDragGestures
-                                        val bw = bmp.width.toFloat()
-                                        val bh = bmp.height.toFloat()
-                                        val baseScale = min(size.width / bw, size.height / bh)
-                                        val scale = baseScale * latestZoom
-                                        val drawW = bw * scale
-                                        val drawH = bh * scale
-                                        val left = (size.width - drawW) / 2f + latestPan.x
-                                        val top = (size.height - drawH) / 2f + latestPan.y
-                                        val dxImg = dragAmount.x / scale
-                                        val dyImg = dragAmount.y / scale
-                                        val tapX = (change.position.x - left) / scale
-                                        val tapY = (change.position.y - top) / scale
-
-                                        val f = latestFaces.find { it.id == selId }
-                                        if (f != null) {
-                                            val lm = f.landmarks
-                                            val pts = listOf(
-                                                "forehead" to lm.forehead,
-                                                "leftEye" to lm.leftEye,
-                                                "rightEye" to lm.rightEye,
-                                                "nose" to lm.nose,
-                                                "lips" to lm.lips,
-                                                "chin" to lm.chin
-                                            )
-                                            val nearest = pts.minByOrNull { (_, p) ->
-                                                hypot((p.x - tapX).toDouble(), (p.y - tapY).toDouble())
+                                            ch.consume()
+                                        } else if (latestShowMesh) {
+                                            val bmp = latestTargetBmp
+                                            val selId = latestSelectedFaceId ?: latestFaces.firstOrNull()?.id
+                                            if (bmp != null && selId != null && (dragAmount.x != 0f || dragAmount.y != 0f)) {
+                                                val bw = bmp.width.toFloat()
+                                                val bh = bmp.height.toFloat()
+                                                val baseScale = min(size.width / bw, size.height / bh)
+                                                val scale = baseScale * latestZoom
+                                                val drawW = bw * scale
+                                                val drawH = bh * scale
+                                                val left = (size.width - drawW) / 2f + latestPan.x
+                                                val top = (size.height - drawH) / 2f + latestPan.y
+                                                val dxImg = dragAmount.x / scale
+                                                val dyImg = dragAmount.y / scale
+                                                val tapX = (pos.x - left) / scale
+                                                val tapY = (pos.y - top) / scale
+                                                val f = latestFaces.find { it.id == selId }
+                                                if (f != null) {
+                                                    val lm = f.landmarks
+                                                    val pts = listOf(
+                                                        "forehead" to lm.forehead,
+                                                        "leftEye" to lm.leftEye,
+                                                        "rightEye" to lm.rightEye,
+                                                        "nose" to lm.nose,
+                                                        "lips" to lm.lips,
+                                                        "chin" to lm.chin
+                                                    )
+                                                    val nearest = pts.minByOrNull { (_, p) ->
+                                                        hypot((p.x - tapX).toDouble(), (p.y - tapY).toDouble())
+                                                    }
+                                                    if (nearest != null) activeLandmarkKey = nearest.first
+                                                    viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, dxImg, dyImg)
+                                                }
                                             }
-                                            if (nearest != null) activeLandmarkKey = nearest.first
-                                            viewModel.nudgeFaceLandmark(selId, activeLandmarkKey, dxImg, dyImg)
+                                            ch.consume()
+                                        } else if (latestZoom > 1.02f && distMoved > 6f) {
+                                            applyCanvasViewportTransform(pos, dragAmount, 1f, size)
+                                            ch.consume()
                                         }
-                                    }
-                                )
-                            } else {
-                                detectTransformGestures { centroid, panDelta, zoomDelta, _ ->
-                                    val prevZoom = latestZoom
-                                    val nextZoom = (prevZoom * zoomDelta).coerceIn(1f, 4f)
-                                    val allowSinglePan = nextZoom > 1.02f
-                                    val effectivePan = if (zoomDelta != 1f || allowSinglePan) panDelta else Offset.Zero
-                                    val cx = size.width / 2f
-                                    val cy = size.height / 2f
-                                    val scaleRatio = nextZoom / prevZoom
-                                    val newPanX = (centroid.x - cx) - ((centroid.x - cx) - latestPan.x) * scaleRatio + effectivePan.x
-                                    val newPanY = (centroid.y - cy) - ((centroid.y - cy) - latestPan.y) * scaleRatio + effectivePan.y
-
-                                    viewportZoom = nextZoom
-                                    if (nextZoom <= 1.02f) {
-                                        viewportPan = Offset.Zero
-                                    } else {
-                                        val maxX = size.width * (nextZoom - 1f) * 0.55f
-                                        val maxY = size.height * (nextZoom - 1f) * 0.55f
-                                        viewportPan = Offset(
-                                            newPanX.coerceIn(-maxX, maxX),
-                                            newPanY.coerceIn(-maxY, maxY)
-                                        )
+                                        prevSinglePos = pos
                                     }
                                 }
                             }

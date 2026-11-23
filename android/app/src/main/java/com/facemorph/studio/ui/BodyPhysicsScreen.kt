@@ -9,8 +9,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -63,6 +63,8 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -98,6 +100,10 @@ fun BodyPhysicsScreen(viewModel: StudioViewModel) {
     var isDeckExpanded by remember { mutableStateOf(true) }
     var simTimeSec by remember { mutableFloatStateOf(0f) }
     var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    var viewportZoom by remember { mutableFloatStateOf(1f) }
+    var viewportPan by remember { mutableStateOf(Offset.Zero) }
+    var lastTapTimeMs by remember { mutableStateOf(0L) }
+    var lastTapPos by remember { mutableStateOf(Offset.Zero) }
 
     val galleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { viewModel.loadTargetFromUri(it) }
@@ -237,37 +243,63 @@ fun BodyPhysicsScreen(viewModel: StudioViewModel) {
             }
         }
 
-        // Cloth Physics Canvas
+        // Cloth Physics Canvas (Pinch-Zoom + Pan + 1-finger Cloth Drape)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .clipToBounds()
                 .background(Color(0xFF060A13)),
             contentAlignment = Alignment.Center
         ) {
             if (renderedFrame != null) {
+                fun applyBodyViewportTransform(
+                    centroid: Offset,
+                    panDelta: Offset,
+                    zoomDelta: Float,
+                    canvasSize: IntSize
+                ) {
+                    val prevZ = viewportZoom
+                    val nextZ = (prevZ * zoomDelta).coerceIn(1f, 4f)
+                    val cx = canvasSize.width * 0.5f
+                    val cy = canvasSize.height * 0.5f
+                    val ratio = nextZ / prevZ
+                    val nx = (centroid.x - cx) - ((centroid.x - cx) - viewportPan.x) * ratio + panDelta.x
+                    val ny = (centroid.y - cy) - ((centroid.y - cy) - viewportPan.y) * ratio + panDelta.y
+                    viewportZoom = nextZ
+                    if (nextZ <= 1.02f) {
+                        viewportPan = Offset.Zero
+                    } else {
+                        val maxX = canvasSize.width * (nextZ - 1f) * 0.6f
+                        val maxY = canvasSize.height * (nextZ - 1f) * 0.6f
+                        viewportPan = Offset(nx.coerceIn(-maxX, maxX), ny.coerceIn(-maxY, maxY))
+                    }
+                }
+
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(viewModel.selectedWardrobeId) {
-                            detectTransformGestures { _, _, zoom, _ ->
-                                if (zoom != 1f) {
-                                    val activeLayer = viewModel.fittedLayers.find { it.assetId == viewModel.selectedWardrobeId }
-                                    if (activeLayer != null) {
-                                        viewModel.updateActiveLayerScale(exactScale = activeLayer.scale * zoom)
-                                    }
-                                }
-                            }
-                        }
                         .pointerInput(viewModel.selectedWardrobeId, renderedFrame.width, renderedFrame.height) {
-                            detectDragGestures(
-                                onDragStart = { startOffset ->
-                                    val mesh = clothMeshes[viewModel.selectedWardrobeId] ?: return@detectDragGestures
-                                    val bw = renderedFrame.width.toFloat()
-                                    val bh = renderedFrame.height.toFloat()
-                                    val scale = min(size.width / bw, size.height / bh)
-                                    val imgX = (startOffset.x - (size.width - bw * scale) / 2f) / scale
-                                    val imgY = (startOffset.y - (size.height - bh * scale) / 2f) / scale
+                            awaitEachGesture {
+                                val firstDown = awaitFirstDown(requireUnconsumed = false)
+                                val downPos = firstDown.position
+                                val downTime = System.currentTimeMillis()
+                                var isMultiTouch = false
+                                var tapCandidate = true
+                                var prevCentroid: Offset? = null
+                                var prevSpan = 0f
+                                var prevSinglePos = downPos
+
+                                val bw = renderedFrame.width.toFloat()
+                                val bh = renderedFrame.height.toFloat()
+                                val baseScale = min(size.width / bw, size.height / bh)
+                                val curScale = baseScale * viewportZoom
+                                val left = (size.width - bw * curScale) * 0.5f + viewportPan.x
+                                val top = (size.height - bh * curScale) * 0.5f + viewportPan.y
+                                val mesh = clothMeshes[viewModel.selectedWardrobeId]
+                                if (mesh != null) {
+                                    val imgX = (downPos.x - left) / curScale
+                                    val imgY = (downPos.y - top) / curScale
                                     var bestIdx: Int? = null
                                     var bestDist = 140f
                                     mesh.particles.forEachIndexed { idx, p ->
@@ -282,35 +314,109 @@ fun BodyPhysicsScreen(viewModel: StudioViewModel) {
                                     mesh.grabbedIndex = bestIdx
                                     mesh.grabbedX = imgX
                                     mesh.grabbedY = imgY
-                                },
-                                onDragEnd = { clothMeshes[viewModel.selectedWardrobeId]?.grabbedIndex = null },
-                                onDragCancel = { clothMeshes[viewModel.selectedWardrobeId]?.grabbedIndex = null },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    val mesh = clothMeshes[viewModel.selectedWardrobeId] ?: return@detectDragGestures
-                                    val bw = renderedFrame.width.toFloat()
-                                    val bh = renderedFrame.height.toFloat()
-                                    val scale = min(size.width / bw, size.height / bh)
-                                    if (mesh.grabbedIndex != null) {
-                                        mesh.grabbedX += dragAmount.x / scale
-                                        mesh.grabbedY += dragAmount.y / scale
+                                }
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val pressed = event.changes.filter { it.pressed }
+                                    if (pressed.isEmpty()) {
+                                        clothMeshes[viewModel.selectedWardrobeId]?.grabbedIndex = null
+                                        if (tapCandidate && !isMultiTouch) {
+                                            val dt = downTime - lastTapTimeMs
+                                            val distPrev = hypot(downPos.x - lastTapPos.x, downPos.y - lastTapPos.y)
+                                            if (dt in 40L..320L && distPrev < 64f) {
+                                                if (viewportZoom > 1.1f) {
+                                                    viewportZoom = 1f
+                                                    viewportPan = Offset.Zero
+                                                } else {
+                                                    val targetZ = 2.2f
+                                                    val cx = size.width * 0.5f
+                                                    val cy = size.height * 0.5f
+                                                    viewportZoom = targetZ
+                                                    viewportPan = Offset(
+                                                        (cx - downPos.x) * (targetZ - 1f) * 0.6f,
+                                                        (cy - downPos.y) * (targetZ - 1f) * 0.6f
+                                                    )
+                                                }
+                                                lastTapTimeMs = 0L
+                                            } else {
+                                                lastTapTimeMs = downTime
+                                                lastTapPos = downPos
+                                            }
+                                        }
+                                        break
+                                    }
+
+                                    if (pressed.size >= 2) {
+                                        clothMeshes[viewModel.selectedWardrobeId]?.grabbedIndex = null
+                                        isMultiTouch = true
+                                        tapCandidate = false
+                                        val p0 = pressed[0].position
+                                        val p1 = pressed[1].position
+                                        val centroid = Offset((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f)
+                                        val span = hypot(p1.x - p0.x, p1.y - p0.y).coerceAtLeast(12f)
+                                        if (prevCentroid != null && prevSpan > 0f) {
+                                            val zoomDelta = (span / prevSpan).coerceIn(0.75f, 1.35f)
+                                            val panDelta = centroid - prevCentroid!!
+                                            applyBodyViewportTransform(centroid, panDelta, zoomDelta, size)
+                                        }
+                                        prevCentroid = centroid
+                                        prevSpan = span
+                                        pressed.forEach { it.consume() }
+                                    } else if (!isMultiTouch && pressed.size == 1) {
+                                        val ch = pressed[0]
+                                        val pos = ch.position
+                                        val distMoved = hypot(pos.x - downPos.x, pos.y - downPos.y)
+                                        if (distMoved > 7f) tapCandidate = false
+                                        val dragDelta = pos - prevSinglePos
+                                        val activeMesh = clothMeshes[viewModel.selectedWardrobeId]
+                                        if (activeMesh?.grabbedIndex != null) {
+                                            val scale = baseScale * viewportZoom
+                                            activeMesh.grabbedX += dragDelta.x / scale
+                                            activeMesh.grabbedY += dragDelta.y / scale
+                                        } else if (viewportZoom > 1.03f && distMoved > 6f) {
+                                            applyBodyViewportTransform(pos, dragDelta, 1f, size)
+                                        }
+                                        prevSinglePos = pos
+                                        ch.consume()
                                     }
                                 }
-                            )
+                            }
                         }
                 ) {
                     val bw = renderedFrame.width.toFloat()
                     val bh = renderedFrame.height.toFloat()
-                    val scale = min(size.width / bw, size.height / bh)
+                    val baseScale = min(size.width / bw, size.height / bh)
+                    val scale = baseScale * viewportZoom
                     val drawW = bw * scale
                     val drawH = bh * scale
-                    val left = (size.width - drawW) / 2f
-                    val top = (size.height - drawH) / 2f
+                    val left = (size.width - drawW) / 2f + viewportPan.x
+                    val top = (size.height - drawH) / 2f + viewportPan.y
 
                     drawImage(
                         image = renderedFrame.asImageBitmap(),
                         dstOffset = IntOffset(left.toInt(), top.toInt()),
                         dstSize = IntSize(drawW.toInt(), drawH.toInt())
+                    )
+                }
+
+                if (viewportZoom > 1.05f) {
+                    Text(
+                        "${(viewportZoom * 100).toInt()}% · Reset",
+                        color = Color(0xFF22D3EE),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(10.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xD90B1120))
+                            .border(1.dp, Color(0xFF155E75), RoundedCornerShape(8.dp))
+                            .clickable {
+                                viewportZoom = 1f
+                                viewportPan = Offset.Zero
+                            }
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
                     )
                 }
 

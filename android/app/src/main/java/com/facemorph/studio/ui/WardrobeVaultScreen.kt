@@ -25,9 +25,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
@@ -89,7 +89,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Clear Unclipped Actions: Add Face (Gallery & Camera) + Scan Costume
+        // Clear Unclipped Actions: Add Face (Gallery & Camera) + Open Full-Screen Cutout Studio
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
@@ -98,7 +98,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
                 shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.weight(1f).height(40.dp),
+                modifier = Modifier.weight(1f).height(44.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
                 Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(15.dp))
@@ -114,23 +114,23 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
                 shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.weight(1f).height(40.dp),
+                modifier = Modifier.weight(1f).height(44.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
                 Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(5.dp))
-                Text("Face Camera", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text("Face Cam", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
             }
             Button(
                 onClick = { viewModel.showCustomAssetDialog = true },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706)),
                 shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.weight(1f).height(40.dp),
+                modifier = Modifier.weight(1f).height(44.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
-                Icon(Icons.Default.AddAPhoto, contentDescription = null, modifier = Modifier.size(15.dp))
+                Icon(Icons.Default.ContentCut, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(5.dp))
-                Text("Scan Item", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text("Cutout Studio", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
             }
         }
 
@@ -308,15 +308,18 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                             viewModel.activeTab = StudioTab.BODY_PHYSICS
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.height(32.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                        shape = RoundedCornerShape(9.dp),
+                        modifier = Modifier.height(38.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp)
                     ) {
-                        Text("Try On", fontSize = 11.sp)
+                        Text("Try On", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     }
                     if (asset.isCustom) {
-                        IconButton(onClick = { viewModel.removeCustomAsset(asset.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFF87171), modifier = Modifier.size(18.dp))
+                        IconButton(
+                            onClick = { viewModel.removeCustomAsset(asset.id) },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFF87171), modifier = Modifier.size(19.dp))
                         }
                     }
                 }

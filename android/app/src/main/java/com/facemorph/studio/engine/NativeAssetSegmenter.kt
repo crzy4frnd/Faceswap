@@ -11,6 +11,29 @@ object NativeAssetSegmenter {
 
     private data class RgbCluster(val r: Float, val g: Float, val b: Float, var count: Int)
 
+    fun prepareAlignedBitmap(source: Bitmap, maxSide: Int = 720): Bitmap {
+        val scale = if (source.width > maxSide || source.height > maxSide) {
+            min(maxSide.toFloat() / source.width, maxSide.toFloat() / source.height)
+        } else 1f
+
+        val w = max(20, (source.width * scale).toInt())
+        val h = max(20, (source.height * scale).toInt())
+        val scaled = if (w != source.width || h != source.height) {
+            Bitmap.createScaledBitmap(source, w, h, true)
+        } else {
+            source.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        val argb = if (scaled.config != Bitmap.Config.ARGB_8888) {
+            scaled.copy(Bitmap.Config.ARGB_8888, false).also {
+                if (scaled !== source) scaled.recycle()
+            }
+        } else {
+            scaled
+        }
+        argb.setHasAlpha(true)
+        return argb
+    }
+
     /**
      * Multi-cluster edge-aware foreground segmentation starting from all 4 borders.
      * - Handles uneven, shaded, wood, or textured tabletop/wall backgrounds using up to 10 border clusters.
@@ -25,23 +48,29 @@ object NativeAssetSegmenter {
         removeExtraneousObjects: Boolean = true,
         preserveInnerDetails: Boolean = false
     ): Bitmap {
-        val maxSide = 720
-        val scale = if (source.width > maxSide || source.height > maxSide) {
-            min(maxSide.toFloat() / source.width, maxSide.toFloat() / source.height)
-        } else 1f
-
-        val w = max(20, (source.width * scale).toInt())
-        val h = max(20, (source.height * scale).toInt())
-        val scaled = if (w != source.width || h != source.height) {
-            Bitmap.createScaledBitmap(source, w, h, true)
-        } else {
-            source
+        val aligned = prepareAlignedBitmap(source)
+        val uncropped = extractTransparentAssetUncropped(
+            alignedSource = aligned,
+            tolerance = tolerance,
+            removeExtraneousObjects = removeExtraneousObjects,
+            preserveInnerDetails = preserveInnerDetails
+        )
+        return trimTransparentBounds(uncropped).also {
+            if (it !== uncropped) uncropped.recycle()
         }
+    }
 
+    fun extractTransparentAssetUncropped(
+        alignedSource: Bitmap,
+        tolerance: Int = 35,
+        removeExtraneousObjects: Boolean = true,
+        preserveInnerDetails: Boolean = false
+    ): Bitmap {
+        val w = alignedSource.width
+        val h = alignedSource.height
         val total = w * h
         val pixels = IntArray(total)
-        scaled.getPixels(pixels, 0, w, 0, 0, w, h)
-        if (scaled !== source) scaled.recycle()
+        alignedSource.getPixels(pixels, 0, w, 0, 0, w, h)
 
         // 1. Multi-cluster perimeter background extraction (3px border strip, up to 10 clusters)
         val clusters = mutableListOf<RgbCluster>()
@@ -491,19 +520,160 @@ object NativeAssetSegmenter {
         val work = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         work.setHasAlpha(true)
         work.setPixels(outPixels, 0, w, 0, 0, w, h)
+        return work
+    }
 
-        return if (maxX > minX + 16 && maxY > minY + 16) {
+    fun trimTransparentBounds(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 4 || h < 4) return bitmap
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        var minX = w
+        var minY = h
+        var maxX = -1
+        var maxY = -1
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                if (Color.alpha(pixels[row + x]) > 25) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+            }
+        }
+        return if (maxX > minX + 12 && maxY > minY + 12) {
             val pad = 6
             val cropX = max(0, minX - pad)
             val cropY = max(0, minY - pad)
             val cropW = min(w - cropX, (maxX - minX) + pad * 2)
             val cropH = min(h - cropY, (maxY - minY) + pad * 2)
-            val cropped = Bitmap.createBitmap(work, cropX, cropY, cropW, cropH)
-            cropped.setHasAlpha(true)
-            if (cropped !== work) work.recycle()
-            cropped
+            Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH).apply { setHasAlpha(true) }
         } else {
-            work
+            bitmap
+        }
+    }
+
+    /**
+     * Fast dirty-rect radial Brush (Restore from alignedRaw) or Eraser stroke in-place on a mutable ARGB_8888 bitmap.
+     * Supports hardnessPct (0f..100f) for smooth feathered vs crisp cutout edges.
+     */
+    fun paintBrushSegmentInPlace(
+        targetMutable: Bitmap,
+        alignedRaw: Bitmap,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        radiusPx: Float,
+        hardnessPct: Float,
+        isRestore: Boolean
+    ) {
+        val w = targetMutable.width
+        val h = targetMutable.height
+        if (w != alignedRaw.width || h != alignedRaw.height || w <= 0 || h <= 0) return
+
+        val r = radiusPx.coerceIn(3f, 220f)
+        val rInt = r.toInt() + 2
+        val minX = (min(startX, endX) - rInt).toInt().coerceIn(0, w - 1)
+        val maxX = (max(startX, endX) + rInt).toInt().coerceIn(0, w - 1)
+        val minY = (min(startY, endY) - rInt).toInt().coerceIn(0, h - 1)
+        val maxY = (max(startY, endY) + rInt).toInt().coerceIn(0, h - 1)
+        val boxW = maxX - minX + 1
+        val boxH = maxY - minY + 1
+        if (boxW <= 0 || boxH <= 0) return
+
+        val dstPixels = IntArray(boxW * boxH)
+        val rawPixels = IntArray(boxW * boxH)
+        targetMutable.getPixels(dstPixels, 0, boxW, minX, minY, boxW, boxH)
+        alignedRaw.getPixels(rawPixels, 0, boxW, minX, minY, boxW, boxH)
+
+        val segDx = endX - startX
+        val segDy = endY - startY
+        val segLenSq = segDx * segDx + segDy * segDy
+        val hardNorm = (hardnessPct / 100f).coerceIn(0f, 0.99f)
+        val rSq = r * r
+
+        for (ly in 0 until boxH) {
+            val py = (minY + ly).toFloat()
+            val rowOffset = ly * boxW
+            for (lx in 0 until boxW) {
+                val px = (minX + lx).toFloat()
+                val t = if (segLenSq > 0.001f) {
+                    (((px - startX) * segDx + (py - startY) * segDy) / segLenSq).coerceIn(0f, 1f)
+                } else 0f
+                val cx = startX + t * segDx
+                val cy = startY + t * segDy
+                val dx = px - cx
+                val dy = py - cy
+                val dSq = dx * dx + dy * dy
+                if (dSq > rSq) continue
+
+                val distNorm = sqrt(dSq) / r
+                val strength = if (distNorm <= hardNorm) {
+                    1f
+                } else {
+                    val u = ((distNorm - hardNorm) / (1f - hardNorm)).coerceIn(0f, 1f)
+                    // Smooth cubic feather falloff
+                    val s = 1f - u
+                    s * s * (3f - 2f * s)
+                }
+                if (strength <= 0.005f) continue
+
+                val idx = rowOffset + lx
+                val cur = dstPixels[idx]
+                val curA = Color.alpha(cur)
+
+                if (isRestore) {
+                    val raw = rawPixels[idx]
+                    val rawA = Color.alpha(raw)
+                    val targetA = max(curA, (curA + (rawA - curA) * strength).toInt()).coerceIn(0, 255)
+                    val blendRgb = if (curA < 10) 1f else strength
+                    val rr = (Color.red(cur) + (Color.red(raw) - Color.red(cur)) * blendRgb).toInt().coerceIn(0, 255)
+                    val rg = (Color.green(cur) + (Color.green(raw) - Color.green(cur)) * blendRgb).toInt().coerceIn(0, 255)
+                    val rb = (Color.blue(cur) + (Color.blue(raw) - Color.blue(cur)) * blendRgb).toInt().coerceIn(0, 255)
+                    dstPixels[idx] = Color.argb(targetA, rr, rg, rb)
+                } else {
+                    val nextA = (curA * (1f - strength)).toInt().coerceIn(0, 255)
+                    dstPixels[idx] = if (nextA < 4) {
+                        Color.TRANSPARENT
+                    } else {
+                        Color.argb(nextA, Color.red(cur), Color.green(cur), Color.blue(cur))
+                    }
+                }
+            }
+        }
+
+        targetMutable.setPixels(dstPixels, 0, boxW, minX, minY, boxW, boxH)
+    }
+
+    fun invertCutoutBitmap(alignedRaw: Bitmap, currentCutout: Bitmap): Bitmap {
+        val w = alignedRaw.width
+        val h = alignedRaw.height
+        if (w != currentCutout.width || h != currentCutout.height) return currentCutout
+        val total = w * h
+        val rawPx = IntArray(total)
+        val curPx = IntArray(total)
+        alignedRaw.getPixels(rawPx, 0, w, 0, 0, w, h)
+        currentCutout.getPixels(curPx, 0, w, 0, 0, w, h)
+        val outPx = IntArray(total)
+        for (i in 0 until total) {
+            val invAlpha = (255 - Color.alpha(curPx[i])).coerceIn(0, 255)
+            val rc = rawPx[i]
+            val finalA = min(Color.alpha(rc), invAlpha)
+            outPx[i] = if (finalA < 8) Color.TRANSPARENT else Color.argb(finalA, Color.red(rc), Color.green(rc), Color.blue(rc))
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setHasAlpha(true)
+            setPixels(outPx, 0, w, 0, 0, w, h)
+        }
+    }
+
+    fun createEmptyCutoutBitmap(alignedRaw: Bitmap): Bitmap {
+        return Bitmap.createBitmap(alignedRaw.width, alignedRaw.height, Bitmap.Config.ARGB_8888).apply {
+            setHasAlpha(true)
         }
     }
 
