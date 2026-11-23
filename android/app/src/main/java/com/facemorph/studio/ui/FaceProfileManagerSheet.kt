@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -78,10 +79,12 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.facemorph.studio.engine.NativeFaceSwapEngine
 import com.facemorph.studio.engine.NativeStorageHelper
+import com.facemorph.studio.model.FaceAngleBucket
 import com.facemorph.studio.viewmodel.StudioViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.abs
 
 @Composable
 fun FaceProfileManagerDialog(
@@ -134,23 +137,29 @@ fun FaceProfileManagerDialog(
         editPreviewBmp = null
     }
 
-    val angleGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val replaceTarget = pendingReplacePair
+    // Multi-Select Gallery Picker (scans all selected photos & rejects duplicate angles)
+    val multiGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         val targetId = pendingProfileId
-        pendingReplacePair = null
         pendingProfileId = null
-        if (uri != null) {
-            if (replaceTarget != null) {
-                viewModel.replaceFaceAngleFromUri(replaceTarget.first, replaceTarget.second, uri)
-                editingFacePair = null
-            } else if (!targetId.isNullOrBlank()) {
+        if (uris.isNotEmpty()) {
+            if (!targetId.isNullOrBlank()) {
                 selectedTargetProfileId = targetId
-                viewModel.addAngleToProfileFromUri(targetId, uri)
+                viewModel.addMultipleAnglesToProfileFromUris(targetId, uris)
             } else {
                 val chosenName = newProfileName.trim().takeIf { it.isNotBlank() }
                 newProfileName = ""
-                viewModel.createFaceProfileFromUri(uri, chosenName)
+                viewModel.createFaceProfileFromUris(uris, chosenName)
             }
+        }
+    }
+
+    // Single-photo Gallery Picker used when replacing an existing face slot in Edit mode
+    val replaceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val replaceTarget = pendingReplacePair
+        pendingReplacePair = null
+        if (uri != null && replaceTarget != null) {
+            viewModel.replaceFaceAngleFromUri(replaceTarget.first, replaceTarget.second, uri)
+            editingFacePair = null
         }
     }
 
@@ -178,7 +187,7 @@ fun FaceProfileManagerDialog(
     fun launchGalleryFor(profileId: String?) {
         pendingReplacePair = null
         pendingProfileId = profileId
-        angleGalleryPicker.launch("image/*")
+        multiGalleryPicker.launch("image/*")
     }
 
     fun launchCameraFor(profileId: String?) {
@@ -192,7 +201,7 @@ fun FaceProfileManagerDialog(
     fun launchReplaceGallery(profileId: String, angleId: String) {
         pendingProfileId = null
         pendingReplacePair = profileId to angleId
-        angleGalleryPicker.launch("image/*")
+        replaceGalleryPicker.launch("image/*")
     }
 
     fun launchReplaceCamera(profileId: String, angleId: String) {
@@ -660,7 +669,7 @@ fun FaceProfileManagerDialog(
                             ) {
                                 Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(14.dp))
                                 Spacer(Modifier.width(5.dp))
-                                Text("New + Gallery", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("New + Multi-Photos", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                             }
                             Button(
                                 onClick = { launchCameraFor(null) },
@@ -671,7 +680,83 @@ fun FaceProfileManagerDialog(
                             ) {
                                 Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(14.dp))
                                 Spacer(Modifier.width(5.dp))
-                                Text("New + Camera", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("New + Camera", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            }
+                        }
+                    }
+
+                    // Batch Face Angle Scan Progress & Strict No-Duplicate Scan Report
+                    if (viewModel.isBatchImportingFaces) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF082F49))
+                                .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                color = Color(0xFF38BDF8),
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                viewModel.batchImportStatus ?: "Scanning face angles & blocking duplicates...",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    viewModel.lastMultiImportReport?.let { report ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF0F172A))
+                                .border(
+                                    1.dp,
+                                    if (report.addedCount > 0) Color(0xFF059669) else Color(0xFFD97706),
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Scan Result (${report.profileName}): +${report.addedCount} added",
+                                    color = if (report.addedCount > 0) Color(0xFF34D399) else Color(0xFFFBBF24),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                IconButton(
+                                    onClick = { viewModel.clearMultiImportReport() },
+                                    modifier = Modifier.size(20.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss report", tint = Color(0xFF94A3B8), modifier = Modifier.size(13.dp))
+                                }
+                            }
+                            if (report.addedLabels.isNotEmpty()) {
+                                Text(
+                                    "Angles: ${report.addedLabels.joinToString(", ")}",
+                                    color = Color(0xFFCBD5E1),
+                                    fontSize = 10.sp
+                                )
+                            }
+                            if (report.skippedDuplicateCount > 0 || report.skippedNoFaceCount > 0) {
+                                Text(
+                                    "Blocked: ${report.skippedDuplicateCount} duplicate angle(s) · ${report.skippedNoFaceCount} no face",
+                                    color = Color(0xFFFDA4AF),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
                             }
                         }
                     }
@@ -757,7 +842,7 @@ fun FaceProfileManagerDialog(
                                 ) {
                                     Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(14.dp))
                                     Spacer(Modifier.width(5.dp))
-                                    Text("Add Gallery -> ${destProfile.name}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("Multi-Select -> ${destProfile.name}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -1022,6 +1107,133 @@ fun FaceProfileManagerDialog(
                                                             modifier = Modifier.size(10.dp)
                                                         )
                                                     }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.BottomStart)
+                                                            .padding(2.dp)
+                                                            .clip(RoundedCornerShape(4.dp))
+                                                            .background(Color(0xCC020617))
+                                                            .padding(horizontal = 3.dp, vertical = 1.dp)
+                                                    ) {
+                                                        Text(
+                                                            "${angle.yawDeg.toInt()}°",
+                                                            color = Color(0xFF38BDF8),
+                                                            fontSize = 8.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 5-Slot Interactive Angle Coverage Checklist (Front / Left / Right / Up / Down)
+                                    run {
+                                        val frontMatch = profile.angles.firstOrNull {
+                                            it.bucket == FaceAngleBucket.FRONT || (abs(it.yawDeg) <= 10f && abs(it.pitchDeg) <= 13f)
+                                        }
+                                        val leftMatch = profile.angles.firstOrNull {
+                                            it.bucket == FaceAngleBucket.LEFT_SLIGHT ||
+                                                it.bucket == FaceAngleBucket.LEFT_3QUARTER ||
+                                                it.bucket == FaceAngleBucket.LEFT_PROFILE ||
+                                                it.yawDeg < -9f
+                                        }
+                                        val rightMatch = profile.angles.firstOrNull {
+                                            it.bucket == FaceAngleBucket.RIGHT_SLIGHT ||
+                                                it.bucket == FaceAngleBucket.RIGHT_3QUARTER ||
+                                                it.bucket == FaceAngleBucket.RIGHT_PROFILE ||
+                                                it.yawDeg > 9f
+                                        }
+                                        val upMatch = profile.angles.firstOrNull {
+                                            it.bucket == FaceAngleBucket.TILT_UP || it.pitchDeg > 12f
+                                        }
+                                        val downMatch = profile.angles.firstOrNull {
+                                            it.bucket == FaceAngleBucket.TILT_DOWN || it.pitchDeg < -12f
+                                        }
+                                        val coverageSlots = listOf(
+                                            "Front" to frontMatch,
+                                            "Left" to leftMatch,
+                                            "Right" to rightMatch,
+                                            "Up" to upMatch,
+                                            "Down" to downMatch
+                                        )
+                                        val coveredCount = coverageSlots.count { it.second != null }
+
+                                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    "Angle Coverage",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                                Text(
+                                                    if (coveredCount == 5) "5/5 Full Match Ready" else "$coveredCount/5 Angles Filled",
+                                                    color = if (coveredCount == 5) Color(0xFF34D399) else Color(0xFF38BDF8),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                coverageSlots.forEach { (slotLabel, variant) ->
+                                                    val filled = variant != null
+                                                    val isSelSlot = variant != null && profile.selectedAngleId == variant.id
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.Center,
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .clip(RoundedCornerShape(7.dp))
+                                                            .background(
+                                                                when {
+                                                                    isSelSlot -> Color(0xFF065F46)
+                                                                    filled -> Color(0xFF0F2922)
+                                                                    else -> Color(0xFF090F1D)
+                                                                }
+                                                            )
+                                                            .border(
+                                                                1.dp,
+                                                                when {
+                                                                    isSelSlot -> Color(0xFF34D399)
+                                                                    filled -> Color(0xFF059669)
+                                                                    else -> Color(0xFF1E293B)
+                                                                },
+                                                                RoundedCornerShape(7.dp)
+                                                            )
+                                                            .clickable {
+                                                                selectedTargetProfileId = profile.id
+                                                                if (variant != null) {
+                                                                    viewModel.selectProfileAngle(profile.id, variant.id)
+                                                                } else {
+                                                                    launchGalleryFor(profile.id)
+                                                                }
+                                                            }
+                                                            .padding(vertical = 4.dp, horizontal = 2.dp)
+                                                    ) {
+                                                        if (filled) {
+                                                            Icon(
+                                                                Icons.Default.Check,
+                                                                contentDescription = null,
+                                                                tint = Color(0xFF34D399),
+                                                                modifier = Modifier.size(10.dp)
+                                                            )
+                                                            Spacer(Modifier.width(2.dp))
+                                                        }
+                                                        Text(
+                                                            slotLabel,
+                                                            color = if (filled) Color(0xFFD1FAE5) else Color(0xFF64748B),
+                                                            fontSize = 9.sp,
+                                                            fontWeight = if (filled) FontWeight.Bold else FontWeight.Medium,
+                                                            maxLines = 1
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -1045,7 +1257,7 @@ fun FaceProfileManagerDialog(
                                         ) {
                                             Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(13.dp))
                                             Spacer(Modifier.width(4.dp))
-                                            Text("+ Gallery", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                            Text("+ Multi", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                                         }
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,

@@ -24,6 +24,8 @@ import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.Point2D
 import com.facemorph.studio.model.SegmentedTargetLayers
 import com.facemorph.studio.model.SourceFaceMetrics
+import com.facemorph.studio.model.SourceFaceScanResult
+import com.facemorph.studio.model.classifyFaceAngleBucket
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
@@ -58,6 +60,10 @@ object NativeFaceSwapEngine {
     }
 
     suspend fun detectSourceFaceMetrics(bitmap: Bitmap): SourceFaceMetrics {
+        return detectSourceFaceMetricsStrict(bitmap).metrics
+    }
+
+    suspend fun detectSourceFaceMetricsStrict(bitmap: Bitmap): SourceFaceScanResult {
         return suspendCancellableCoroutine { cont ->
             try {
                 val image = InputImage.fromBitmap(bitmap, 0)
@@ -146,38 +152,46 @@ object NativeFaceSwapEngine {
 
                             if (cont.isActive) {
                                 cont.resume(
-                                    SourceFaceMetrics(
-                                        cropLeft = cropL,
-                                        cropTop = cropT,
-                                        cropRight = cropR,
-                                        cropBottom = cropB,
-                                        eyeMidXRatio = eyeMidX.coerceIn(0.28f, 0.72f),
-                                        eyeMidYRatio = eyeMidY.coerceIn(0.20f, 0.52f),
-                                        eyeDistRatio = eyeDist.coerceIn(0.28f, 0.76f),
-                                        rollDeg = roll.coerceIn(-45f, 45f),
-                                        yawDeg = yaw,
-                                        pitchDeg = pitch,
-                                        noseYRatio = noseY.coerceIn(0.40f, 0.72f),
-                                        mouthYRatio = mouthY.coerceIn(0.58f, 0.88f),
-                                        aspectRatio = (cropW / cropH).coerceIn(0.60f, 1.15f),
-                                        contourNorm = contourNorm,
-                                        visualSignature = visSig
+                                    SourceFaceScanResult(
+                                        faceDetected = true,
+                                        metrics = SourceFaceMetrics(
+                                            cropLeft = cropL,
+                                            cropTop = cropT,
+                                            cropRight = cropR,
+                                            cropBottom = cropB,
+                                            eyeMidXRatio = eyeMidX.coerceIn(0.28f, 0.72f),
+                                            eyeMidYRatio = eyeMidY.coerceIn(0.20f, 0.52f),
+                                            eyeDistRatio = eyeDist.coerceIn(0.28f, 0.76f),
+                                            rollDeg = roll.coerceIn(-45f, 45f),
+                                            yawDeg = yaw,
+                                            pitchDeg = pitch,
+                                            noseYRatio = noseY.coerceIn(0.40f, 0.72f),
+                                            mouthYRatio = mouthY.coerceIn(0.58f, 0.88f),
+                                            aspectRatio = (cropW / cropH).coerceIn(0.60f, 1.15f),
+                                            contourNorm = contourNorm,
+                                            visualSignature = visSig
+                                        )
                                     )
                                 )
                             }
                         } else {
-                            if (cont.isActive) cont.resume(
-                                defaultSourceMetrics().copy(
-                                    visualSignature = computeVisualSignature(bitmap, 0.25f, 0.16f, 0.75f, 0.68f)
+                            if (cont.isActive) {
+                                cont.resume(
+                                    SourceFaceScanResult(
+                                        faceDetected = false,
+                                        metrics = defaultSourceMetrics().copy(
+                                            visualSignature = computeVisualSignature(bitmap, 0.25f, 0.16f, 0.75f, 0.68f)
+                                        )
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                     .addOnFailureListener {
-                        if (cont.isActive) cont.resume(defaultSourceMetrics())
+                        if (cont.isActive) cont.resume(SourceFaceScanResult(false, defaultSourceMetrics()))
                     }
             } catch (_: Exception) {
-                if (cont.isActive) cont.resume(defaultSourceMetrics())
+                if (cont.isActive) cont.resume(SourceFaceScanResult(false, defaultSourceMetrics()))
             }
         }
     }
@@ -357,13 +371,30 @@ object NativeFaceSwapEngine {
 
     fun checkDuplicateAngle(
         existing: List<Pair<FaceAngleVariant, SourceFaceMetrics?>>,
-        candidate: SourceFaceMetrics
+        candidate: SourceFaceMetrics,
+        strictAngleDedup: Boolean = true
     ): Boolean {
+        val candidateBucket = classifyFaceAngleBucket(candidate.yawDeg, candidate.pitchDeg)
         for ((angle, metrics) in existing) {
             val yaw = metrics?.yawDeg ?: angle.yawDeg
             val pitch = metrics?.pitchDeg ?: angle.pitchDeg
-            if (abs(yaw - candidate.yawDeg) < 6.5f && abs(pitch - candidate.pitchDeg) < 6.5f) {
-                val sig = metrics?.visualSignature ?: emptyList()
+            val existingBucket = classifyFaceAngleBucket(yaw, pitch)
+            val yawDiff = abs(yaw - candidate.yawDeg)
+            val pitchDiff = abs(pitch - candidate.pitchDeg)
+
+            // Reject identical / nearly identical visual image regardless of angle
+            val sig = metrics?.visualSignature ?: emptyList()
+            if (sig.isNotEmpty() && candidate.visualSignature.isNotEmpty() &&
+                cosineSimilarity(sig, candidate.visualSignature) >= 0.94f
+            ) {
+                return true
+            }
+
+            if (strictAngleDedup) {
+                // Strict pose deduplication: block same angle zone or angles within 9.5 deg yaw & 10 deg pitch
+                if (yawDiff < 9.5f && pitchDiff < 10.0f) return true
+                if (existingBucket == candidateBucket && yawDiff < 15.0f && pitchDiff < 14.0f) return true
+            } else if (yawDiff < 6.5f && pitchDiff < 6.5f) {
                 if (sig.isEmpty() || candidate.visualSignature.isEmpty()) return true
                 if (cosineSimilarity(sig, candidate.visualSignature) >= 0.945f) return true
             }

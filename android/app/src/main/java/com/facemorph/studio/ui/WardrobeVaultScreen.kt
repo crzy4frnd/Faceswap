@@ -62,8 +62,10 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
     var filter by remember { mutableStateOf("ALL") }
     var pendingFaceCameraFile by remember { mutableStateOf<File?>(null) }
 
-    val faceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { viewModel.addCustomFaceFromUri(it, sourceLabel = "Gallery") }
+    val faceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) {
+            viewModel.createFaceProfileFromUris(uris)
+        }
     }
 
     val faceCameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
@@ -76,7 +78,8 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
     val filteredAssets = remember(viewModel.wardrobeAssets, filter) {
         when (filter) {
             "CLOTHING" -> viewModel.wardrobeAssets.filter { it.category == WardrobeCategory.CLOTHING }
-            "JEWELRY" -> viewModel.wardrobeAssets.filter { it.category == WardrobeCategory.JEWELRY || it.category == WardrobeCategory.ACCESSORY }
+            "JEWELRY" -> viewModel.wardrobeAssets.filter { it.category == WardrobeCategory.JEWELRY }
+            "OTHER" -> viewModel.wardrobeAssets.filter { it.category == WardrobeCategory.ACCESSORY }
             "CUSTOM" -> viewModel.wardrobeAssets.filter { it.isCustom }
             else -> viewModel.wardrobeAssets
         }
@@ -255,7 +258,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                 .padding(3.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            listOf("ALL" to "All", "CLOTHING" to "Clothes", "JEWELRY" to "Jewelry", "CUSTOM" to "Custom").forEach { (key, label) ->
+            listOf("ALL" to "All", "CLOTHING" to "Clothes", "JEWELRY" to "Jewelry", "OTHER" to "Other", "CUSTOM" to "Custom").forEach { (key, label) ->
                 val sel = filter == key
                 Box(
                     modifier = Modifier
@@ -300,7 +303,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(asset.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("${asset.subCategory.label} · ${asset.anchorPoint.label}", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                        Text("${asset.displaySubCategory} · ${asset.anchorPoint.label}", color = Color(0xFF94A3B8), fontSize = 10.sp)
                     }
                     Button(
                         onClick = {

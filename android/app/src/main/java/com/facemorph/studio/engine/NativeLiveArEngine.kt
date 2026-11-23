@@ -35,6 +35,7 @@ import kotlin.coroutines.resume
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -387,6 +388,44 @@ object NativeLiveArEngine {
                         canvas.restore()
                         if (scaledHat !== jewelryBitmap) scaledHat.recycle()
                     }
+                }
+                BodyAnchorPoint.EARRINGS -> {
+                    val eW = faceW * 0.25f * scaleMul
+                    val eH = eW * (jewelryBitmap.height.toFloat() / jewelryBitmap.width.toFloat())
+                    val earHalfW = faceW * 0.56f
+                    val yawCos = cos(Math.toRadians(smoothFace.yawDeg.toDouble())).toFloat().coerceIn(0.45f, 1f)
+                    val leftOffX = -earHalfW * (if (smoothFace.yawDeg < -10f) yawCos else 1f)
+                    val rightOffX = earHalfW * (if (smoothFace.yawDeg > 10f) yawCos else 1f)
+                    val earLocalY = faceH * 0.14f
+                    val sway = sin(timeSec * 3.1f) * 2.4f
+                    val scaledEarring = Bitmap.createScaledBitmap(jewelryBitmap, max(8, eW.toInt()), max(8, eH.toInt()), true)
+                    scaledEarring.setHasAlpha(true)
+                    val earPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+                    // Left earring
+                    if (smoothFace.yawDeg > -42f) {
+                        earPaint.alpha = if (smoothFace.yawDeg < -26f) 165 else 255
+                        canvas.save()
+                        canvas.translate(faceCX, faceCY)
+                        canvas.rotate(rollDeg)
+                        canvas.translate(leftOffX, earLocalY)
+                        canvas.rotate(sway)
+                        canvas.drawBitmap(scaledEarring, -eW * 0.5f, 0f, earPaint)
+                        canvas.restore()
+                    }
+                    // Right earring (symmetrical mirror)
+                    if (smoothFace.yawDeg < 42f) {
+                        earPaint.alpha = if (smoothFace.yawDeg > 26f) 165 else 255
+                        canvas.save()
+                        canvas.translate(faceCX, faceCY)
+                        canvas.rotate(rollDeg)
+                        canvas.translate(rightOffX, earLocalY)
+                        canvas.rotate(-sway)
+                        canvas.scale(-1f, 1f)
+                        canvas.drawBitmap(scaledEarring, -eW * 0.5f, 0f, earPaint)
+                        canvas.restore()
+                    }
+                    if (scaledEarring !== jewelryBitmap) scaledEarring.recycle()
                 }
                 BodyAnchorPoint.WRIST -> {
                     val jW = faceW * 0.58f * scaleMul

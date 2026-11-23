@@ -441,6 +441,40 @@ object NativeClothPhysicsEngine {
                     drawScaledRotatedBitmap(canvas, bmp, px, py, targetW, targetH, layer.rotation + swing * 0.6f, centeredY = false)
                 }
 
+                BodyAnchorPoint.EARRINGS -> {
+                    val faceW = shoulderSpan * 0.44f
+                    val earHalfW = faceW * 0.56f
+                    val earY = scan.nose.y + (scan.throat.y - scan.nose.y) * 0.14f
+                    val earW = max(12f, shoulderSpan * 0.135f * layer.scale)
+                    val earH = earW * (bmp.height.toFloat() / bmp.width.toFloat())
+                    val sway = if (clothConfig.enabled) sin(timeSec * 3.1f) * (2.2f + abs(clothConfig.windStrength) * 0.4f) else 0f
+                    val leftX = scan.nose.x - earHalfW + layer.offsetX
+                    val rightX = scan.nose.x + earHalfW - layer.offsetX
+                    val py = earY + layer.offsetY
+                    drawScaledRotatedBitmap(
+                        canvas = canvas,
+                        bmp = bmp,
+                        x = leftX,
+                        y = py,
+                        targetW = earW,
+                        targetH = earH,
+                        rotationDeg = layer.rotation + sway,
+                        centeredY = false,
+                        mirrorX = false
+                    )
+                    drawScaledRotatedBitmap(
+                        canvas = canvas,
+                        bmp = bmp,
+                        x = rightX,
+                        y = py,
+                        targetW = earW,
+                        targetH = earH,
+                        rotationDeg = -(layer.rotation + sway),
+                        centeredY = false,
+                        mirrorX = true
+                    )
+                }
+
                 BodyAnchorPoint.HEAD -> {
                     val targetW = shoulderSpan * 0.72f * layer.scale
                     val targetH = targetW * (bmp.height.toFloat() / bmp.width.toFloat())
@@ -483,7 +517,8 @@ object NativeClothPhysicsEngine {
         targetW: Float,
         targetH: Float,
         rotationDeg: Float,
-        centeredY: Boolean
+        centeredY: Boolean,
+        mirrorX: Boolean = false
     ) {
         val scaled = Bitmap.createScaledBitmap(
             bmp,
@@ -494,6 +529,7 @@ object NativeClothPhysicsEngine {
         canvas.save()
         canvas.translate(x, y)
         canvas.rotate(rotationDeg)
+        if (mirrorX) canvas.scale(-1f, 1f)
         val top = if (centeredY) -targetH * 0.5f else 0f
         canvas.drawBitmap(scaled, -targetW * 0.5f, top, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
         canvas.restore()

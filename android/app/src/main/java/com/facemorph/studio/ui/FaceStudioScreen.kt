@@ -2,9 +2,13 @@ package com.facemorph.studio.ui
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -44,6 +48,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
@@ -86,9 +91,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -109,6 +116,7 @@ import kotlin.math.min
 @Composable
 fun FaceStudioScreen(viewModel: StudioViewModel) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val targetBmp = viewModel.targetBitmap
     val faces = viewModel.detectedFaces
     val adj = viewModel.adjustments
@@ -123,6 +131,8 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     var isDeckExpanded by remember { mutableStateOf(true) }
     var showToolsMenu by remember { mutableStateOf(false) }
     var showSwapProfileMenu by remember { mutableStateOf(false) }
+    var dismissedFlipHintKey by remember { mutableStateOf<String?>(null) }
+    var isPeekingOriginal by remember { mutableStateOf(false) }
     var activeLandmarkKey by remember { mutableStateOf("nose") }
     var viewportZoom by remember { mutableFloatStateOf(1f) }
     var viewportPan by remember { mutableStateOf(Offset.Zero) }
@@ -197,8 +207,16 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
         }
     }
 
-    val faceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { viewModel.addCustomFaceFromUri(it, sourceLabel = "Gallery") }
+    val faceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) {
+            val targetId = viewModel.pendingAngleTargetProfileId
+            viewModel.pendingAngleTargetProfileId = null
+            if (!targetId.isNullOrBlank() && viewModel.faceProfiles.any { it.id == targetId }) {
+                viewModel.addMultipleAnglesToProfileFromUris(targetId, uris)
+            } else {
+                viewModel.createFaceProfileFromUris(uris)
+            }
+        }
     }
     val faceCameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val file = pendingFaceCameraFile
@@ -574,6 +592,61 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                     }
                 }
 
+                // Small Flip Face Left<->Right Symbol Button beside Profile Chooser (with Auto-Flip Match Glow)
+                val selectedFaceForFlip = viewModel.getSelectedOrPrimaryFace()
+                val isFaceFlipped = selectedFaceForFlip?.angleMatchFlipped == true
+                val stripFlipSuggestDir = viewModel.getFlipSuggestionDirection(selectedFaceForFlip)
+                if (selectedFaceForFlip != null && selectedFaceForFlip.assignedProfileId != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(
+                                when {
+                                    stripFlipSuggestDir != null -> Color(0xFF78350F)
+                                    isFaceFlipped -> Color(0xFF4F46E5)
+                                    else -> Color(0xFF111827)
+                                }
+                            )
+                            .border(
+                                1.2.dp,
+                                when {
+                                    stripFlipSuggestDir != null -> Color(0xFFFBBF24)
+                                    isFaceFlipped -> Color(0xFFA5B4FC)
+                                    else -> Color(0xFF334155)
+                                },
+                                RoundedCornerShape(7.dp)
+                            )
+                            .clickable { viewModel.toggleSelectedFaceFlip() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Flip,
+                            contentDescription = if (stripFlipSuggestDir != null) {
+                                "Mirror face to match $stripFlipSuggestDir angle"
+                            } else {
+                                "Flip face left or right to match target"
+                            },
+                            tint = when {
+                                stripFlipSuggestDir != null -> Color(0xFFFDE68A)
+                                isFaceFlipped -> Color.White
+                                else -> Color(0xFFCBD5E1)
+                            },
+                            modifier = Modifier.size(14.dp)
+                        )
+                        if (stripFlipSuggestDir != null) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(2.dp)
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFFBBF24))
+                            )
+                        }
+                    }
+                }
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -811,21 +884,40 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 val firstDown = awaitFirstDown(requireUnconsumed = false)
                                 val downPos = firstDown.position
                                 val downTime = System.currentTimeMillis()
+                                val downUptime = SystemClock.uptimeMillis()
+                                val canHoldPeek = !latestCutoutMode && !latestSamplingMode && !latestShowMesh
+                                val peekHoldMs = 310L
                                 var isMultiTouch = false
                                 var tapCandidate = true
                                 var strokeBegun = false
+                                var peekActivated = false
                                 var prevCentroid: Offset? = null
                                 var prevSpan = 0f
                                 var prevSinglePos = downPos
 
                                 while (true) {
-                                    val event = awaitPointerEvent()
+                                    val event = if (canHoldPeek && tapCandidate && !isMultiTouch && !peekActivated) {
+                                        val elapsed = SystemClock.uptimeMillis() - downUptime
+                                        val remaining = (peekHoldMs - elapsed).coerceAtLeast(1L)
+                                        val ev = withTimeoutOrNull(remaining) { awaitPointerEvent() }
+                                        if (ev == null) {
+                                            peekActivated = true
+                                            tapCandidate = false
+                                            isPeekingOriginal = true
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            continue
+                                        }
+                                        ev
+                                    } else {
+                                        awaitPointerEvent()
+                                    }
                                     val pressed = event.changes.filter { it.pressed }
 
                                     if (pressed.isEmpty()) {
                                         lastBrushImgPos = null
                                         brushCursorImgPos = null
-                                        if (tapCandidate && !isMultiTouch) {
+                                        isPeekingOriginal = false
+                                        if (tapCandidate && !isMultiTouch && !peekActivated) {
                                             if (latestSamplingMode) {
                                                 sampleSkinAtPointer(
                                                     pos = downPos,
@@ -870,6 +962,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                         // 2-finger pinch-to-zoom & pan ALWAYS active across every tool!
                                         isMultiTouch = true
                                         tapCandidate = false
+                                        isPeekingOriginal = false
                                         lastBrushImgPos = null
                                         brushCursorImgPos = null
                                         val p0 = pressed[0].position
@@ -891,7 +984,9 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                         if (distMoved > 7f) tapCandidate = false
                                         val dragAmount = pos - prevSinglePos
 
-                                        if (latestCutoutMode) {
+                                        if (peekActivated) {
+                                            ch.consume()
+                                        } else if (latestCutoutMode) {
                                             val imgPt = screenToImagePos(pos, size.width.toFloat(), size.height.toFloat())
                                             if (imgPt != null) {
                                                 if (!strokeBegun && distMoved > 3f) {
@@ -962,8 +1057,9 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             }
                         }
                 ) {
-                    val bw = renderedBitmap.width.toFloat()
-                    val bh = renderedBitmap.height.toFloat()
+                    val displayFrame = if (isPeekingOriginal && targetBmp != null) targetBmp else renderedBitmap
+                    val bw = displayFrame.width.toFloat()
+                    val bh = displayFrame.height.toFloat()
                     val baseScale = min(size.width / bw, size.height / bh)
                     val scale = baseScale * viewportZoom
                     val drawW = bw * scale
@@ -972,7 +1068,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                     val top = (size.height - drawH) / 2f + viewportPan.y
 
                     drawImage(
-                        image = renderedBitmap.asImageBitmap(),
+                        image = displayFrame.asImageBitmap(),
                         dstOffset = IntOffset(left.toInt(), top.toInt()),
                         dstSize = IntSize(drawW.toInt(), drawH.toInt())
                     )
@@ -1155,6 +1251,24 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
             }
 
 
+            // Floating ORIGINAL / Before-After Peek Badge during Canvas Long-Press
+            if (isPeekingOriginal) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xEE0F172A))
+                        .border(1.2.dp, Color(0xFF38BDF8), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Icon(Icons.Default.Visibility, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
+                    Text("BEFORE · ORIGINAL", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
             // Landmark Nudge Bar (only visible when Mesh is active)
             if (adj.showGeometricMesh && faces.isNotEmpty()) {
                 val selId = viewModel.selectedFaceId ?: faces.first().id
@@ -1183,6 +1297,101 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                     }
                     IconButton(onClick = { viewModel.resetFaceLandmarks(selId) }, modifier = Modifier.size(28.dp)) {
                         Icon(Icons.Default.RestartAlt, contentDescription = "Reset", tint = Color(0xFFFBBF24), modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+
+            // Floating Flip Face Symbol Button + Auto-Flip Match Prompt on Canvas
+            val canvasFace = viewModel.getSelectedOrPrimaryFace()
+            if (renderedBitmap != null && canvasFace != null && canvasFace.assignedProfileId != null) {
+                val flipped = canvasFace.angleMatchFlipped
+                val flipSuggestDir = viewModel.getFlipSuggestionDirection(canvasFace)
+                val flipHintKey = "${canvasFace.id}:${canvasFace.assignedAngleId}:$flipped"
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(10.dp),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(
+                                when {
+                                    flipSuggestDir != null -> Color(0xE692400E)
+                                    flipped -> Color(0xE64F46E5)
+                                    else -> Color(0xCC0F172A)
+                                }
+                            )
+                            .border(
+                                1.3.dp,
+                                when {
+                                    flipSuggestDir != null -> Color(0xFFFBBF24)
+                                    flipped -> Color(0xFFA5B4FC)
+                                    else -> Color(0xFF334155)
+                                },
+                                CircleShape
+                            )
+                            .clickable { viewModel.toggleSelectedFaceFlip() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Flip,
+                            contentDescription = "Flip Face Left/Right",
+                            tint = if (flipSuggestDir != null) Color(0xFFFDE68A) else if (flipped) Color.White else Color(0xFFE2E8F0),
+                            modifier = Modifier.size(17.dp)
+                        )
+                        if (flipSuggestDir != null) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(3.dp)
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFFBBF24))
+                            )
+                        }
+                    }
+
+                    AnimatedVisibility(
+                        visible = flipSuggestDir != null && dismissedFlipHintKey != flipHintKey,
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xEC1E1B4B))
+                                .border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(10.dp))
+                                .clickable { viewModel.toggleSelectedFaceFlip() }
+                                .padding(start = 8.dp, end = 5.dp, top = 5.dp, bottom = 5.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Flip,
+                                contentDescription = null,
+                                tint = Color(0xFFFBBF24),
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                "Mirror for ${flipSuggestDir ?: ""} angle",
+                                color = Color(0xFFFEF3C7),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Dismiss hint",
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clickable { dismissedFlipHintKey = flipHintKey }
+                            )
+                        }
                     }
                 }
             }

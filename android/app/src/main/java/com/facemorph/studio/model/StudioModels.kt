@@ -209,6 +209,51 @@ data class FaceAdjustments(
     val virtualLight: VirtualLightConfig = VirtualLightConfig()
 )
 
+enum class CutoutToolId(val defaultLabel: String, val hasSettings: Boolean) {
+    AUTO("Auto", true),
+    RESTORE("Restore", true),
+    ERASE("Erase", true),
+    MAGIC("Magic", true),
+    PAN("Move", true)
+}
+
+data class CutoutToolbarPrefs(
+    val orderedTools: List<CutoutToolId> = listOf(
+        CutoutToolId.AUTO,
+        CutoutToolId.RESTORE,
+        CutoutToolId.ERASE,
+        CutoutToolId.MAGIC,
+        CutoutToolId.PAN
+    ),
+    val enabledTools: Set<CutoutToolId> = CutoutToolId.entries.toSet(),
+    val compactLabels: Boolean = true,
+    val largeButtons: Boolean = false,
+    val longPressOpensSettings: Boolean = true,
+    val tapActiveOpensSettings: Boolean = true,
+    val showCompareButton: Boolean = true,
+    val showBackdropButton: Boolean = true,
+    val showMagnifierLoupe: Boolean = true,
+    val defaultBrushSizePx: Float = 36f,
+    val defaultBrushHardnessPct: Float = 70f,
+    val defaultTolerance: Int = 35,
+    val defaultOverlayPct: Float = 42f
+)
+
+data class SourceFaceScanResult(
+    val faceDetected: Boolean,
+    val metrics: SourceFaceMetrics
+)
+
+data class MultiAngleImportReport(
+    val profileName: String,
+    val totalSelected: Int,
+    val addedCount: Int,
+    val skippedDuplicateCount: Int,
+    val skippedNoFaceCount: Int,
+    val addedLabels: List<String>,
+    val skippedReasons: List<String>
+)
+
 enum class WardrobeCategory(val label: String) {
     CLOTHING("Clothing"),
     JEWELRY("Jewelry"),
@@ -224,6 +269,7 @@ enum class WardrobeSubCategory(
     ETHNIC("Ethnic", WardrobeCategory.CLOTHING),
     JACKET("Jacket", WardrobeCategory.CLOTHING),
     NECKLACE("Necklace", WardrobeCategory.JEWELRY),
+    EARRING("Earrings", WardrobeCategory.JEWELRY),
     WATCH("Watch", WardrobeCategory.JEWELRY),
     GLASSES("Glasses", WardrobeCategory.ACCESSORY),
     HEADWEAR("Headwear", WardrobeCategory.ACCESSORY)
@@ -235,14 +281,15 @@ fun defaultSubCategoryFor(
 ): WardrobeSubCategory {
     return when (category) {
         WardrobeCategory.CLOTHING -> WardrobeSubCategory.SUIT
-        WardrobeCategory.JEWELRY -> if (anchorPoint == BodyAnchorPoint.WRIST) {
-            WardrobeSubCategory.WATCH
-        } else {
-            WardrobeSubCategory.NECKLACE
+        WardrobeCategory.JEWELRY -> when (anchorPoint) {
+            BodyAnchorPoint.WRIST -> WardrobeSubCategory.WATCH
+            BodyAnchorPoint.EARRINGS -> WardrobeSubCategory.EARRING
+            else -> WardrobeSubCategory.NECKLACE
         }
         WardrobeCategory.ACCESSORY -> when (anchorPoint) {
             BodyAnchorPoint.WRIST -> WardrobeSubCategory.WATCH
             BodyAnchorPoint.NECK -> WardrobeSubCategory.NECKLACE
+            BodyAnchorPoint.EARRINGS -> WardrobeSubCategory.EARRING
             else -> WardrobeSubCategory.GLASSES
         }
     }
@@ -251,6 +298,7 @@ fun defaultSubCategoryFor(
 enum class BodyAnchorPoint(val label: String) {
     SHOULDERS("Shoulders"),
     NECK("Neck"),
+    EARRINGS("Earrings (Pair)"),
     HEAD("Head"),
     WRIST("Wrist"),
     WAIST("Waist")
@@ -283,12 +331,16 @@ data class WardrobeAssetItem(
     val category: WardrobeCategory,
     val anchorPoint: BodyAnchorPoint,
     val subCategory: WardrobeSubCategory = defaultSubCategoryFor(category, anchorPoint),
+    val customSubCategory: String? = null,
     val fabricType: FabricType = FabricType.COTTON,
     val drawableResId: Int? = null,
     val customFilePath: String? = null,
     val defaultScale: Float = 1.0f,
     val isCustom: Boolean = false
-)
+) {
+    val displaySubCategory: String
+        get() = customSubCategory?.trim()?.takeIf { it.isNotEmpty() } ?: subCategory.label
+}
 
 data class FittedWardrobeLayer(
     val assetId: String,

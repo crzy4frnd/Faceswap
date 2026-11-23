@@ -130,7 +130,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Effects, 1=Background, 2=Wardrobe
     var isDeckExpanded by remember { mutableStateOf(true) }
     var showLiveLightStudio by remember { mutableStateOf(false) }
-    var selectedWardrobeSubFilter by remember { mutableStateOf<WardrobeSubCategory?>(null) }
+    var selectedWardrobeSubFilter by remember { mutableStateOf<String?>(null) }
     var pendingFaceCameraFile by remember { mutableStateOf<File?>(null) }
 
     var hasCameraPermission by remember {
@@ -865,27 +865,29 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                         }
 
                         2 -> {
-                            val subCategories = remember(viewModel.wardrobeAssets) {
-                                WardrobeSubCategory.entries.filter { sub ->
-                                    viewModel.wardrobeAssets.any { it.subCategory == sub } ||
-                                        sub in listOf(
-                                            WardrobeSubCategory.SUIT,
-                                            WardrobeSubCategory.SHIRT,
-                                            WardrobeSubCategory.JACKET,
-                                            WardrobeSubCategory.ETHNIC,
-                                            WardrobeSubCategory.NECKLACE,
-                                            WardrobeSubCategory.WATCH,
-                                            WardrobeSubCategory.GLASSES
-                                        )
-                                }
+                            val subCategories = remember(viewModel.wardrobeAssets, viewModel.customSubCategories) {
+                                val ordered = LinkedHashSet<String>()
+                                listOf(
+                                    WardrobeSubCategory.SUIT.label,
+                                    WardrobeSubCategory.SHIRT.label,
+                                    WardrobeSubCategory.JACKET.label,
+                                    WardrobeSubCategory.ETHNIC.label,
+                                    WardrobeSubCategory.NECKLACE.label,
+                                    WardrobeSubCategory.EARRING.label,
+                                    WardrobeSubCategory.WATCH.label,
+                                    WardrobeSubCategory.GLASSES.label
+                                ).forEach { ordered.add(it) }
+                                viewModel.wardrobeAssets.forEach { ordered.add(it.displaySubCategory) }
+                                viewModel.customSubCategories.values.flatten().forEach { ordered.add(it) }
+                                ordered.toList()
                             }
                             val visibleAssets = remember(viewModel.wardrobeAssets, selectedWardrobeSubFilter) {
                                 val sub = selectedWardrobeSubFilter
                                 if (sub == null) viewModel.wardrobeAssets
-                                else viewModel.wardrobeAssets.filter { it.subCategory == sub }
+                                else viewModel.wardrobeAssets.filter { it.displaySubCategory.equals(sub, ignoreCase = true) }
                             }
 
-                            // Easy Sub-Category Selection Row (All, Suit, Shirt, Jacket, Ethnic, Necklace, Watch, Glasses)
+                            // Easy Sub-Category Selection Row (Built-in + User-Created items like Kurta, Jhumka, etc.)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -916,9 +918,9 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                     )
                                 }
 
-                                subCategories.forEach { sub ->
-                                    val subAssets = viewModel.wardrobeAssets.filter { it.subCategory == sub }
-                                    val isSel = selectedWardrobeSubFilter == sub
+                                subCategories.forEach { subLabel ->
+                                    val subAssets = viewModel.wardrobeAssets.filter { it.displaySubCategory.equals(subLabel, ignoreCase = true) }
+                                    val isSel = selectedWardrobeSubFilter == subLabel
                                     val isWornInSub = subAssets.any { asset ->
                                         if (asset.category == WardrobeCategory.CLOTHING) {
                                             config.wearClothes && config.selectedClothingId == asset.id
@@ -948,7 +950,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                                 RoundedCornerShape(8.dp)
                                             )
                                             .clickable {
-                                                selectedWardrobeSubFilter = sub
+                                                selectedWardrobeSubFilter = subLabel
                                                 val firstMatch = subAssets.firstOrNull()
                                                 if (firstMatch != null && !isWornInSub) {
                                                     viewModel.liveConfig = if (firstMatch.category == WardrobeCategory.CLOTHING) {
@@ -969,7 +971,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                             )
                                         }
                                         Text(
-                                            if (subAssets.isNotEmpty()) "${sub.label} (${subAssets.size})" else sub.label,
+                                            if (subAssets.isNotEmpty()) "$subLabel (${subAssets.size})" else subLabel,
                                             color = if (isSel || isWornInSub) Color.White else Color(0xFFCBD5E1),
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.SemiBold,

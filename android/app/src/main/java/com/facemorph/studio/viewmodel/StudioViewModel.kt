@@ -29,6 +29,8 @@ import com.facemorph.studio.engine.NativeStorageHelper
 import com.facemorph.studio.model.BodyAnchorPoint
 import com.facemorph.studio.model.BodyScanResult
 import com.facemorph.studio.model.ClothPhysicsConfig
+import com.facemorph.studio.model.CutoutToolId
+import com.facemorph.studio.model.CutoutToolbarPrefs
 import com.facemorph.studio.model.DetectedFaceData
 import com.facemorph.studio.model.FabricType
 import com.facemorph.studio.model.FaceAdjustments
@@ -37,6 +39,7 @@ import com.facemorph.studio.model.FaceAngleVariant
 import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.FittedWardrobeLayer
 import com.facemorph.studio.model.LiveCameraConfig
+import com.facemorph.studio.model.MultiAngleImportReport
 import com.facemorph.studio.model.Point2D
 import com.facemorph.studio.model.SegmentedTargetLayers
 import com.facemorph.studio.model.SkinSamplePatch
@@ -129,7 +132,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var showFaceProfileManager by mutableStateOf(false)
     var pendingAngleTargetProfileId by mutableStateOf<String?>(null)
 
+    // Cutout Studio Toolbar Customization, Custom Sub-Categories, & Multi-Photo Angle Scan
+    var cutoutToolbarPrefs by mutableStateOf(CutoutToolbarPrefs())
+    var customSubCategories by mutableStateOf<Map<WardrobeCategory, List<String>>>(emptyMap())
+    var isBatchImportingFaces by mutableStateOf(false)
+    var batchImportStatus by mutableStateOf<String?>(null)
+    var lastMultiImportReport by mutableStateOf<MultiAngleImportReport?>(null)
+
     init {
+        cutoutToolbarPrefs = loadCutoutToolbarPrefs()
+        customSubCategories = loadSavedCustomSubCategories()
         loadBuiltInCaches()
     }
 
@@ -715,6 +727,152 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun clearMultiImportReport() {
+        lastMultiImportReport = null
+    }
+
+    fun createFaceProfileFromUris(uris: List<Uri>, name: String? = null) {
+        if (uris.isEmpty()) return
+        if (uris.size == 1) {
+            createFaceProfileFromUri(uris.first(), name)
+            return
+        }
+        val cleanName = name?.trim()?.takeIf { it.isNotBlank() } ?: "Profile ${faceProfiles.size + 1}"
+        val profileId = createEmptyProfile(cleanName)
+        addMultipleAnglesToProfileFromUris(profileId, uris)
+    }
+
+    fun addMultipleAnglesToProfileFromUris(profileId: String, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        if (uris.size == 1) {
+            addAngleToProfileFromUri(profileId, uris.first())
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val targetProfile = faceProfiles.find { it.id == profileId } ?: return@launch
+            withContext(Dispatchers.Main) {
+                isBatchImportingFaces = true
+                lastMultiImportReport = null
+                batchImportStatus = "Scanning 1 / ${uris.size}..."
+            }
+
+            val accumulatedExisting = targetProfile.angles
+                .map { it to angleMetricsCache[it.id] }
+                .toMutableList()
+
+            val newlyAdded = mutableListOf<FaceAngleVariant>()
+            val newBitmaps = mutableMapOf<String, Bitmap>()
+            val newCutouts = mutableMapOf<String, Bitmap>()
+            val newMetrics = mutableMapOf<String, SourceFaceMetrics>()
+            val addedLabels = mutableListOf<String>()
+            val skippedReasons = mutableListOf<String>()
+            var skippedDup = 0
+            var skippedNoFace = 0
+
+            uris.forEachIndexed { idx, uri ->
+                withContext(Dispatchers.Main) {
+                    batchImportStatus = "Scanning ${idx + 1} / ${uris.size} face angles..."
+                }
+                val bmp = NativeStorageHelper.loadBitmapFromUri(ctx, uri, 900)
+                if (bmp == null) {
+                    skippedNoFace++
+                    skippedReasons.add("#${idx + 1}: Could not read photo")
+                    return@forEachIndexed
+                }
+
+                val scan = NativeFaceSwapEngine.detectSourceFaceMetricsStrict(bmp)
+                if (!scan.faceDetected) {
+                    skippedNoFace++
+                    skippedReasons.add("#${idx + 1}: No clear face found")
+                    return@forEachIndexed
+                }
+
+                val metrics = scan.metrics
+                val bucket = classifyFaceAngleBucket(metrics.yawDeg, metrics.pitchDeg)
+                if (NativeFaceSwapEngine.checkDuplicateAngle(accumulatedExisting, metrics, strictAngleDedup = true)) {
+                    skippedDup++
+                    skippedReasons.add("#${idx + 1}: Duplicate ${bucket.shortTag} (${metrics.yawDeg.toInt()}°)")
+                    return@forEachIndexed
+                }
+
+                val ts = System.currentTimeMillis()
+                val angleId = "angle-${ts}-$idx"
+                val cutoutBmp = NativeFaceSwapEngine.createCutoutFaceAvatar(bmp, metrics, 240)
+                val fullPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png")
+                if (fullPath == null) {
+                    skippedNoFace++
+                    skippedReasons.add("#${idx + 1}: Storage write failed")
+                    return@forEachIndexed
+                }
+                val cutoutPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
+
+                val variant = FaceAngleVariant(
+                    id = angleId,
+                    filePath = fullPath,
+                    cutoutFilePath = cutoutPath,
+                    bucket = bucket,
+                    yawDeg = metrics.yawDeg,
+                    pitchDeg = metrics.pitchDeg,
+                    rollDeg = metrics.rollDeg,
+                    createdAt = ts + idx
+                )
+                newlyAdded.add(variant)
+                accumulatedExisting.add(variant to metrics)
+                newBitmaps[angleId] = bmp
+                newCutouts[angleId] = cutoutBmp
+                newMetrics[angleId] = metrics
+                addedLabels.add("${bucket.shortTag} (${metrics.yawDeg.toInt()}°)")
+            }
+
+            withContext(Dispatchers.Main) {
+                isBatchImportingFaces = false
+                batchImportStatus = null
+                if (newlyAdded.isNotEmpty()) {
+                    angleBitmapCache.putAll(newBitmaps)
+                    angleCutoutCache.putAll(newCutouts)
+                    angleMetricsCache.putAll(newMetrics)
+                    val updatedList = faceProfiles.map { p ->
+                        if (p.id == profileId) {
+                            val combined = p.angles + newlyAdded
+                            val selId = p.selectedAngleId ?: newlyAdded.first().id
+                            val selPath = combined.find { it.id == selId }?.filePath ?: newlyAdded.first().filePath
+                            p.copy(
+                                customFilePath = selPath,
+                                angles = combined,
+                                selectedAngleId = selId
+                            )
+                        } else p
+                    }
+                    faceProfiles = updatedList
+                    val primary = newlyAdded.first()
+                    if (profileBitmapCache[profileId] == null) {
+                        newBitmaps[primary.id]?.let { profileBitmapCache[profileId] = it }
+                        newMetrics[primary.id]?.let { profileMetricsCache[profileId] = it }
+                    }
+                    persistFaceProfiles(updatedList)
+                    activeProfileId = profileId
+                    assignProfileToSelectedOrAll(profileId)
+                }
+
+                lastMultiImportReport = MultiAngleImportReport(
+                    profileName = targetProfile.name,
+                    totalSelected = uris.size,
+                    addedCount = newlyAdded.size,
+                    skippedDuplicateCount = skippedDup,
+                    skippedNoFaceCount = skippedNoFace,
+                    addedLabels = addedLabels,
+                    skippedReasons = skippedReasons
+                )
+                val summaryMsg = buildString {
+                    append("Added ${newlyAdded.size}/${uris.size} angles")
+                    if (skippedDup > 0) append(" · $skippedDup duplicate skipped")
+                    if (skippedNoFace > 0) append(" · $skippedNoFace no-face")
+                }
+                showToast(summaryMsg)
+            }
+        }
+    }
+
     private suspend fun saveNewFaceProfileBitmap(bmp: Bitmap, name: String?) {
         val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
         val cutoutBmp = NativeFaceSwapEngine.createCutoutFaceAvatar(bmp, metrics, 240)
@@ -1271,6 +1429,48 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         showToast("Matched best face angles (${lastScanMatchScore}%) to target poses")
     }
 
+    fun getSelectedOrPrimaryFace(): DetectedFaceData? {
+        val selId = selectedFaceId
+        return detectedFaces.find { it.id == selId } ?: detectedFaces.firstOrNull()
+    }
+
+    /**
+     * Returns target direction label ("Left" or "Right") when target head yaw and current
+     * source face yaw point in opposite horizontal directions such that flipping improves alignment.
+     */
+    fun getFlipSuggestionDirection(face: DetectedFaceData?): String? {
+        if (face == null || face.assignedProfileId == null) return null
+        val targetYaw = face.yawDeg
+        if (kotlin.math.abs(targetYaw) < 5.5f) return null
+
+        val profile = faceProfiles.find { it.id == face.assignedProfileId }
+        val angleId = face.assignedAngleId ?: profile?.selectedAngleId ?: profile?.angles?.firstOrNull()?.id
+        val variant = profile?.angles?.find { it.id == angleId }
+        val rawSourceYaw = (angleId?.let { angleMetricsCache[it]?.yawDeg }
+            ?: variant?.yawDeg
+            ?: profileMetricsCache[face.assignedProfileId]?.yawDeg
+            ?: 0f)
+        if (kotlin.math.abs(rawSourceYaw) < 5.5f) return null
+
+        val effectiveSourceYaw = if (face.angleMatchFlipped) -rawSourceYaw else rawSourceYaw
+        if (targetYaw * effectiveSourceYaw >= 0f) return null
+
+        val curDiff = kotlin.math.abs(targetYaw - effectiveSourceYaw)
+        val flippedDiff = kotlin.math.abs(targetYaw - (-effectiveSourceYaw))
+        if (flippedDiff + 4f >= curDiff) return null
+
+        return if (targetYaw < 0f) "Left" else "Right"
+    }
+
+    fun toggleSelectedFaceFlip() {
+        val target = getSelectedOrPrimaryFace() ?: return
+        val nextFlip = !target.angleMatchFlipped
+        detectedFaces = detectedFaces.map { f ->
+            if (f.id == target.id) f.copy(angleMatchFlipped = nextFlip) else f
+        }
+        showToast(if (nextFlip) "Flipped face Left <-> Right" else "Restored face orientation")
+    }
+
     fun toggleFaceEnabled(faceId: String) {
         detectedFaces = detectedFaces.map { f ->
             if (f.id == faceId) f.copy(enabled = !f.enabled) else f
@@ -1320,6 +1520,34 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun addCustomSubCategory(category: WardrobeCategory, rawLabel: String): String? {
+        val cleaned = rawLabel.trim().replace(Regex("\\s+"), " ")
+        if (cleaned.isBlank()) return null
+        val normalized = cleaned.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        val builtInMatch = WardrobeSubCategory.entries.find {
+            it.parentCategory == category && it.label.equals(normalized, ignoreCase = true)
+        }
+        if (builtInMatch != null) return builtInMatch.label
+
+        val existingForCat = customSubCategories[category].orEmpty()
+        val existingMatch = existingForCat.find { it.equals(normalized, ignoreCase = true) }
+        if (existingMatch != null) return existingMatch
+
+        val nextList = existingForCat + normalized
+        val nextMap = customSubCategories.toMutableMap().apply { put(category, nextList) }
+        customSubCategories = nextMap
+        persistCustomSubCategories(nextMap)
+        showToast("Created '$normalized' in ${category.label}")
+        return normalized
+    }
+
+    fun updateCutoutToolbarPrefs(next: CutoutToolbarPrefs) {
+        val safeEnabled = if (next.enabledTools.isEmpty()) setOf(CutoutToolId.RESTORE, CutoutToolId.ERASE) else next.enabledTools
+        val cleaned = next.copy(enabledTools = safeEnabled)
+        cutoutToolbarPrefs = cleaned
+        persistCutoutToolbarPrefs(cleaned)
+    }
+
     fun addCustomWardrobeAsset(
         name: String,
         transparentBitmap: Bitmap,
@@ -1327,17 +1555,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         anchorPoint: BodyAnchorPoint,
         fabricType: FabricType,
         defaultScale: Float,
-        subCategory: WardrobeSubCategory = defaultSubCategoryFor(category, anchorPoint)
+        subCategory: WardrobeSubCategory = defaultSubCategoryFor(category, anchorPoint),
+        customSubCategory: String? = null
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             val id = "custom-${System.currentTimeMillis()}"
             val path = NativeStorageHelper.saveBitmapToInternalFile(ctx, transparentBitmap, "$id.png")
+            val trimmedCustomSub = customSubCategory?.trim()?.takeIf { it.isNotEmpty() }
             val item = WardrobeAssetItem(
                 id = id,
-                name = name.ifBlank { "Custom Costume" },
+                name = name.ifBlank { trimmedCustomSub ?: "Custom Costume" },
                 category = category,
                 anchorPoint = anchorPoint,
                 subCategory = subCategory,
+                customSubCategory = trimmedCustomSub,
                 fabricType = fabricType,
                 customFilePath = path,
                 defaultScale = defaultScale,
@@ -1356,7 +1587,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     liveConfig.copy(selectedJewelryId = id, wearJewelry = true)
                 }
                 customAssetNonce++
-                showToast("Saved '${item.name}' to Wardrobe & Live AR")
+                showToast("Saved '${item.name}' (${item.displaySubCategory})")
             }
         }
     }
@@ -1520,6 +1751,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 put("category", item.category.name)
                 put("anchorPoint", item.anchorPoint.name)
                 put("subCategory", item.subCategory.name)
+                put("customSubCategory", item.customSubCategory ?: "")
                 put("fabricType", item.fabricType.name)
                 put("customFilePath", item.customFilePath ?: "")
                 put("defaultScale", item.defaultScale.toDouble())
@@ -1543,12 +1775,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     val sub = o.optString("subCategory", "").takeIf { it.isNotBlank() }?.let {
                         runCatching { WardrobeSubCategory.valueOf(it) }.getOrNull()
                     } ?: defaultSubCategoryFor(cat, anchor)
+                    val customSub = o.optString("customSubCategory", "").takeIf { it.isNotBlank() }
                     WardrobeAssetItem(
                         id = o.getString("id"),
                         name = o.getString("name"),
                         category = cat,
                         anchorPoint = anchor,
                         subCategory = sub,
+                        customSubCategory = customSub,
                         fabricType = FabricType.valueOf(o.getString("fabricType")),
                         customFilePath = path,
                         defaultScale = o.optDouble("defaultScale", 1.0).toFloat(),
@@ -1558,6 +1792,98 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
         } catch (_: Exception) {
             emptyList()
+        }
+    }
+
+    private fun persistCustomSubCategories(map: Map<WardrobeCategory, List<String>>) {
+        val obj = JSONObject()
+        map.forEach { (cat, list) ->
+            val arr = JSONArray()
+            list.forEach { arr.put(it) }
+            obj.put(cat.name, arr)
+        }
+        prefs.edit().putString("custom_subcategories_v1", obj.toString()).apply()
+    }
+
+    private fun loadSavedCustomSubCategories(): Map<WardrobeCategory, List<String>> {
+        val raw = prefs.getString("custom_subcategories_v1", null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(raw)
+            val result = mutableMapOf<WardrobeCategory, List<String>>()
+            WardrobeCategory.entries.forEach { cat ->
+                val arr = obj.optJSONArray(cat.name) ?: return@forEach
+                val items = (0 until arr.length()).mapNotNull { idx ->
+                    arr.optString(idx, "").trim().takeIf { it.isNotEmpty() }
+                }
+                if (items.isNotEmpty()) result[cat] = items
+            }
+            result
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun persistCutoutToolbarPrefs(p: CutoutToolbarPrefs) {
+        val obj = JSONObject().apply {
+            val orderArr = JSONArray()
+            p.orderedTools.forEach { orderArr.put(it.name) }
+            put("orderedTools", orderArr)
+            val enabledArr = JSONArray()
+            p.enabledTools.forEach { enabledArr.put(it.name) }
+            put("enabledTools", enabledArr)
+            put("compactLabels", p.compactLabels)
+            put("largeButtons", p.largeButtons)
+            put("longPressOpensSettings", p.longPressOpensSettings)
+            put("tapActiveOpensSettings", p.tapActiveOpensSettings)
+            put("showCompareButton", p.showCompareButton)
+            put("showBackdropButton", p.showBackdropButton)
+            put("showMagnifierLoupe", p.showMagnifierLoupe)
+            put("defaultBrushSizePx", p.defaultBrushSizePx.toDouble())
+            put("defaultBrushHardnessPct", p.defaultBrushHardnessPct.toDouble())
+            put("defaultTolerance", p.defaultTolerance)
+            put("defaultOverlayPct", p.defaultOverlayPct.toDouble())
+        }
+        prefs.edit().putString("cutout_toolbar_prefs_v1", obj.toString()).apply()
+    }
+
+    private fun loadCutoutToolbarPrefs(): CutoutToolbarPrefs {
+        val raw = prefs.getString("cutout_toolbar_prefs_v1", null) ?: return CutoutToolbarPrefs()
+        return try {
+            val o = JSONObject(raw)
+            val defaults = CutoutToolbarPrefs()
+            val parsedOrder = mutableListOf<CutoutToolId>()
+            o.optJSONArray("orderedTools")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    runCatching { CutoutToolId.valueOf(arr.getString(i)) }.getOrNull()?.let { id ->
+                        if (id !in parsedOrder) parsedOrder.add(id)
+                    }
+                }
+            }
+            CutoutToolId.entries.forEach { id -> if (id !in parsedOrder) parsedOrder.add(id) }
+
+            val parsedEnabled = mutableSetOf<CutoutToolId>()
+            o.optJSONArray("enabledTools")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    runCatching { CutoutToolId.valueOf(arr.getString(i)) }.getOrNull()?.let { parsedEnabled.add(it) }
+                }
+            }
+            CutoutToolbarPrefs(
+                orderedTools = parsedOrder,
+                enabledTools = if (parsedEnabled.isNotEmpty()) parsedEnabled else defaults.enabledTools,
+                compactLabels = o.optBoolean("compactLabels", defaults.compactLabels),
+                largeButtons = o.optBoolean("largeButtons", defaults.largeButtons),
+                longPressOpensSettings = o.optBoolean("longPressOpensSettings", defaults.longPressOpensSettings),
+                tapActiveOpensSettings = o.optBoolean("tapActiveOpensSettings", defaults.tapActiveOpensSettings),
+                showCompareButton = o.optBoolean("showCompareButton", defaults.showCompareButton),
+                showBackdropButton = o.optBoolean("showBackdropButton", defaults.showBackdropButton),
+                showMagnifierLoupe = o.optBoolean("showMagnifierLoupe", defaults.showMagnifierLoupe),
+                defaultBrushSizePx = o.optDouble("defaultBrushSizePx", defaults.defaultBrushSizePx.toDouble()).toFloat().coerceIn(6f, 130f),
+                defaultBrushHardnessPct = o.optDouble("defaultBrushHardnessPct", defaults.defaultBrushHardnessPct.toDouble()).toFloat().coerceIn(0f, 100f),
+                defaultTolerance = o.optInt("defaultTolerance", defaults.defaultTolerance).coerceIn(10, 75),
+                defaultOverlayPct = o.optDouble("defaultOverlayPct", defaults.defaultOverlayPct.toDouble()).toFloat().coerceIn(0f, 85f)
+            )
+        } catch (_: Exception) {
+            CutoutToolbarPrefs()
         }
     }
 }

@@ -746,5 +746,148 @@ object NativeAssetSegmenter {
         return out
     }
 
+    /**
+     * Smooths jagged cutout silhouettes (1-2px alpha feather) and decontaminates boundary pixels
+     * toward nearby solid interior garment/jewelry colors to strip background halo fringes.
+     */
+    fun smoothAndFeatherEdges(
+        source: Bitmap,
+        featherRadiusPx: Int = 2,
+        dehaloStrength: Float = 0.72f
+    ): Bitmap {
+        val w = source.width
+        val h = source.height
+        if (w < 6 || h < 6) return source
+        val total = w * h
+        val pixels = IntArray(total)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val alphaArr = IntArray(total) { Color.alpha(pixels[it]) }
+        val rRadius = featherRadiusPx.coerceIn(1, 3)
+
+        // Identify boundary band (foreground pixels adjacent to background within rRadius, or semi-transparent pixels)
+        val isBoundary = BooleanArray(total)
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                val idx = row + x
+                val a = alphaArr[idx]
+                if (a in 1..244) {
+                    isBoundary[idx] = true
+                } else if (a >= 245) {
+                    var touchesEmpty = false
+                    val y0 = max(0, y - rRadius)
+                    val y1 = min(h - 1, y + rRadius)
+                    val x0 = max(0, x - rRadius)
+                    val x1 = min(w - 1, x + rRadius)
+                    loop@ for (ny in y0..y1) {
+                        val nrow = ny * w
+                        for (nx in x0..x1) {
+                            if (alphaArr[nrow + nx] < 24) {
+                                touchesEmpty = true
+                                break@loop
+                            }
+                        }
+                    }
+                    if (touchesEmpty) isBoundary[idx] = true
+                }
+            }
+        }
+
+        val outPixels = pixels.copyOf()
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                val idx = row + x
+                if (!isBoundary[idx]) continue
+
+                var weightedAlpha = 0f
+                var weightSum = 0f
+                var solidR = 0f
+                var solidG = 0f
+                var solidB = 0f
+                var solidCnt = 0
+
+                val y0 = max(0, y - rRadius)
+                val y1 = min(h - 1, y + rRadius)
+                val x0 = max(0, x - rRadius)
+                val x1 = min(w - 1, x + rRadius)
+
+                for (ny in y0..y1) {
+                    val nrow = ny * w
+                    val dy = ny - y
+                    for (nx in x0..x1) {
+                        val dx = nx - x
+                        val distSq = dx * dx + dy * dy
+                        val weight = 1f / (1f + distSq * 0.85f)
+                        val nIdx = nrow + nx
+                        val na = alphaArr[nIdx]
+                        weightedAlpha += na * weight
+                        weightSum += weight
+                        if (na >= 215 && !isBoundary[nIdx]) {
+                            val nc = pixels[nIdx]
+                            solidR += Color.red(nc)
+                            solidG += Color.green(nc)
+                            solidB += Color.blue(nc)
+                            solidCnt++
+                        }
+                    }
+                }
+
+                // Fallback search in 5x5 window for interior pigment if immediate neighbors are also fringe
+                if (solidCnt == 0) {
+                    val fy0 = max(0, y - 3); val fy1 = min(h - 1, y + 3)
+                    val fx0 = max(0, x - 3); val fx1 = min(w - 1, x + 3)
+                    for (ny in fy0..fy1) {
+                        val nrow = ny * w
+                        for (nx in fx0..fx1) {
+                            val nIdx = nrow + nx
+                            if (alphaArr[nIdx] >= 200) {
+                                val nc = pixels[nIdx]
+                                solidR += Color.red(nc)
+                                solidG += Color.green(nc)
+                                solidB += Color.blue(nc)
+                                solidCnt++
+                            }
+                        }
+                    }
+                }
+
+                val smoothA = (weightedAlpha / max(0.001f, weightSum)).toInt().coerceIn(0, 255)
+                // Gently taper edge alpha while preserving center core
+                val origA = alphaArr[idx]
+                val finalA = if (origA >= 220) {
+                    ((origA * 0.45f) + (smoothA * 0.55f)).toInt().coerceIn(0, 255)
+                } else {
+                    smoothA
+                }
+
+                if (finalA < 10) {
+                    outPixels[idx] = Color.TRANSPARENT
+                } else {
+                    val cur = pixels[idx]
+                    var rr = Color.red(cur)
+                    var rg = Color.green(cur)
+                    var rb = Color.blue(cur)
+                    if (solidCnt > 0 && finalA < 235) {
+                        val pureR = solidR / solidCnt
+                        val pureG = solidG / solidCnt
+                        val pureB = solidB / solidCnt
+                        val pull = (dehaloStrength * (1f - finalA / 255f * 0.55f)).coerceIn(0f, 0.88f)
+                        rr = (rr + (pureR - rr) * pull).toInt().coerceIn(0, 255)
+                        rg = (rg + (pureG - rg) * pull).toInt().coerceIn(0, 255)
+                        rb = (rb + (pureB - rb) * pull).toInt().coerceIn(0, 255)
+                    }
+                    outPixels[idx] = Color.argb(finalA, rr, rg, rb)
+                }
+            }
+        }
+
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setHasAlpha(true)
+        out.setPixels(outPixels, 0, w, 0, 0, w, h)
+        return out
+    }
+
     private fun hypotApprox(dx: Float, dy: Float): Float = sqrt(dx * dx + dy * dy)
 }
