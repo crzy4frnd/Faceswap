@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build-apk:
@@ -41,6 +42,7 @@ jobs:
         with:
           name: FaceMorph-Studio-debug-apk
           path: FaceMorph-Studio-debug.apk
+          retention-days: 7
 
       - name: Publish APK to GitHub Releases
         env:
@@ -54,3 +56,23 @@ jobs:
               --title "FaceMorph Studio Native Android APK (Latest)" \
               --notes "Pure native Kotlin & Jetpack Compose Android APK (Android 7.0+ / API 24+). Download FaceMorph-Studio-debug.apk directly on your phone to install."
           fi
+
+      - name: Delete old workflow runs and artifacts
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          for artifact_id in $(gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select((.workflow_run.id // 0) != ${CURRENT_RUN_ID}) | .id"); do
+            echo "Deleting old artifact $artifact_id"
+            gh api -X DELETE "repos/${REPO}/actions/artifacts/${artifact_id}" >/dev/null || true
+          done
+
+          for run_id in $(gh api --paginate "repos/${REPO}/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.id != ${CURRENT_RUN_ID} and .status == \"completed\") | .id"); do
+            echo "Deleting old workflow run $run_id"
+            gh api -X DELETE "repos/${REPO}/actions/runs/${run_id}" >/dev/null || true
+          done

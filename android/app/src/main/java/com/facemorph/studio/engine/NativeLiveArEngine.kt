@@ -15,6 +15,8 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import com.facemorph.studio.model.BodyAnchorPoint
+import com.facemorph.studio.model.FaceAngleVariant
+import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.LiveCameraConfig
 import com.facemorph.studio.model.SourceFaceMetrics
 import com.facemorph.studio.model.WardrobeAssetItem
@@ -102,7 +104,8 @@ object NativeLiveArEngine {
         jewelryAsset: WardrobeAssetItem?,
         jewelryBitmap: Bitmap?,
         timeSec: Float,
-        reusableOutput: Bitmap? = null
+        reusableOutput: Bitmap? = null,
+        activeProfileAngles: List<Triple<FaceAngleVariant, Bitmap, SourceFaceMetrics>> = emptyList()
     ): Bitmap {
         val w = frame.width
         val h = frame.height
@@ -193,87 +196,127 @@ object NativeLiveArEngine {
             applyFeatheredSkinSmooth(canvas, frame, faceCX, faceCY, faceW, faceH, config.hairRemovalIntensity)
         }
 
-        // 4. Real-Time Inner-Face Swap (Kalman-Stabilized Matrix) + Velocity-Triggered Motion Trail
+        // 4. Real-Time Inner-Face Swap (Kalman-Stabilized Matrix) + Dynamic Multi-Angle Selection + Motion Trail
         var activeSwapTransform: StabilizedFaceSwapTransform? = null
-        if (config.faceSwapEnabled && swapProfileBitmap != null && swapProfileMetrics != null && config.swapStrength > 0) {
-            val swapTransform = bodyPoseSmoother.buildStabilizedFaceSwapTransform(
-                stabilizedFace = smoothFace,
-                eyeDistRatio = swapProfileMetrics.eyeDistRatio,
-                eyeMidXRatio = swapProfileMetrics.eyeMidXRatio,
-                eyeMidYRatio = swapProfileMetrics.eyeMidYRatio,
-                sourceRollDeg = swapProfileMetrics.rollDeg,
-                dtSec = dtSec
-            )
-            activeSwapTransform = swapTransform
-            val patchW = swapTransform.patchWidth
-            val patchH = swapTransform.patchHeight
-            val targetSkinRgb = NativeFaceSwapEngine.sampleFacialSkinOnlyRgb(
-                bmp = frame,
-                cx = faceCX.toInt(),
-                cy = (swapTransform.eyeMidY + faceH * 0.14f).toInt(),
-                radiusX = max(6, (faceW * 0.24f).toInt()),
-                radiusY = max(6, (faceH * 0.16f).toInt())
-            )
-            val patch = NativeFaceSwapEngine.createFeatheredInnerFacePatch(
-                srcBitmap = swapProfileBitmap,
-                metrics = swapProfileMetrics,
-                patchW = patchW,
-                patchH = patchH,
-                featherRatio = 0.42f,
-                smartBlend = true,
-                targetSkinRgb = targetSkinRgb,
-                applyDefaultRadialMask = false
-            )
+        val canRunFaceSwap = config.faceSwapEnabled &&
+            config.swapStrength > 0 &&
+            (activeProfileAngles.isNotEmpty() || (swapProfileBitmap != null && swapProfileMetrics != null))
+        if (canRunFaceSwap) {
+            var chosenBitmap: Bitmap? = swapProfileBitmap
+            var chosenMetrics: SourceFaceMetrics? = swapProfileMetrics
+            var flippedTemp: Bitmap? = null
 
-            if (config.virtualLight.enabled && config.virtualLight.intensity > 0.015f) {
-                val localLight = config.virtualLight.copy(
-                    directionDeg = config.virtualLight.directionDeg - swapTransform.angleDeg
+            if (activeProfileAngles.isNotEmpty()) {
+                val tempProfile = FaceProfileItem(
+                    id = "live-active",
+                    name = "",
+                    angles = activeProfileAngles.map { it.first }
                 )
-                VirtualLightingStudioShader.applyFaceMeshRelighting(
+                val angleMetricsMap = activeProfileAngles.associate { it.first.id to it.third }
+                val match = NativeFaceSwapEngine.findBestAngleForPose(
+                    profile = tempProfile,
+                    angleMetrics = angleMetricsMap,
+                    targetYawDeg = smoothFace.yawDeg,
+                    targetPitchDeg = smoothFace.pitchDeg,
+                    targetRollDeg = smoothFace.rollDeg
+                )
+                val selectedTriple = activeProfileAngles.find { it.first.id == match.angleId }
+                    ?: activeProfileAngles.first()
+                if (match.shouldFlip) {
+                    flippedTemp = NativeFaceSwapEngine.flipBitmapHorizontal(selectedTriple.second)
+                    chosenBitmap = flippedTemp
+                    chosenMetrics = NativeFaceSwapEngine.mirrorMetricsHorizontal(selectedTriple.third)
+                } else {
+                    chosenBitmap = selectedTriple.second
+                    chosenMetrics = selectedTriple.third
+                }
+            }
+
+            if (chosenBitmap != null && chosenMetrics != null) {
+                val swapTransform = bodyPoseSmoother.buildStabilizedFaceSwapTransform(
+                    stabilizedFace = smoothFace,
+                    eyeDistRatio = chosenMetrics.eyeDistRatio,
+                    eyeMidXRatio = chosenMetrics.eyeMidXRatio,
+                    eyeMidYRatio = chosenMetrics.eyeMidYRatio,
+                    sourceRollDeg = chosenMetrics.rollDeg,
+                    dtSec = dtSec
+                )
+                activeSwapTransform = swapTransform
+                val patchW = swapTransform.patchWidth
+                val patchH = swapTransform.patchHeight
+                val targetSkinRgb = NativeFaceSwapEngine.sampleFacialSkinOnlyRgb(
+                    bmp = frame,
+                    cx = faceCX.toInt(),
+                    cy = (swapTransform.eyeMidY + faceH * 0.14f).toInt(),
+                    radiusX = max(6, (faceW * 0.24f).toInt()),
+                    radiusY = max(6, (faceH * 0.16f).toInt())
+                )
+                val patch = NativeFaceSwapEngine.createFeatheredInnerFacePatch(
+                    srcBitmap = chosenBitmap,
+                    metrics = chosenMetrics,
+                    patchW = patchW,
+                    patchH = patchH,
+                    featherRatio = 0.42f,
+                    smartBlend = true,
+                    targetSkinRgb = targetSkinRgb,
+                    applyDefaultRadialMask = false
+                )
+                flippedTemp?.recycle()
+
+                if (config.virtualLight.enabled && config.virtualLight.intensity > 0.015f) {
+                    val localLight = config.virtualLight.copy(
+                        directionDeg = config.virtualLight.directionDeg - swapTransform.angleDeg
+                    )
+                    VirtualLightingStudioShader.applyFaceMeshRelighting(
+                        patch = patch,
+                        metrics = chosenMetrics,
+                        light = localLight,
+                        targetAmbientRgb = targetSkinRgb
+                    )
+                }
+
+                FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
                     patch = patch,
-                    metrics = swapProfileMetrics,
-                    light = localLight,
-                    targetAmbientRgb = targetSkinRgb
+                    targetSource = frame,
+                    swapMatrix = swapTransform.matrix,
+                    featherRatio = 0.42f,
+                    smartBlend = true,
+                    blendIntensity = 0.85f,
+                    preserveHighContrastOcclusions = true
                 )
+
+                val swapAlpha = ((config.swapStrength / 100f) * 255f).toInt().coerceIn(0, 255)
+
+                // Render fluid motion trail behind the swapped face during rapid camera pans/rotations
+                renderFaceSwapMotionTrailIfMoving(
+                    canvas = canvas,
+                    patch = patch,
+                    metrics = chosenMetrics,
+                    eyeMidX = swapTransform.eyeMidX,
+                    eyeMidY = swapTransform.eyeMidY,
+                    patchW = patchW.toFloat(),
+                    patchH = patchH.toFloat(),
+                    faceW = faceW,
+                    finalAngle = swapTransform.angleDeg,
+                    swapAlpha = swapAlpha,
+                    trackingConfidence = smoothFace.trackingConfidence,
+                    frameW = w,
+                    frameH = h,
+                    config = config,
+                    profileHash = System.identityHashCode(chosenBitmap),
+                    timeSec = timeSec
+                )
+
+                val swapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    alpha = swapAlpha
+                }
+                canvas.drawBitmap(patch, swapTransform.matrix, swapPaint)
+                patch.recycle()
+            } else {
+                flippedTemp?.recycle()
+                bodyPoseSmoother.resetFaceSwapKalman()
+                clearFaceMotionTrail()
             }
-
-            FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
-                patch = patch,
-                targetSource = frame,
-                swapMatrix = swapTransform.matrix,
-                featherRatio = 0.42f,
-                smartBlend = true,
-                blendIntensity = 0.85f,
-                preserveHighContrastOcclusions = true
-            )
-
-            val swapAlpha = ((config.swapStrength / 100f) * 255f).toInt().coerceIn(0, 255)
-
-            // Render fluid motion trail behind the swapped face during rapid camera pans/rotations
-            renderFaceSwapMotionTrailIfMoving(
-                canvas = canvas,
-                patch = patch,
-                metrics = swapProfileMetrics,
-                eyeMidX = swapTransform.eyeMidX,
-                eyeMidY = swapTransform.eyeMidY,
-                patchW = patchW.toFloat(),
-                patchH = patchH.toFloat(),
-                faceW = faceW,
-                finalAngle = swapTransform.angleDeg,
-                swapAlpha = swapAlpha,
-                trackingConfidence = smoothFace.trackingConfidence,
-                frameW = w,
-                frameH = h,
-                config = config,
-                profileHash = System.identityHashCode(swapProfileBitmap),
-                timeSec = timeSec
-            )
-
-            val swapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-                alpha = swapAlpha
-            }
-            canvas.drawBitmap(patch, swapTransform.matrix, swapPaint)
-            patch.recycle()
         } else {
             bodyPoseSmoother.resetFaceSwapKalman()
             clearFaceMotionTrail()

@@ -92,7 +92,10 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
         // Clear Unclipped Actions: Add Face (Gallery & Camera) + Scan Costume
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = { faceGalleryPicker.launch("image/*") },
+                onClick = {
+                    viewModel.pendingAngleTargetProfileId = null
+                    faceGalleryPicker.launch("image/*")
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.weight(1f).height(40.dp),
@@ -104,6 +107,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
             }
             Button(
                 onClick = {
+                    viewModel.pendingAngleTargetProfileId = null
                     val (uri, file) = NativeStorageHelper.createTempCameraUri(context, "vault_face")
                     pendingFaceCameraFile = file
                     faceCameraLauncher.launch(uri)
@@ -130,7 +134,30 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
             }
         }
 
-        Text("Your Face Profiles (${viewModel.faceProfiles.size})", color = Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Face Profiles (${viewModel.faceProfiles.size})",
+                color = Color(0xFF94A3B8),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "Manage Profiles",
+                color = Color(0xFFA5B4FC),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF1E1B4B))
+                    .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
+                    .clickable { viewModel.showFaceProfileManager = true }
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            )
+        }
         if (viewModel.faceProfiles.isEmpty()) {
             Box(
                 modifier = Modifier
@@ -141,7 +168,7 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                     .padding(12.dp)
             ) {
                 Text(
-                    "No saved faces yet. Use Face Gallery or Face Camera above to add your own faces.",
+                    "No saved profiles yet. Use Face Gallery, Face Camera, or Manage Profiles to add face angles.",
                     color = Color(0xFF64748B),
                     fontSize = 11.sp
                 )
@@ -151,36 +178,68 @@ fun WardrobeVaultScreen(viewModel: StudioViewModel) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 viewModel.faceProfiles.forEach { p ->
-                    val bmp = viewModel.profileBitmapCache[p.id]
+                    val bmp = viewModel.getCutoutThumbForProfile(p.id)
                     val active = viewModel.activeProfileId == p.id
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    Box(
                         modifier = Modifier
+                            .size(56.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .border(1.dp, if (active) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(12.dp))
+                            .border(
+                                width = if (active) 2.dp else 1.dp,
+                                color = if (active) Color(0xFF6366F1) else Color(0xFF1E293B),
+                                shape = RoundedCornerShape(12.dp)
+                            )
                             .background(if (active) Color(0xFF1E1B4B) else Color(0xFF0B1120))
                             .clickable {
                                 viewModel.assignProfileToSelectedOrAll(p.id)
                                 viewModel.activeTab = StudioTab.FACE_STUDIO
                             }
-                            .padding(start = 8.dp, top = 8.dp, bottom = 8.dp, end = 4.dp)
                     ) {
                         if (bmp != null) {
-                            Image(bitmap = bmp.asImageBitmap(), contentDescription = p.name, contentScale = ContentScale.Crop, modifier = Modifier.size(38.dp).clip(CircleShape))
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize().padding(3.dp)
+                            )
                         }
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(p.name, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                            Text(p.tag, color = Color(0xFF818CF8), fontSize = 9.sp)
-                        }
-                        IconButton(
-                            onClick = { viewModel.removeFaceProfile(p.id) },
-                            modifier = Modifier.size(28.dp)
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(2.dp)
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xCC020617))
+                                .clickable { viewModel.removeFaceProfile(p.id) },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Close, contentDescription = "Delete face", tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Delete profile",
+                                tint = Color(0xFFCBD5E1),
+                                modifier = Modifier.size(10.dp)
+                            )
+                        }
+                        if (p.angles.size > 1) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(2.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(Color(0xD9312E81))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    "${p.angles.size}",
+                                    color = Color.White,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }

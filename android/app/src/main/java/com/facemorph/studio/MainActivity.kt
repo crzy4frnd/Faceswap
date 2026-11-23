@@ -53,6 +53,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.facemorph.studio.model.StudioTab
 import com.facemorph.studio.ui.BodyPhysicsScreen
 import com.facemorph.studio.ui.CustomAssetDialog
+import com.facemorph.studio.ui.FaceProfileManagerDialog
 import com.facemorph.studio.ui.FaceStudioScreen
 import com.facemorph.studio.ui.LiveCameraScreen
 import com.facemorph.studio.ui.WardrobeVaultScreen
@@ -221,6 +222,13 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
         CustomAssetDialog(
             viewModel = studioViewModel,
             onDismiss = { studioViewModel.showCustomAssetDialog = false }
+        )
+    }
+
+    if (studioViewModel.showFaceProfileManager) {
+        FaceProfileManagerDialog(
+            viewModel = studioViewModel,
+            onDismiss = { studioViewModel.showFaceProfileManager = false }
         )
     }
 }

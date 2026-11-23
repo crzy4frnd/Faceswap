@@ -15,7 +15,10 @@ import android.graphics.RectF
 import android.graphics.Shader
 import com.facemorph.studio.model.DetectedFaceData
 import com.facemorph.studio.model.FaceAdjustments
+import com.facemorph.studio.model.FaceAngleMatchResult
+import com.facemorph.studio.model.FaceAngleVariant
 import com.facemorph.studio.model.FaceLandmarksData
+import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.Point2D
 import com.facemorph.studio.model.SegmentedTargetLayers
 import com.facemorph.studio.model.SourceFaceMetrics
@@ -31,6 +34,7 @@ import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 object NativeFaceSwapEngine {
 
@@ -132,6 +136,10 @@ object NativeFaceSwapEngine {
                                 )
                             } ?: emptyList()
 
+                            val yaw = f.headEulerAngleY.coerceIn(-65f, 65f)
+                            val pitch = f.headEulerAngleX.coerceIn(-45f, 45f)
+                            val visSig = computeVisualSignature(bitmap, cropL, cropT, cropR, cropB)
+
                             if (cont.isActive) {
                                 cont.resume(
                                     SourceFaceMetrics(
@@ -143,15 +151,22 @@ object NativeFaceSwapEngine {
                                         eyeMidYRatio = eyeMidY.coerceIn(0.20f, 0.52f),
                                         eyeDistRatio = eyeDist.coerceIn(0.28f, 0.76f),
                                         rollDeg = roll.coerceIn(-45f, 45f),
+                                        yawDeg = yaw,
+                                        pitchDeg = pitch,
                                         noseYRatio = noseY.coerceIn(0.40f, 0.72f),
                                         mouthYRatio = mouthY.coerceIn(0.58f, 0.88f),
                                         aspectRatio = (cropW / cropH).coerceIn(0.60f, 1.15f),
-                                        contourNorm = contourNorm
+                                        contourNorm = contourNorm,
+                                        visualSignature = visSig
                                     )
                                 )
                             }
                         } else {
-                            if (cont.isActive) cont.resume(defaultSourceMetrics())
+                            if (cont.isActive) cont.resume(
+                                defaultSourceMetrics().copy(
+                                    visualSignature = computeVisualSignature(bitmap, 0.25f, 0.16f, 0.75f, 0.68f)
+                                )
+                            )
                         }
                     }
                     .addOnFailureListener {
@@ -211,6 +226,16 @@ object NativeFaceSwapEngine {
                                 val contourPts = f.getContour(FaceContour.FACE)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
                                 val lbPts = f.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
                                 val rbPts = f.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val roll = if (viewerLe != null && viewerRe != null) {
+                                    Math.toDegrees(
+                                        atan2(
+                                            (viewerRe.y - viewerLe.y).toDouble(),
+                                            (viewerRe.x - viewerLe.x).toDouble()
+                                        )
+                                    ).toFloat()
+                                } else {
+                                    (-f.headEulerAngleZ).coerceIn(-45f, 45f)
+                                }
                                 DetectedFaceData(
                                     id = "face-$idx",
                                     boxLeft = b.left.toFloat(),
@@ -223,6 +248,9 @@ object NativeFaceSwapEngine {
                                     enabled = true,
                                     strength = 100,
                                     smileScore = f.smilingProbability ?: 0.5f,
+                                    yawDeg = f.headEulerAngleY.coerceIn(-65f, 65f),
+                                    pitchDeg = f.headEulerAngleX.coerceIn(-45f, 45f),
+                                    rollDeg = roll.coerceIn(-45f, 45f),
                                     faceContour = contourPts,
                                     leftBrowTop = lbPts,
                                     rightBrowTop = rbPts
@@ -270,6 +298,277 @@ object NativeFaceSwapEngine {
                 strength = 100
             )
         )
+    }
+
+    fun computeVisualSignature(
+        bitmap: Bitmap,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float
+    ): List<Float> {
+        if (bitmap.width < 8 || bitmap.height < 8) return emptyList()
+        val sL = (bitmap.width * cropLeft).toInt().coerceIn(0, bitmap.width - 2)
+        val sT = (bitmap.height * cropTop).toInt().coerceIn(0, bitmap.height - 2)
+        val sR = (bitmap.width * cropRight).toInt().coerceIn(sL + 2, bitmap.width)
+        val sB = (bitmap.height * cropBottom).toInt().coerceIn(sT + 2, bitmap.height)
+        val crop = Bitmap.createBitmap(bitmap, sL, sT, sR - sL, sB - sT)
+        val tiny = Bitmap.createScaledBitmap(crop, 8, 8, true)
+        if (crop !== bitmap) crop.recycle()
+
+        val lums = FloatArray(64)
+        var sum = 0f
+        for (y in 0 until 8) {
+            for (x in 0 until 8) {
+                val p = tiny.getPixel(x, y)
+                val l = 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p)
+                lums[y * 8 + x] = l
+                sum += l
+            }
+        }
+        tiny.recycle()
+        val mean = sum / 64f
+        var normSq = 0f
+        for (i in 0 until 64) {
+            lums[i] -= mean
+            normSq += lums[i] * lums[i]
+        }
+        val norm = max(1e-4f, sqrt(normSq))
+        return lums.map { it / norm }
+    }
+
+    fun cosineSimilarity(a: List<Float>, b: List<Float>): Float {
+        if (a.isEmpty() || b.isEmpty() || a.size != b.size) return 0f
+        var dot = 0f
+        var na = 0f
+        var nb = 0f
+        for (i in a.indices) {
+            dot += a[i] * b[i]
+            na += a[i] * a[i]
+            nb += b[i] * b[i]
+        }
+        val denom = max(1e-5f, sqrt(na) * sqrt(nb))
+        return (dot / denom).coerceIn(-1f, 1f)
+    }
+
+    fun checkDuplicateAngle(
+        existing: List<Pair<FaceAngleVariant, SourceFaceMetrics?>>,
+        candidate: SourceFaceMetrics
+    ): Boolean {
+        for ((angle, metrics) in existing) {
+            val yaw = metrics?.yawDeg ?: angle.yawDeg
+            val pitch = metrics?.pitchDeg ?: angle.pitchDeg
+            if (abs(yaw - candidate.yawDeg) < 6.5f && abs(pitch - candidate.pitchDeg) < 6.5f) {
+                val sig = metrics?.visualSignature ?: emptyList()
+                if (sig.isEmpty() || candidate.visualSignature.isEmpty()) return true
+                if (cosineSimilarity(sig, candidate.visualSignature) >= 0.945f) return true
+            }
+        }
+        return false
+    }
+
+    fun findBestAngleForPose(
+        profile: FaceProfileItem,
+        angleMetrics: Map<String, SourceFaceMetrics>,
+        targetYawDeg: Float,
+        targetPitchDeg: Float,
+        targetRollDeg: Float
+    ): FaceAngleMatchResult {
+        if (profile.angles.isEmpty()) {
+            return FaceAngleMatchResult(
+                profileId = profile.id,
+                angleId = profile.selectedAngleId,
+                matchScore = 84,
+                shouldFlip = false,
+                yawDelta = 0f,
+                pitchDelta = 0f,
+                rollDelta = 0f
+            )
+        }
+
+        var bestVariant: FaceAngleVariant = profile.angles.first()
+        var bestScore = -1f
+        var bestFlip = false
+        var bestYawD = 0f
+        var bestPitchD = 0f
+        var bestRollD = 0f
+
+        for (angle in profile.angles) {
+            val m = angleMetrics[angle.id]
+            val srcYaw = m?.yawDeg ?: angle.yawDeg
+            val srcPitch = m?.pitchDeg ?: angle.pitchDeg
+            val srcRoll = m?.rollDeg ?: angle.rollDeg
+
+            // Direct orientation
+            run {
+                val yD = abs(targetYawDeg - srcYaw)
+                val pD = abs(targetPitchDeg - srcPitch)
+                val rD = abs(targetRollDeg - srcRoll)
+                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f
+                val score = (100f - penalty).coerceIn(12f, 100f)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestVariant = angle
+                    bestFlip = false
+                    bestYawD = yD
+                    bestPitchD = pD
+                    bestRollD = rD
+                }
+            }
+
+            // Horizontally mirrored orientation (useful when only opposite 3/4 view is saved)
+            if (abs(srcYaw) > 10f && abs(targetYawDeg) > 10f) {
+                val yD = abs(targetYawDeg - (-srcYaw))
+                val pD = abs(targetPitchDeg - srcPitch)
+                val rD = abs(targetRollDeg - (-srcRoll))
+                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f + 7f
+                val score = (100f - penalty).coerceIn(12f, 100f)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestVariant = angle
+                    bestFlip = true
+                    bestYawD = yD
+                    bestPitchD = pD
+                    bestRollD = rD
+                }
+            }
+        }
+
+        return FaceAngleMatchResult(
+            profileId = profile.id,
+            angleId = bestVariant.id,
+            matchScore = bestScore.toInt().coerceIn(0, 100),
+            shouldFlip = bestFlip,
+            yawDelta = bestYawD,
+            pitchDelta = bestPitchD,
+            rollDelta = bestRollD
+        )
+    }
+
+    fun flipBitmapHorizontal(src: Bitmap): Bitmap {
+        val m = Matrix().apply { postScale(-1f, 1f, src.width * 0.5f, src.height * 0.5f) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+    }
+
+    fun mirrorMetricsHorizontal(metrics: SourceFaceMetrics): SourceFaceMetrics {
+        return metrics.copy(
+            cropLeft = (1f - metrics.cropRight).coerceIn(0.01f, 0.85f),
+            cropRight = (1f - metrics.cropLeft).coerceIn(0.11f, 0.99f),
+            eyeMidXRatio = (1f - metrics.eyeMidXRatio).coerceIn(0.28f, 0.72f),
+            rollDeg = -metrics.rollDeg,
+            yawDeg = -metrics.yawDeg,
+            contourNorm = metrics.contourNorm.map { Point2D(1f - it.x, it.y) }
+        )
+    }
+
+    /**
+     * Generates a clean transparent cutout face avatar bitmap anchored tightly on the face contour
+     * with smooth radial edge feathering and no background clutter.
+     */
+    fun createCutoutFaceAvatar(
+        srcBitmap: Bitmap,
+        metrics: SourceFaceMetrics,
+        sizePx: Int = 240
+    ): Bitmap {
+        val out = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888).apply {
+            setHasAlpha(true)
+        }
+        val canvas = Canvas(out)
+
+        val sL = (srcBitmap.width * metrics.cropLeft).toInt().coerceIn(0, srcBitmap.width - 2)
+        val sT = (srcBitmap.height * metrics.cropTop).toInt().coerceIn(0, srcBitmap.height - 2)
+        val sR = (srcBitmap.width * metrics.cropRight).toInt().coerceIn(sL + 2, srcBitmap.width)
+        val sB = (srcBitmap.height * metrics.cropBottom).toInt().coerceIn(sT + 2, srcBitmap.height)
+        val cropW = (sR - sL).toFloat()
+        val cropH = (sB - sT).toFloat()
+
+        val fitScale = min((sizePx * 0.90f) / cropW, (sizePx * 0.90f) / cropH)
+        val drawW = cropW * fitScale
+        val drawH = cropH * fitScale
+        val dstL = (sizePx - drawW) * 0.5f
+        val dstT = (sizePx - drawH) * 0.5f
+        val dstRect = RectF(dstL, dstT, dstL + drawW, dstT + drawH)
+
+        val layerSave = canvas.saveLayer(0f, 0f, sizePx.toFloat(), sizePx.toFloat(), null)
+        canvas.drawBitmap(
+            srcBitmap,
+            Rect(sL, sT, sR, sB),
+            dstRect,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
+
+        val maskBmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888).apply {
+            setHasAlpha(true)
+        }
+        val maskCanvas = Canvas(maskBmp)
+        val solidPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+
+        if (metrics.contourNorm.size >= 12) {
+            val path = Path()
+            val pts = metrics.contourNorm
+            val cx = 0.5f
+            val cy = 0.52f
+            pts.forEachIndexed { idx, p ->
+                val ex = (cx + (p.x - cx) * 1.06f).coerceIn(0f, 1f)
+                val ey = (cy + (p.y - cy) * 1.05f).coerceIn(0f, 1f)
+                val px = dstL + ex * drawW
+                val py = dstT + ey * drawH
+                if (idx == 0) path.moveTo(px, py) else path.lineTo(px, py)
+            }
+            path.close()
+            maskCanvas.drawPath(path, solidPaint)
+        } else {
+            val insetX = drawW * 0.08f
+            val insetY = drawH * 0.05f
+            maskCanvas.drawOval(
+                RectF(
+                    dstL + insetX,
+                    dstT + insetY,
+                    dstL + drawW - insetX,
+                    dstT + drawH - insetY
+                ),
+                solidPaint
+            )
+        }
+
+        // Subtle soft radial falloff at perimeter so avatar edge feels crisp yet anti-aliased
+        val radial = RadialGradient(
+            0f,
+            0f,
+            1f,
+            intArrayOf(Color.WHITE, Color.WHITE, Color.TRANSPARENT),
+            floatArrayOf(0f, 0.84f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        radial.setLocalMatrix(Matrix().apply {
+            setScale(drawW * 0.50f, drawH * 0.51f)
+            postTranslate(sizePx * 0.5f, sizePx * 0.5f)
+        })
+        maskCanvas.drawRect(
+            0f,
+            0f,
+            sizePx.toFloat(),
+            sizePx.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                shader = radial
+            }
+        )
+
+        canvas.drawBitmap(
+            maskBmp,
+            0f,
+            0f,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            }
+        )
+        maskBmp.recycle()
+        canvas.restoreToCount(layerSave)
+        return out
     }
 
     fun sampleFacialSkinOnlyRgb(
@@ -627,7 +926,9 @@ object NativeFaceSwapEngine {
         adjustments: FaceAdjustments,
         splitPercent: Float? = null,
         protectionMask: Bitmap? = null,
-        segmentedLayers: SegmentedTargetLayers? = null
+        segmentedLayers: SegmentedTargetLayers? = null,
+        angleBitmaps: Map<String, Bitmap> = emptyMap(),
+        angleMetrics: Map<String, SourceFaceMetrics> = emptyMap()
     ): Bitmap {
         val w = targetBitmap.width
         val h = targetBitmap.height
@@ -693,8 +994,16 @@ object NativeFaceSwapEngine {
             if (!adjustments.showFaceLayer) break
             if (!face.enabled) continue
             val profId = face.assignedProfileId ?: continue
-            val srcBitmap = profileBitmaps[profId] ?: continue
-            val metrics = profileMetrics[profId] ?: defaultSourceMetrics()
+            val resolvedAngleId = face.assignedAngleId
+            val rawSrcBitmap = (if (resolvedAngleId != null) angleBitmaps[resolvedAngleId] else null)
+                ?: profileBitmaps[profId]
+                ?: continue
+            val rawMetrics = (if (resolvedAngleId != null) angleMetrics[resolvedAngleId] else null)
+                ?: profileMetrics[profId]
+                ?: defaultSourceMetrics()
+            val flippedTemp = if (face.angleMatchFlipped) flipBitmapHorizontal(rawSrcBitmap) else null
+            val srcBitmap = flippedTemp ?: rawSrcBitmap
+            val metrics = if (face.angleMatchFlipped) mirrorMetricsHorizontal(rawMetrics) else rawMetrics
 
             val lm = face.landmarks
             val (viewerLeft, viewerRight) = if (lm.leftEye.x <= lm.rightEye.x) {
@@ -751,6 +1060,7 @@ object NativeFaceSwapEngine {
                 saturation = adjustments.saturation,
                 warmth = adjustments.warmth
             )
+            flippedTemp?.recycle()
 
             if (adjustments.virtualLight.enabled && adjustments.virtualLight.intensity > 0.015f) {
                 val localLight = adjustments.virtualLight.copy(

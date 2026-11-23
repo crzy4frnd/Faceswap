@@ -120,6 +120,9 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
     val latestBgMap by rememberUpdatedState(viewModel.backgroundBitmapCache.toMap())
     val latestProfileMap by rememberUpdatedState(viewModel.profileBitmapCache.toMap())
     val latestMetricsMap by rememberUpdatedState(viewModel.profileMetricsCache.toMap())
+    val latestProfiles by rememberUpdatedState(viewModel.faceProfiles)
+    val latestAngleBitmaps by rememberUpdatedState(viewModel.angleBitmapCache.toMap())
+    val latestAngleMetrics by rememberUpdatedState(viewModel.angleMetricsCache.toMap())
     val latestWardrobeAssets by rememberUpdatedState(viewModel.wardrobeAssets)
     val latestWardrobeBitmaps by rememberUpdatedState(viewModel.wardrobeBitmapCache.toMap())
     val latestActiveProfileId by rememberUpdatedState(viewModel.activeProfileId)
@@ -217,6 +220,12 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                 val bgBmp = latestBgMap[curCfg.activeBgId]
                 val swapBmp = latestProfileMap[latestActiveProfileId]
                 val swapMetrics = latestMetricsMap[latestActiveProfileId]
+                val activeProfile = latestProfiles.find { it.id == latestActiveProfileId } ?: latestProfiles.firstOrNull()
+                val activeAngleTriples = activeProfile?.angles?.mapNotNull { a ->
+                    val ab = latestAngleBitmaps[a.id] ?: return@mapNotNull null
+                    val am = latestAngleMetrics[a.id] ?: return@mapNotNull null
+                    Triple(a, ab, am)
+                } ?: emptyList()
                 val clothAsset = latestWardrobeAssets.find { it.id == curCfg.selectedClothingId }
                 val clothBmp = clothAsset?.let { latestWardrobeBitmaps[it.id] }
                 val jewAsset = latestWardrobeAssets.find { it.id == curCfg.selectedJewelryId }
@@ -240,7 +249,8 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                     jewelryAsset = jewAsset,
                     jewelryBitmap = jewBmp,
                     timeSec = elapsedSec,
-                    reusableOutput = reusableOut
+                    reusableOutput = reusableOut,
+                    activeProfileAngles = activeAngleTriples
                 )
                 val frameDurationMs = SystemClock.elapsedRealtime() - frameStartMs
                 thermalMonitor.recordFrameMetrics(
@@ -683,6 +693,9 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                     add(Triple("Jewelry", config.wearJewelry) { viewModel.liveConfig = config.copy(wearJewelry = !config.wearJewelry) })
                                     add(Triple("Face Swap", config.faceSwapEnabled) { viewModel.liveConfig = config.copy(faceSwapEnabled = !config.faceSwapEnabled) })
                                     if (config.faceSwapEnabled) {
+                                        add(Triple("Profiles (${viewModel.faceProfiles.size})", viewModel.showFaceProfileManager) {
+                                            viewModel.showFaceProfileManager = true
+                                        })
                                         add(Triple("Motion Trail", config.faceMotionTrail) { viewModel.liveConfig = config.copy(faceMotionTrail = !config.faceMotionTrail) })
                                         add(Triple("Relight", showLiveLightStudio) { showLiveLightStudio = !showLiveLightStudio })
                                     }
@@ -725,7 +738,10 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                             .clip(RoundedCornerShape(8.dp))
                                             .background(Color(0xFF1E1B4B))
                                             .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
-                                            .clickable { faceGalleryPicker.launch("image/*") }
+                                            .clickable {
+                                                viewModel.pendingAngleTargetProfileId = null
+                                                faceGalleryPicker.launch("image/*")
+                                            }
                                             .padding(horizontal = 10.dp, vertical = 6.dp)
                                     ) {
                                         Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(14.dp))
@@ -739,6 +755,7 @@ fun LiveCameraScreen(viewModel: StudioViewModel) {
                                             .background(Color(0xFF082F49))
                                             .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(8.dp))
                                             .clickable {
+                                                viewModel.pendingAngleTargetProfileId = null
                                                 val (uri, file) = NativeStorageHelper.createTempCameraUri(context, "live_face")
                                                 pendingFaceCameraFile = file
                                                 faceCameraLauncher.launch(uri)

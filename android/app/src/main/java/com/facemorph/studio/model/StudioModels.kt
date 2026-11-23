@@ -20,6 +20,33 @@ data class FaceLandmarksData(
     val chin: Point2D
 )
 
+enum class FaceAngleBucket(val shortTag: String) {
+    FRONT("Front"),
+    LEFT_SLIGHT("Left Slight"),
+    RIGHT_SLIGHT("Right Slight"),
+    LEFT_3QUARTER("Left 3/4"),
+    RIGHT_3QUARTER("Right 3/4"),
+    LEFT_PROFILE("Left Profile"),
+    RIGHT_PROFILE("Right Profile"),
+    TILT_UP("Tilt Up"),
+    TILT_DOWN("Tilt Down")
+}
+
+fun classifyFaceAngleBucket(yawDeg: Float, pitchDeg: Float): FaceAngleBucket {
+    val absYaw = kotlin.math.abs(yawDeg)
+    if (absYaw < 10f && pitchDeg > 13f) return FaceAngleBucket.TILT_UP
+    if (absYaw < 10f && pitchDeg < -13f) return FaceAngleBucket.TILT_DOWN
+    return when {
+        absYaw <= 9f -> FaceAngleBucket.FRONT
+        yawDeg > 9f && yawDeg <= 20f -> FaceAngleBucket.RIGHT_SLIGHT
+        yawDeg < -9f && yawDeg >= -20f -> FaceAngleBucket.LEFT_SLIGHT
+        yawDeg > 20f && yawDeg <= 34f -> FaceAngleBucket.RIGHT_3QUARTER
+        yawDeg < -20f && yawDeg >= -34f -> FaceAngleBucket.LEFT_3QUARTER
+        yawDeg > 34f -> FaceAngleBucket.RIGHT_PROFILE
+        else -> FaceAngleBucket.LEFT_PROFILE
+    }
+}
+
 data class SourceFaceMetrics(
     val cropLeft: Float,
     val cropTop: Float,
@@ -29,10 +56,13 @@ data class SourceFaceMetrics(
     val eyeMidYRatio: Float,
     val eyeDistRatio: Float,
     val rollDeg: Float,
+    val yawDeg: Float = 0f,
+    val pitchDeg: Float = 0f,
     val noseYRatio: Float = 0.56f,
     val mouthYRatio: Float = 0.75f,
     val aspectRatio: Float = 0.86f,
-    val contourNorm: List<Point2D> = emptyList()
+    val contourNorm: List<Point2D> = emptyList(),
+    val visualSignature: List<Float> = emptyList()
 )
 
 data class DetectedFaceData(
@@ -44,13 +74,40 @@ data class DetectedFaceData(
     val landmarks: FaceLandmarksData,
     val originalLandmarks: FaceLandmarksData,
     val assignedProfileId: String? = null,
+    val assignedAngleId: String? = null,
+    val angleMatchScore: Int? = null,
+    val angleMatchFlipped: Boolean = false,
     val enabled: Boolean = true,
     val strength: Int = 100,
     val smileScore: Float = 0.5f,
+    val yawDeg: Float = 0f,
+    val pitchDeg: Float = 0f,
+    val rollDeg: Float = 0f,
     val isLandmarksEdited: Boolean = false,
     val faceContour: List<Point2D> = emptyList(),
     val leftBrowTop: List<Point2D> = emptyList(),
     val rightBrowTop: List<Point2D> = emptyList()
+)
+
+data class FaceAngleVariant(
+    val id: String,
+    val filePath: String,
+    val cutoutFilePath: String? = null,
+    val bucket: FaceAngleBucket = FaceAngleBucket.FRONT,
+    val yawDeg: Float = 0f,
+    val pitchDeg: Float = 0f,
+    val rollDeg: Float = 0f,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+data class FaceAngleMatchResult(
+    val profileId: String,
+    val angleId: String?,
+    val matchScore: Int,
+    val shouldFlip: Boolean,
+    val yawDelta: Float,
+    val pitchDelta: Float,
+    val rollDelta: Float
 )
 
 data class FaceProfileItem(
@@ -58,7 +115,8 @@ data class FaceProfileItem(
     val name: String,
     val drawableResId: Int? = null,
     val customFilePath: String? = null,
-    val tag: String = "Studio"
+    val angles: List<FaceAngleVariant> = emptyList(),
+    val selectedAngleId: String? = null
 )
 
 data class TargetSampleItem(

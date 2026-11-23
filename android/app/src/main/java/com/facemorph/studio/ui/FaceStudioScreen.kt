@@ -32,7 +32,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
@@ -114,6 +116,9 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     val segmentedLayers = viewModel.segmentedTargetLayers
     val profileCache = viewModel.profileBitmapCache.toMap()
     val metricsCache = viewModel.profileMetricsCache.toMap()
+    val angleBitmapCache = viewModel.angleBitmapCache.toMap()
+    val angleCutoutCache = viewModel.angleCutoutCache.toMap()
+    val angleMetricsCache = viewModel.angleMetricsCache.toMap()
 
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Cutout, 3=Light, 4=Align
     var isDeckExpanded by remember { mutableStateOf(true) }
@@ -213,6 +218,8 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
         faces,
         profileCache,
         metricsCache,
+        angleBitmapCache,
+        angleMetricsCache,
         adj,
         viewModel.splitCompareEnabled,
         viewModel.splitComparePercent,
@@ -229,7 +236,9 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 adjustments = adj,
                 splitPercent = if (viewModel.splitCompareEnabled) viewModel.splitComparePercent else null,
                 protectionMask = viewModel.cutoutProtectionMask,
-                segmentedLayers = viewModel.segmentedTargetLayers
+                segmentedLayers = viewModel.segmentedTargetLayers,
+                angleBitmaps = angleBitmapCache,
+                angleMetrics = angleMetricsCache
             )
         }
     }
@@ -1053,10 +1062,10 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 ) {
                     when (activeDeckTab) {
                         0 -> {
-                            // Unclipped Add Face Actions: Gallery + Camera
+                            // Unclipped Profile Actions: New Profile (Gallery / Camera) + Manage Profiles
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -1066,12 +1075,15 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                         .clip(RoundedCornerShape(9.dp))
                                         .background(Color(0xFF1E1B4B))
                                         .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(9.dp))
-                                        .clickable { faceGalleryPicker.launch("image/*") }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                                        .clickable {
+                                            viewModel.pendingAngleTargetProfileId = null
+                                            faceGalleryPicker.launch("image/*")
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 7.dp)
                                 ) {
-                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(15.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Add Face: Gallery", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Gallery", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                                 }
 
                                 Row(
@@ -1082,22 +1094,41 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                         .clip(RoundedCornerShape(9.dp))
                                         .background(Color(0xFF082F49))
                                         .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(9.dp))
-                                        .clickable { launchFaceCamera() }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                                        .clickable {
+                                            viewModel.pendingAngleTargetProfileId = null
+                                            launchFaceCamera()
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 7.dp)
                                 ) {
-                                    Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFF22D3EE), modifier = Modifier.size(15.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Add Face: Camera", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFF22D3EE), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Camera", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(Color(0xFF111827))
+                                        .border(1.dp, Color(0xFF475569), RoundedCornerShape(9.dp))
+                                        .clickable { viewModel.showFaceProfileManager = true }
+                                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                                ) {
+                                    Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Profiles (${viewModel.faceProfiles.size})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                                 }
                             }
 
                             if (viewModel.faceProfiles.isEmpty()) {
                                 Text(
-                                    "No faces added yet. Tap Gallery or Camera above to add a face.",
+                                    "No profiles yet. Tap Gallery, Camera, or Profiles to create a profile and save multiple face angles.",
                                     color = Color(0xFF94A3B8),
                                     fontSize = 11.sp
                                 )
                             } else {
+                                // Clean label-free cutout face profile avatars
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1107,41 +1138,151 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                 ) {
                                     viewModel.faceProfiles.forEach { profile ->
                                         val isSelected = viewModel.activeProfileId == profile.id
-                                        val pBmp = profileCache[profile.id]
+                                        val primaryAngleId = profile.selectedAngleId ?: profile.angles.firstOrNull()?.id
+                                        val cutoutBmp = primaryAngleId?.let { angleCutoutCache[it] ?: angleBitmapCache[it] }
+                                            ?: profileCache[profile.id]
+                                        Box(
+                                            modifier = Modifier
+                                                .size(54.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .border(
+                                                    width = if (isSelected) 2.dp else 1.dp,
+                                                    color = if (isSelected) Color(0xFF6366F1) else Color(0xFF1E293B),
+                                                    shape = RoundedCornerShape(12.dp)
+                                                )
+                                                .background(if (isSelected) Color(0xFF1E1B4B) else Color(0xFF090F1D))
+                                                .clickable { viewModel.assignProfileToSelectedOrAll(profile.id) }
+                                        ) {
+                                            if (cutoutBmp != null) {
+                                                Image(
+                                                    bitmap = cutoutBmp.asImageBitmap(),
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Fit,
+                                                    modifier = Modifier.fillMaxSize().padding(3.dp)
+                                                )
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(2.dp)
+                                                    .size(16.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xCC020617))
+                                                    .clickable { viewModel.removeFaceProfile(profile.id) },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Close,
+                                                    contentDescription = "Remove profile",
+                                                    tint = Color(0xFFCBD5E1),
+                                                    modifier = Modifier.size(10.dp)
+                                                )
+                                            }
+                                            if (profile.angles.size > 1) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomEnd)
+                                                        .padding(2.dp)
+                                                        .clip(RoundedCornerShape(5.dp))
+                                                        .background(Color(0xD9312E81))
+                                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                ) {
+                                                    Text(
+                                                        "${profile.angles.size}",
+                                                        color = Color.White,
+                                                        fontSize = 8.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Multi-Angle Cutout Strip & +Angle controls for active profile (zero labels on cutouts)
+                                val activeProf = viewModel.faceProfiles.find { it.id == viewModel.activeProfileId }
+                                    ?: viewModel.faceProfiles.firstOrNull()
+                                if (activeProf != null) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        activeProf.angles.forEach { angle ->
+                                            val isAngleSel = activeProf.selectedAngleId == angle.id
+                                            val aBmp = angleCutoutCache[angle.id] ?: angleBitmapCache[angle.id]
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(40.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFF090F1D))
+                                                    .border(
+                                                        width = if (isAngleSel) 1.8.dp else 1.dp,
+                                                        color = if (isAngleSel) Color(0xFF22D3EE) else Color(0xFF334155),
+                                                        shape = CircleShape
+                                                    )
+                                                    .clickable { viewModel.selectProfileAngle(activeProf.id, angle.id) }
+                                            ) {
+                                                if (aBmp != null) {
+                                                    Image(
+                                                        bitmap = aBmp.asImageBitmap(),
+                                                        contentDescription = null,
+                                                        contentScale = ContentScale.Fit,
+                                                        modifier = Modifier.fillMaxSize().padding(2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
                                             modifier = Modifier
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .border(1.5.dp, if (isSelected) Color(0xFF6366F1) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
-                                                .background(if (isSelected) Color(0xFF1E1B4B) else Color(0xFF111827))
-                                                .clickable { viewModel.assignProfileToSelectedOrAll(profile.id) }
-                                                .padding(start = 8.dp, top = 6.dp, bottom = 6.dp, end = 4.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0xFF111827))
+                                                .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    viewModel.pendingAngleTargetProfileId = activeProf.id
+                                                    faceGalleryPicker.launch("image/*")
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp)
                                         ) {
-                                            if (pBmp != null) {
-                                                Image(
-                                                    bitmap = pBmp.asImageBitmap(),
-                                                    contentDescription = profile.name,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.size(38.dp).clip(CircleShape)
-                                                )
-                                            }
-                                            Spacer(Modifier.width(8.dp))
-                                            Column {
-                                                Text(
-                                                    profile.name,
-                                                    color = Color.White,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(profile.tag, color = Color(0xFF818CF8), fontSize = 9.sp)
-                                            }
-                                            IconButton(
-                                                onClick = { viewModel.removeFaceProfile(profile.id) },
-                                                modifier = Modifier.size(26.dp)
+                                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(13.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("+ Angle", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                        }
+
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0xFF082F49))
+                                                .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    viewModel.pendingAngleTargetProfileId = activeProf.id
+                                                    launchFaceCamera()
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        ) {
+                                            Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("+ Cam", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                        }
+
+                                        if (faces.isNotEmpty() && activeProf.angles.size > 1) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(Color(0xFF0F172A))
+                                                    .border(1.dp, Color(0xFF10B981), RoundedCornerShape(8.dp))
+                                                    .clickable { viewModel.autoMatchAllTargetFaces() }
+                                                    .padding(horizontal = 8.dp, vertical = 6.dp)
                                             ) {
-                                                Icon(Icons.Default.Close, contentDescription = "Remove face", tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
+                                                Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(13.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Match", color = Color(0xFF34D399), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                                             }
                                         }
                                     }
