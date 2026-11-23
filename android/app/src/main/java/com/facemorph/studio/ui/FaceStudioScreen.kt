@@ -123,11 +123,18 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
     var activeDeckTab by remember { mutableIntStateOf(0) } // 0=Faces, 1=Blend, 2=Cutout, 3=Light, 4=Align
     var isDeckExpanded by remember { mutableStateOf(true) }
     var showToolsMenu by remember { mutableStateOf(false) }
+    var showSwapProfileMenu by remember { mutableStateOf(false) }
     var activeLandmarkKey by remember { mutableStateOf("nose") }
     var viewportZoom by remember { mutableFloatStateOf(1f) }
     var viewportPan by remember { mutableStateOf(Offset.Zero) }
     var lastBrushImgPos by remember { mutableStateOf<Offset?>(null) }
     var brushCursorImgPos by remember { mutableStateOf<Offset?>(null) }
+    val activeSwapProfile = viewModel.faceProfiles.find { it.id == viewModel.activeProfileId }
+        ?: viewModel.faceProfiles.firstOrNull()
+    val activeTargetMatchPct = faces
+        .firstOrNull { it.id == viewModel.selectedFaceId && it.angleMatchScore != null }?.angleMatchScore
+        ?: faces.firstOrNull { it.angleMatchScore != null }?.angleMatchScore
+        ?: viewModel.lastScanMatchScore
     val isSamplingSkin = viewModel.isSkinSamplingMode
     val isCutoutBrush = viewModel.isCutoutBrushMode
     val latestTargetBmp by rememberUpdatedState(targetBmp)
@@ -426,6 +433,148 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Swapping Screen Face Profile Chooser + 96-100% Scan Match Badge
+                Box {
+                    val activeCutout = activeSwapProfile?.let { viewModel.getCutoutThumbForProfile(it.id) }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(if (activeSwapProfile != null) Color(0xFF1E1B4B) else Color(0xFF111827))
+                            .border(
+                                1.dp,
+                                if (activeSwapProfile != null) Color(0xFF6366F1) else Color(0xFF334155),
+                                RoundedCornerShape(7.dp)
+                            )
+                            .clickable { showSwapProfileMenu = true }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        if (activeCutout != null) {
+                            Image(
+                                bitmap = activeCutout.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(CircleShape)
+                            )
+                        } else {
+                            Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(13.dp))
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = activeSwapProfile?.name ?: "Choose Profile",
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (viewModel.isScanningProfileMatch) {
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Scanning...",
+                                color = Color(0xFF38BDF8),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else if (activeSwapProfile != null && activeSwapProfile.angles.isNotEmpty() && activeTargetMatchPct in 96..100) {
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "${activeTargetMatchPct}%",
+                                color = Color(0xFF34D399),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFF064E3B))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(2.dp))
+                        Icon(Icons.Default.ExpandMore, contentDescription = "Pick Face Profile", tint = Color(0xFFCBD5E1), modifier = Modifier.size(13.dp))
+                    }
+
+                    DropdownMenu(
+                        expanded = showSwapProfileMenu,
+                        onDismissRequest = { showSwapProfileMenu = false },
+                        containerColor = Color(0xFF0F172A)
+                    ) {
+                        if (viewModel.faceProfiles.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("No profiles yet · Create Profile", color = Color(0xFFA5B4FC), fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                                leadingIcon = { Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(16.dp)) },
+                                onClick = {
+                                    showSwapProfileMenu = false
+                                    viewModel.showFaceProfileManager = true
+                                }
+                            )
+                        } else {
+                            viewModel.faceProfiles.forEach { profile ->
+                                val isChosen = viewModel.activeProfileId == profile.id
+                                val thumb = viewModel.getCutoutThumbForProfile(profile.id)
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                profile.name,
+                                                color = if (isChosen) Color(0xFF34D399) else Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isChosen) FontWeight.Bold else FontWeight.Medium
+                                            )
+                                            Text(
+                                                "${profile.angles.size} face${if (profile.angles.size == 1) "" else "s"}",
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    },
+                                    leadingIcon = {
+                                        if (thumb != null) {
+                                            Image(
+                                                bitmap = thumb.asImageBitmap(),
+                                                contentDescription = null,
+                                                contentScale = ContentScale.Fit,
+                                                modifier = Modifier
+                                                    .size(22.dp)
+                                                    .clip(CircleShape)
+                                                    .border(
+                                                        1.dp,
+                                                        if (isChosen) Color(0xFF34D399) else Color(0xFF334155),
+                                                        CircleShape
+                                                    )
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(18.dp))
+                                        }
+                                    },
+                                    trailingIcon = {
+                                        if (isChosen && activeTargetMatchPct in 96..100) {
+                                            Text("${activeTargetMatchPct}%", color = Color(0xFF34D399), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    },
+                                    onClick = {
+                                        showSwapProfileMenu = false
+                                        viewModel.scanAndSelectProfileForSwap(profile.id)
+                                    }
+                                )
+                            }
+                            HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                            DropdownMenuItem(
+                                text = { Text("Manage / Edit Profiles", color = Color(0xFFA5B4FC), fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                                leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp)) },
+                                onClick = {
+                                    showSwapProfileMenu = false
+                                    viewModel.showFaceProfileManager = true
+                                }
+                            )
+                        }
+                    }
+                }
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -944,6 +1093,27 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                             Text("Camera", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF111827))
+                            .border(1.dp, Color(0xFF312E81), RoundedCornerShape(10.dp))
+                            .clickable { viewModel.showFaceProfileManager = true }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (activeSwapProfile != null) "Swap Profile: ${activeSwapProfile.name} (${viewModel.faceProfiles.size})"
+                            else "Manage Face Profiles (${viewModel.faceProfiles.size})",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
 
@@ -1128,7 +1298,41 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                     fontSize = 11.sp
                                 )
                             } else {
-                                // Clean label-free cutout face profile avatars
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Swap Profile: ${activeSwapProfile?.name ?: "Select"}",
+                                        color = Color(0xFFE2E8F0),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (viewModel.isScanningProfileMatch) {
+                                        Text(
+                                            "Scanning profile...",
+                                            color = Color(0xFF38BDF8),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    } else if (activeSwapProfile != null && activeSwapProfile.angles.isNotEmpty() && activeTargetMatchPct in 96..100) {
+                                        Text(
+                                            "${activeTargetMatchPct}% Match",
+                                            color = Color(0xFF34D399),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF064E3B))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                // Clean label-free cutout face profile avatars (tap to scan & swap 96-100%)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1151,7 +1355,7 @@ fun FaceStudioScreen(viewModel: StudioViewModel) {
                                                     shape = RoundedCornerShape(12.dp)
                                                 )
                                                 .background(if (isSelected) Color(0xFF1E1B4B) else Color(0xFF090F1D))
-                                                .clickable { viewModel.assignProfileToSelectedOrAll(profile.id) }
+                                                .clickable { viewModel.scanAndSelectProfileForSwap(profile.id) }
                                         ) {
                                             if (cutoutBmp != null) {
                                                 Image(

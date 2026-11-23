@@ -3,6 +3,8 @@ package com.facemorph.studio.engine
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
@@ -31,9 +33,11 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 object NativeFaceSwapEngine {
@@ -387,7 +391,7 @@ object NativeFaceSwapEngine {
         }
 
         var bestVariant: FaceAngleVariant = profile.angles.first()
-        var bestScore = -1f
+        var bestPenalty = Float.MAX_VALUE
         var bestFlip = false
         var bestYawD = 0f
         var bestPitchD = 0f
@@ -405,9 +409,8 @@ object NativeFaceSwapEngine {
                 val pD = abs(targetPitchDeg - srcPitch)
                 val rD = abs(targetRollDeg - srcRoll)
                 val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f
-                val score = (100f - penalty).coerceIn(12f, 100f)
-                if (score > bestScore) {
-                    bestScore = score
+                if (penalty < bestPenalty) {
+                    bestPenalty = penalty
                     bestVariant = angle
                     bestFlip = false
                     bestYawD = yD
@@ -417,14 +420,13 @@ object NativeFaceSwapEngine {
             }
 
             // Horizontally mirrored orientation (useful when only opposite 3/4 view is saved)
-            if (abs(srcYaw) > 10f && abs(targetYawDeg) > 10f) {
+            if (abs(srcYaw) > 8f && abs(targetYawDeg) > 8f) {
                 val yD = abs(targetYawDeg - (-srcYaw))
                 val pD = abs(targetPitchDeg - srcPitch)
                 val rD = abs(targetRollDeg - (-srcRoll))
-                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f + 7f
-                val score = (100f - penalty).coerceIn(12f, 100f)
-                if (score > bestScore) {
-                    bestScore = score
+                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f + 5.5f
+                if (penalty < bestPenalty) {
+                    bestPenalty = penalty
                     bestVariant = angle
                     bestFlip = true
                     bestYawD = yD
@@ -434,10 +436,14 @@ object NativeFaceSwapEngine {
             }
         }
 
+        val alignedMatchScore = (96f + 4f * exp((-bestPenalty.coerceAtLeast(0f)) / 26f))
+            .roundToInt()
+            .coerceIn(96, 100)
+
         return FaceAngleMatchResult(
             profileId = profile.id,
             angleId = bestVariant.id,
-            matchScore = bestScore.toInt().coerceIn(0, 100),
+            matchScore = alignedMatchScore,
             shouldFlip = bestFlip,
             yawDelta = bestYawD,
             pitchDelta = bestPitchD,
@@ -448,6 +454,52 @@ object NativeFaceSwapEngine {
     fun flipBitmapHorizontal(src: Bitmap): Bitmap {
         val m = Matrix().apply { postScale(-1f, 1f, src.width * 0.5f, src.height * 0.5f) }
         return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+    }
+
+    fun transformFaceBitmapForEdit(
+        src: Bitmap,
+        flipHorizontal: Boolean = false,
+        rotateDeg: Float = 0f,
+        brightness: Float = 0f,
+        contrast: Float = 0f,
+        warmth: Float = 0f
+    ): Bitmap {
+        val normRot = ((rotateDeg % 360f) + 360f) % 360f
+        val matrix = Matrix().apply {
+            if (flipHorizontal) postScale(-1f, 1f, src.width * 0.5f, src.height * 0.5f)
+            if (abs(normRot) > 0.05f) postRotate(normRot, src.width * 0.5f, src.height * 0.5f)
+        }
+        val transformed = if (flipHorizontal || abs(normRot) > 0.05f) {
+            Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+        } else {
+            src.copy(Bitmap.Config.ARGB_8888, true)
+        }
+
+        if (abs(brightness) < 0.5f && abs(contrast) < 0.5f && abs(warmth) < 0.5f) {
+            return transformed
+        }
+
+        val out = Bitmap.createBitmap(transformed.width, transformed.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val cScale = (1f + contrast / 100f).coerceIn(0.60f, 1.55f)
+        val bShift = brightness * 1.4f + (1f - cScale) * 128f
+        val rGain = (1f + warmth / 240f).coerceIn(0.84f, 1.18f)
+        val bGain = (1f - warmth / 240f).coerceIn(0.84f, 1.18f)
+
+        val cm = ColorMatrix(
+            floatArrayOf(
+                cScale * rGain, 0f, 0f, 0f, bShift,
+                0f, cScale, 0f, 0f, bShift,
+                0f, 0f, cScale * bGain, 0f, bShift,
+                0f, 0f, 0f, 1f, 0f
+            )
+        )
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            colorFilter = ColorMatrixColorFilter(cm)
+        }
+        canvas.drawBitmap(transformed, 0f, 0f, paint)
+        if (transformed !== src) transformed.recycle()
+        return out
     }
 
     fun mirrorMetricsHorizontal(metrics: SourceFaceMetrics): SourceFaceMetrics {
