@@ -1591,7 +1591,7 @@ fun CustomAssetDialog(
                         }
 
                         // Floating Tool Settings Popover (Triggered by Touch & Hold on any Tool Button!)
-                        AnimatedVisibility(
+                        androidx.compose.animation.AnimatedVisibility(
                             visible = settingsOpenForTool != null && !showCustomizeToolsSheet,
                             enter = fadeIn() + slideInVertically { it / 2 },
                             exit = fadeOut() + slideOutVertically { it / 2 },
@@ -1803,7 +1803,7 @@ fun CustomAssetDialog(
                         }
 
                         // Floating Tool Buttons & Settings Customizer Sheet
-                        AnimatedVisibility(
+                        androidx.compose.animation.AnimatedVisibility(
                             visible = showCustomizeToolsSheet,
                             enter = fadeIn() + slideInVertically { it / 2 },
                             exit = fadeOut() + slideOutVertically { it / 2 },
