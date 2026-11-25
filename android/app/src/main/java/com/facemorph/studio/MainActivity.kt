@@ -11,10 +11,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,6 +43,7 @@ import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -53,7 +56,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,11 +74,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.facemorph.studio.model.StudioTab
+import com.facemorph.studio.ui.AndroidMaterialColorScheme
 import com.facemorph.studio.ui.BodyPhysicsScreen
 import com.facemorph.studio.ui.CustomAssetDialog
 import com.facemorph.studio.ui.FaceProfileManagerDialog
 import com.facemorph.studio.ui.FaceStudioScreen
 import com.facemorph.studio.ui.LiveCameraScreen
+import com.facemorph.studio.ui.StudioColors
 import com.facemorph.studio.ui.WardrobeVaultScreen
 import com.facemorph.studio.viewmodel.StudioViewModel
 
@@ -90,16 +94,7 @@ class MainActivity : ComponentActivity() {
         )
 
         setContent {
-            val palette = darkColorScheme(
-                primary = Color(0xFF6366F1),
-                secondary = Color(0xFF22D3EE),
-                background = Color(0xFF020617),
-                surface = Color(0xFF0B1120),
-                onPrimary = Color.White,
-                onBackground = Color.White,
-                onSurface = Color.White
-            )
-            MaterialTheme(colorScheme = palette) {
+            MaterialTheme(colorScheme = AndroidMaterialColorScheme) {
                 FaceMorphNativeApp()
             }
         }
@@ -117,7 +112,11 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
             !studioViewModel.showCustomAssetDialog &&
             !showExitConfirmDialog
     ) {
-        showExitConfirmDialog = true
+        if (studioViewModel.isFullScreenEditor) {
+            studioViewModel.isFullScreenEditor = false
+        } else {
+            showExitConfirmDialog = true
+        }
     }
 
     val startupPermissions = rememberLauncherForActivityResult(
@@ -148,123 +147,148 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
         }
     }
 
+    // Automatically exit full-screen editor when switching to Library/Wardrobe tab
+    LaunchedEffect(studioViewModel.activeTab) {
+        if (studioViewModel.activeTab == StudioTab.VAULT) {
+            studioViewModel.isFullScreenEditor = false
+        }
+    }
+
+    val showLibraryTopBar = studioViewModel.activeTab == StudioTab.VAULT
+    val showBottomNavBar = !studioViewModel.isFullScreenEditor
+
     Scaffold(
-        containerColor = Color(0xFF020617),
+        containerColor = StudioColors.Background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            Column(
-                modifier = Modifier
-                    .background(Color(0xFF0A0F1E))
-                    .statusBarsPadding()
+            AnimatedVisibility(
+                visible = showLibraryTopBar,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Surface(
+                    color = StudioColors.SurfaceContainerLow,
+                    tonalElevation = 2.dp
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF4F46E5)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Default.Face, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "FaceMorph",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            studioViewModel.activeTab.label,
-                            color = Color(0xFF818CF8),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                    Column(modifier = Modifier.statusBarsPadding()) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(Color(0xFF1E1B4B))
-                                .border(1.dp, Color(0xFF6366F1), RoundedCornerShape(9.dp))
-                                .clickable { studioViewModel.showFaceProfileManager = true }
-                                .padding(horizontal = 10.dp, vertical = 7.dp)
+                                .fillMaxWidth()
+                                .height(58.dp)
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                "Profiles (${studioViewModel.faceProfiles.size})",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(StudioColors.PrimaryContainer),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.Face,
+                                        contentDescription = null,
+                                        tint = StudioColors.OnPrimaryContainer,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        "FaceMorph",
+                                        color = StudioColors.TextPrimary,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp
+                                    )
+                                    Text(
+                                        "Profiles & Wardrobe Library",
+                                        color = StudioColors.TextSecondary,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
 
-                        if (studioViewModel.activeTab != StudioTab.FACE_STUDIO) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(9.dp))
-                                    .background(Color(0xFF111827))
-                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(9.dp))
-                                    .clickable { studioViewModel.showCustomAssetDialog = true }
-                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("Cutout", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                FilledTonalButton(
+                                    onClick = { studioViewModel.showFaceProfileManager = true },
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = StudioColors.PrimaryContainer,
+                                        contentColor = StudioColors.OnPrimaryContainer
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(40.dp)
+                                ) {
+                                    Icon(Icons.Default.Face, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Profiles (${studioViewModel.faceProfiles.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
+
+                                FilledTonalButton(
+                                    onClick = { studioViewModel.showCustomAssetDialog = true },
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = StudioColors.SurfaceContainerHigh,
+                                        contentColor = StudioColors.TextPrimary
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(40.dp)
+                                ) {
+                                    Icon(Icons.Default.ContentCut, contentDescription = null, tint = StudioColors.Warning, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Cutout", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
                             }
                         }
+                        HorizontalDivider(color = StudioColors.OutlineVariant.copy(alpha = 0.45f), thickness = 1.dp)
                     }
                 }
-                HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
             }
         },
         bottomBar = {
-            Column(
-                modifier = Modifier
-                    .background(Color(0xFF0A0F1E))
-                    .navigationBarsPadding()
+            AnimatedVisibility(
+                visible = showBottomNavBar,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
             ) {
-                HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
-                NavigationBar(
-                    containerColor = Color(0xFF0A0F1E),
-                    modifier = Modifier.height(62.dp)
+                Surface(
+                    color = StudioColors.SurfaceContainerLow,
+                    tonalElevation = 4.dp
                 ) {
-                    StudioTab.entries.forEach { tab ->
-                        val icon = when (tab) {
-                            StudioTab.FACE_STUDIO -> Icons.Default.Face
-                            StudioTab.BODY_PHYSICS -> Icons.Default.AccessibilityNew
-                            StudioTab.LIVE_CAMERA -> Icons.Default.Videocam
-                            StudioTab.VAULT -> Icons.Default.Checkroom
+                    Column(modifier = Modifier.navigationBarsPadding()) {
+                        HorizontalDivider(color = StudioColors.OutlineVariant.copy(alpha = 0.35f), thickness = 1.dp)
+                        NavigationBar(
+                            containerColor = StudioColors.SurfaceContainerLow,
+                            tonalElevation = 0.dp,
+                            modifier = Modifier.height(68.dp)
+                        ) {
+                            StudioTab.entries.forEach { tab ->
+                                val icon = when (tab) {
+                                    StudioTab.FACE_STUDIO -> Icons.Default.Face
+                                    StudioTab.BODY_PHYSICS -> Icons.Default.AccessibilityNew
+                                    StudioTab.LIVE_CAMERA -> Icons.Default.Videocam
+                                    StudioTab.VAULT -> Icons.Default.Checkroom
+                                }
+                                NavigationBarItem(
+                                    selected = studioViewModel.activeTab == tab,
+                                    onClick = { studioViewModel.activeTab = tab },
+                                    icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(22.dp)) },
+                                    label = { Text(tab.label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = StudioColors.OnPrimaryContainer,
+                                        selectedTextColor = StudioColors.Primary,
+                                        indicatorColor = StudioColors.PrimaryContainer,
+                                        unselectedIconColor = StudioColors.TextMuted,
+                                        unselectedTextColor = StudioColors.TextMuted
+                                    )
+                                )
+                            }
                         }
-                        NavigationBarItem(
-                            selected = studioViewModel.activeTab == tab,
-                            onClick = { studioViewModel.activeTab = tab },
-                            icon = { Icon(icon, contentDescription = tab.label, modifier = Modifier.size(20.dp)) },
-                            label = { Text(tab.label, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = Color.White,
-                                selectedTextColor = Color(0xFF818CF8),
-                                indicatorColor = Color(0xFF312E81),
-                                unselectedIconColor = Color(0xFF64748B),
-                                unselectedTextColor = Color(0xFF64748B)
-                            )
-                        )
                     }
                 }
             }
@@ -273,7 +297,10 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(
+                    top = if (showLibraryTopBar) innerPadding.calculateTopPadding() else 0.dp,
+                    bottom = if (showBottomNavBar) innerPadding.calculateBottomPadding() else 0.dp
+                )
         ) {
             when (studioViewModel.activeTab) {
                 StudioTab.FACE_STUDIO -> FaceStudioScreen(studioViewModel)
@@ -301,81 +328,82 @@ fun FaceMorphNativeApp(studioViewModel: StudioViewModel = viewModel()) {
     if (showExitConfirmDialog) {
         Dialog(onDismissRequest = { showExitConfirmDialog = false }) {
             Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = Color(0xFF0A1020),
-                border = BorderStroke(1.dp, Color(0xFF334155))
+                shape = RoundedCornerShape(24.dp),
+                color = StudioColors.SurfaceContainer,
+                tonalElevation = 8.dp
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(18.dp),
+                        .padding(22.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(46.dp)
+                            .size(52.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF312E81)),
+                            .background(StudioColors.PrimaryContainer),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             Icons.Default.Face,
                             contentDescription = null,
-                            tint = Color(0xFFA5B4FC),
-                            modifier = Modifier.size(24.dp)
+                            tint = StudioColors.OnPrimaryContainer,
+                            modifier = Modifier.size(26.dp)
                         )
                     }
                     Text(
                         "Exit FaceMorph?",
-                        color = Color.White,
-                        fontSize = 16.sp,
+                        color = StudioColors.TextPrimary,
+                        fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Do you want to close the app? Any unsaved canvas edits will be lost.",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 12.sp,
+                        "Any unsaved canvas edits will be lost. Your saved face profiles stay safely stored.",
+                        color = StudioColors.TextSecondary,
+                        fontSize = 13.sp,
                         textAlign = TextAlign.Center
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         OutlinedButton(
                             onClick = { showExitConfirmDialog = false },
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, Color(0xFF475569)),
-                            modifier = Modifier.weight(1f).height(42.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f).height(46.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp)
                         ) {
                             Icon(
                                 Icons.Default.Close,
-                                contentDescription = "No",
-                                tint = Color(0xFFF87171),
+                                contentDescription = "Stay",
+                                tint = StudioColors.TextSecondary,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text("No", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Stay", color = StudioColors.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Button(
                             onClick = {
                                 showExitConfirmDialog = false
                                 (context as? Activity)?.finish()
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.weight(1f).height(42.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StudioColors.TertiaryContainer,
+                                contentColor = StudioColors.OnTertiaryContainer
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f).height(46.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp)
                         ) {
                             Icon(
                                 Icons.Default.Check,
-                                contentDescription = "Yes",
-                                tint = Color.White,
+                                contentDescription = "Exit",
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text("Yes", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text("Exit", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

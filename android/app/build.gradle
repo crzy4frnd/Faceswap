@@ -66,8 +66,9 @@ dependencies {
     implementation "androidx.camera:camera-view:${cameraxVersion}"
     implementation "androidx.camera:camera-video:${cameraxVersion}"
 
-    // On-device ML Kit Face Detection & Selfie Background Segmentation (Android 7.0+ native)
+    // On-device ML Kit Face Detection, Pose Detection & Selfie Background Segmentation (Android 7.0+ native)
     implementation "com.google.mlkit:face-detection:16.1.7"
+    implementation "com.google.mlkit:pose-detection:18.0.0-beta5"
     implementation "com.google.mlkit:segmentation-selfie:16.0.0-beta6"
 
     debugImplementation "androidx.compose.ui:ui-tooling"

@@ -29,6 +29,8 @@ import com.facemorph.studio.engine.NativeStorageHelper
 import com.facemorph.studio.model.BodyAnchorPoint
 import com.facemorph.studio.model.BodyScanResult
 import com.facemorph.studio.model.ClothPhysicsConfig
+import com.facemorph.studio.model.CutoutLayerKind
+import com.facemorph.studio.model.CutoutObjectLayer
 import com.facemorph.studio.model.CutoutToolId
 import com.facemorph.studio.model.CutoutToolbarPrefs
 import com.facemorph.studio.model.DetectedFaceData
@@ -38,6 +40,7 @@ import com.facemorph.studio.model.FaceAngleBucket
 import com.facemorph.studio.model.FaceAngleVariant
 import com.facemorph.studio.model.FaceProfileItem
 import com.facemorph.studio.model.FittedWardrobeLayer
+import com.facemorph.studio.model.LayerSegmentationSummary
 import com.facemorph.studio.model.LiveCameraConfig
 import com.facemorph.studio.model.MultiAngleImportReport
 import com.facemorph.studio.model.Point2D
@@ -56,9 +59,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -66,11 +71,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val prefs = ctx.getSharedPreferences("facemorph_native_prefs", Context.MODE_PRIVATE)
 
     var activeTab by mutableStateOf(StudioTab.FACE_STUDIO)
+    var isFullScreenEditor by mutableStateOf(false)
     var toastMessage by mutableStateOf<String?>(null)
 
-    // User-added Face Profiles only (no dummy faces preloaded)
+    // User-added Face Profiles only (persisted locally inside app vault)
     var faceProfiles by mutableStateOf<List<FaceProfileItem>>(emptyList())
     var activeProfileId by mutableStateOf("")
+    var profileStorageStats by mutableStateOf(0 to 0f)
     var isScanningProfileMatch by mutableStateOf(false)
     var lastScanMatchScore by mutableIntStateOf(0)
 
@@ -84,18 +91,31 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var targetBitmap by mutableStateOf<Bitmap?>(null)
     var detectedFaces by mutableStateOf<List<DetectedFaceData>>(emptyList())
     var selectedFaceId by mutableStateOf<String?>(null)
-    var adjustments by mutableStateOf(FaceAdjustments())
+    var groupSwapApplyAll by mutableStateOf(false)
+    var perFaceAdjustments by mutableStateOf<Map<String, FaceAdjustments>>(emptyMap())
+    private var _adjustments by mutableStateOf(FaceAdjustments())
+    var adjustments: FaceAdjustments
+        get() = _adjustments
+        set(value) {
+            _adjustments = value
+            val targetId = selectedFaceId ?: detectedFaces.firstOrNull()?.id
+            if (targetId != null) {
+                perFaceAdjustments = perFaceAdjustments.toMutableMap().apply { put(targetId, value) }
+            }
+        }
     var segmentedTargetLayers by mutableStateOf<SegmentedTargetLayers?>(null)
     var isSegmentingLayers by mutableStateOf(false)
     var isSkinSamplingMode by mutableStateOf(false)
     var splitCompareEnabled by mutableStateOf(false)
     var splitComparePercent by mutableFloatStateOf(50f)
 
-    // Cutout / Protect Foreground Mask Brush (preserves original hair, maang tikka, veil, jewelry)
+    // Cutout / Protect Foreground Mask Brush & Magic Tap (preserves original hair, maang tikka, veil, jewelry)
     var cutoutProtectionMask by mutableStateOf<Bitmap?>(null)
     var cutoutMaskVersion by mutableIntStateOf(0)
     var isCutoutBrushMode by mutableStateOf(false)
     var cutoutBrushProtect by mutableStateOf(true)
+    var cutoutMagicTapMode by mutableStateOf(false)
+    var cutoutMagicTolerance by mutableFloatStateOf(36f)
     var cutoutBrushSizePx by mutableFloatStateOf(34f)
     var cutoutBrushHardness by mutableFloatStateOf(65f)
     var cutoutShowOverlay by mutableStateOf(true)
@@ -108,6 +128,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val angleBitmapCache = mutableStateMapOf<String, Bitmap>()
     val angleCutoutCache = mutableStateMapOf<String, Bitmap>()
     val angleMetricsCache = mutableStateMapOf<String, SourceFaceMetrics>()
+    val targetFaceThumbCache = mutableStateMapOf<String, Bitmap>()
     val wardrobeBitmapCache = mutableStateMapOf<String, Bitmap>()
     val backgroundBitmapCache = mutableStateMapOf<String, Bitmap>()
 
@@ -124,6 +145,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         )
     )
     var selectedWardrobeId by mutableStateOf("asset-blazer")
+    var bodySplitCompareEnabled by mutableStateOf(false)
+    var bodySplitComparePercent by mutableFloatStateOf(50f)
 
     // Live Camera AR Config & Dialogs
     var liveConfig by mutableStateOf(LiveCameraConfig())
@@ -142,20 +165,41 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     init {
         cutoutToolbarPrefs = loadCutoutToolbarPrefs()
         customSubCategories = loadSavedCustomSubCategories()
+        liveConfig = loadSavedLiveFitCalibration(liveConfig)
+        groupSwapApplyAll = prefs.getBoolean("group_swap_apply_all_v1", false)
+        activeProfileId = prefs.getString("active_face_profile_id_v1", "") ?: ""
         loadBuiltInCaches()
+    }
+
+    fun setGroupSwapApplyAll(applyAll: Boolean) {
+        groupSwapApplyAll = applyAll
+        prefs.edit().putBoolean("group_swap_apply_all_v1", applyAll).apply()
+    }
+
+    private fun setActiveProfileIdPersisted(profileId: String) {
+        activeProfileId = profileId
+        prefs.edit().putString("active_face_profile_id_v1", profileId).commit()
+    }
+
+    fun updateLiveFitConfig(updater: (LiveCameraConfig) -> LiveCameraConfig) {
+        val next = updater(liveConfig)
+        liveConfig = next
+        persistLiveFitCalibration(next)
     }
 
     private fun loadBuiltInCaches() {
         viewModelScope.launch(Dispatchers.IO) {
             val savedFaces = loadSavedFaceProfiles()
+            val savedActiveId = prefs.getString("active_face_profile_id_v1", "") ?: ""
             val loadedFaceMaps = mutableMapOf<String, Bitmap>()
             val loadedMetricsMaps = mutableMapOf<String, SourceFaceMetrics>()
             val loadedAngleBitmaps = mutableMapOf<String, Bitmap>()
             val loadedAngleCutouts = mutableMapOf<String, Bitmap>()
             val loadedAngleMetrics = mutableMapOf<String, SourceFaceMetrics>()
             var needsRePersist = false
+            var preloadedFullCount = 0
 
-            val hydratedFaces = savedFaces.mapNotNull { profile ->
+            val hydratedFaces = savedFaces.map { profile ->
                 val rawAngles = if (profile.angles.isNotEmpty()) {
                     profile.angles
                 } else if (!profile.customFilePath.isNullOrBlank()) {
@@ -169,27 +213,68 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 } else emptyList()
 
                 val validAngles = mutableListOf<FaceAngleVariant>()
+                val targetSelId = profile.selectedAngleId ?: rawAngles.firstOrNull()?.id
+                val isActiveProf = profile.id == savedActiveId || (savedActiveId.isBlank() && savedFaces.firstOrNull()?.id == profile.id)
+
                 for (angle in rawAngles) {
-                    val bmp = NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900) ?: continue
-                    val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
+                    val fileObj = java.io.File(angle.filePath)
+                    if (!fileObj.exists() || fileObj.length() <= 0L) {
+                        needsRePersist = true
+                        continue
+                    }
+
+                    var decodedFullBmp: Bitmap? = null
+                    val cachedMetrics = angle.savedMetrics
+                    val metrics = if (cachedMetrics != null) {
+                        cachedMetrics
+                    } else {
+                        decodedFullBmp = NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900) ?: continue
+                        needsRePersist = true
+                        NativeFaceSwapEngine.detectSourceFaceMetrics(decodedFullBmp)
+                    }
+
                     val bucket = classifyFaceAngleBucket(metrics.yawDeg, metrics.pitchDeg)
-                    val existingCutout = angle.cutoutFilePath?.let { NativeStorageHelper.loadBitmapFromFile(it, 280) }
-                    val cutoutBmp = existingCutout ?: NativeFaceSwapEngine.createCutoutFaceAvatar(bmp, metrics, 240)
+                    val existingCutout = angle.cutoutFilePath?.let { NativeStorageHelper.loadBitmapFromFile(it, 240) }
+                    val cutoutBmp = if (existingCutout != null) {
+                        existingCutout
+                    } else {
+                        val base = decodedFullBmp ?: NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900) ?: continue
+                        decodedFullBmp = base
+                        NativeFaceSwapEngine.createCutoutFaceAvatar(base, metrics, 240)
+                    }
                     val cutoutPath = if (existingCutout != null && !angle.cutoutFilePath.isNullOrBlank()) {
                         angle.cutoutFilePath
                     } else {
                         needsRePersist = true
-                        NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angle.id}_cutout.png")
+                        NativeStorageHelper.saveProfileAngleBitmap(
+                            ctx,
+                            profile.id,
+                            cutoutBmp,
+                            "${angle.id}_cutout.png",
+                            preferJpegWhenOpaque = false
+                        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angle.id}_cutout.png")
                     }
+
+                    // Preload primary/active bitmaps up to 24 full frames; hydrate additional unlimited angles lazily on demand
+                    val shouldPreloadFull = (angle.id == targetSelId) || (isActiveProf && preloadedFullCount < 20)
+                    val fullBmp = if (shouldPreloadFull) {
+                        decodedFullBmp ?: NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900)
+                    } else null
+                    if (fullBmp != null) {
+                        loadedAngleBitmaps[angle.id] = fullBmp
+                        preloadedFullCount++
+                    }
+
                     val updatedAngle = angle.copy(
                         cutoutFilePath = cutoutPath,
                         bucket = bucket,
                         yawDeg = metrics.yawDeg,
                         pitchDeg = metrics.pitchDeg,
-                        rollDeg = metrics.rollDeg
+                        rollDeg = metrics.rollDeg,
+                        smileScore = metrics.smileScore,
+                        savedMetrics = metrics
                     )
                     validAngles.add(updatedAngle)
-                    loadedAngleBitmaps[updatedAngle.id] = bmp
                     loadedAngleCutouts[updatedAngle.id] = cutoutBmp
                     loadedAngleMetrics[updatedAngle.id] = metrics
                 }
@@ -203,8 +288,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     val selId = validAngles.find { it.id == profile.selectedAngleId }?.id ?: validAngles.first().id
                     val primaryBmp = loadedAngleBitmaps[selId]
+                        ?: validAngles.find { it.id == selId }?.let { NativeStorageHelper.loadBitmapFromFile(it.filePath, 900) }
                     val primaryMetrics = loadedAngleMetrics[selId]
-                    if (primaryBmp != null) loadedFaceMaps[profile.id] = primaryBmp
+                    if (primaryBmp != null) {
+                        loadedFaceMaps[profile.id] = primaryBmp
+                        loadedAngleBitmaps[selId] = primaryBmp
+                    }
                     if (primaryMetrics != null) loadedMetricsMaps[profile.id] = primaryMetrics
                     profile.copy(
                         customFilePath = validAngles.find { it.id == selId }?.filePath ?: validAngles.first().filePath,
@@ -213,6 +302,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             }
+            val vaultStats = NativeStorageHelper.getProfileStorageStats(ctx)
 
             val builtInWardrobe = listOf(
                 WardrobeAssetItem(
@@ -272,6 +362,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     defaultScale = 1.12f
                 ),
                 WardrobeAssetItem(
+                    id = "asset-kurta-emerald",
+                    name = "Emerald Kurta",
+                    category = WardrobeCategory.CLOTHING,
+                    anchorPoint = BodyAnchorPoint.SHOULDERS,
+                    subCategory = WardrobeSubCategory.ETHNIC,
+                    fabricType = FabricType.SILK,
+                    defaultScale = 1.0f
+                ),
+                WardrobeAssetItem(
                     id = "asset-emerald",
                     name = "Emerald Pendant",
                     category = WardrobeCategory.JEWELRY,
@@ -297,6 +396,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     subCategory = WardrobeSubCategory.WATCH,
                     drawableResId = R.drawable.wardrobe_watch,
                     defaultScale = 0.36f
+                ),
+                WardrobeAssetItem(
+                    id = "asset-watch-gold",
+                    name = "Royal Gold Watch",
+                    category = WardrobeCategory.JEWELRY,
+                    anchorPoint = BodyAnchorPoint.WRIST,
+                    subCategory = WardrobeSubCategory.WATCH,
+                    defaultScale = 0.38f
                 ),
                 WardrobeAssetItem(
                     id = "asset-glasses-aviator",
@@ -333,11 +440,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 angleBitmapCache.putAll(loadedAngleBitmaps)
                 angleCutoutCache.putAll(loadedAngleCutouts)
                 angleMetricsCache.putAll(loadedAngleMetrics)
+                profileStorageStats = vaultStats
                 if (needsRePersist && hydratedFaces.isNotEmpty()) {
                     persistFaceProfiles(hydratedFaces)
                 }
-                if (activeProfileId.isBlank() && hydratedFaces.isNotEmpty()) {
-                    activeProfileId = hydratedFaces.first().id
+                val resolvedActive = when {
+                    savedActiveId.isNotBlank() && hydratedFaces.any { it.id == savedActiveId } -> savedActiveId
+                    hydratedFaces.isNotEmpty() -> hydratedFaces.first().id
+                    else -> ""
+                }
+                if (resolvedActive != activeProfileId) {
+                    setActiveProfileIdPersisted(resolvedActive)
                 }
                 wardrobeAssets = allWardrobe
                 wardrobeBitmapCache.putAll(loadedWardrobeMaps)
@@ -394,12 +507,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         isSegmentingLayers = false
         detectedFaces = emptyList()
         selectedFaceId = null
+        targetFaceThumbCache.clear()
+        perFaceAdjustments = emptyMap()
         bodySubjectFaceId = null
         bodyScan = null
         isSkinSamplingMode = false
         isCutoutBrushMode = false
         clearCutoutMask()
-        adjustments = adjustments.copy(manualSkinPatch = null, hiddenLayerIds = emptySet())
+        _adjustments = _adjustments.copy(manualSkinPatch = null, hiddenLayerIds = emptySet())
     }
 
     fun rescanTargetFaces() {
@@ -413,32 +528,226 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun resegmentTargetLayers() {
+    fun resegmentTargetLayers(silent: Boolean = false) {
         val bmp = targetBitmap ?: return
         val facesSnapshot = detectedFaces
         val adjSnapshot = adjustments
+        val existingMagic = segmentedTargetLayers?.objectLayers
+            ?.filter { it.id.startsWith("layer-magic-") && !it.bitmap.isRecycled }
+            ?: emptyList()
         isSegmentingLayers = true
         viewModelScope.launch(Dispatchers.IO) {
-            val layers = MlKitLayerSegmentationEngine.extractTargetSceneLayers(
+            val rawLayers = MlKitLayerSegmentationEngine.extractTargetSceneLayers(
                 targetBitmap = bmp,
                 faces = facesSnapshot,
                 autoMaskHair = adjSnapshot.autoMaskHair,
                 autoMaskAccessories = adjSnapshot.autoMaskAccessories,
                 autoMaskObjects = adjSnapshot.autoMaskObjects,
-                preserveTargetLayers = adjSnapshot.preserveTargetLayers
+                preserveTargetLayers = adjSnapshot.preserveTargetLayers,
+                foreheadCutShift = adjSnapshot.foreheadCutShift,
+                foreheadSoftness = adjSnapshot.foreheadSoftness
             )
+            val mergedLayers = if (existingMagic.isNotEmpty()) {
+                val combined = (rawLayers.objectLayers + existingMagic).sortedBy { it.zOrder }
+                val totalLayers = 2 + combined.size
+                rawLayers.copy(
+                    objectLayers = combined,
+                    summary = rawLayers.summary.copy(
+                        hasForegroundObjects = true,
+                        totalLayerCount = totalLayers,
+                        objectLayerCount = combined.size,
+                        decisionNote = "$totalLayers Layers · ${existingMagic.size} Magic + Auto"
+                    )
+                )
+            } else {
+                rawLayers
+            }
             withContext(Dispatchers.Main) {
                 if (targetBitmap === bmp) {
-                    segmentedTargetLayers = layers
-                    val validIds = layers.objectLayers.map { it.id }.toSet()
+                    segmentedTargetLayers = mergedLayers
+                    val validIds = mergedLayers.objectLayers.map { it.id }.toSet()
                     adjustments = adjustments.copy(
                         hiddenLayerIds = adjustments.hiddenLayerIds.intersect(validIds)
                     )
-                    showToast(layers.summary.decisionNote)
+                    if (!silent) {
+                        showToast(mergedLayers.summary.decisionNote)
+                    }
                 }
                 isSegmentingLayers = false
             }
         }
+    }
+
+    fun magicSelectCutoutAt(imgX: Float, imgY: Float) {
+        val bmp = targetBitmap ?: return
+        val tol = cutoutMagicTolerance.coerceIn(10f, 92f)
+        val sx = imgX.toInt().coerceIn(0, bmp.width - 1)
+        val sy = imgY.toInt().coerceIn(0, bmp.height - 1)
+        val curLayers = segmentedTargetLayers
+        viewModelScope.launch(Dispatchers.Default) {
+            val w = bmp.width
+            val h = bmp.height
+            val total = w * h
+            val pixels = IntArray(total)
+            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+
+            val seedIdx = sy * w + sx
+            val seedC = pixels[seedIdx]
+            val seedR = Color.red(seedC)
+            val seedG = Color.green(seedC)
+            val seedB = Color.blue(seedC)
+            val seedLum = 0.299f * seedR + 0.587f * seedG + 0.114f * seedB
+
+            val maxColorDist = 22f + tol * 2.15f
+            val strictColorDist = maxColorDist * 0.55f
+            val maxRadius = max(48f, max(w, h) * 0.38f)
+            val maxRadiusSq = maxRadius * maxRadius
+
+            val visited = BooleanArray(total)
+            val selected = ArrayList<Int>(1024)
+            val queue = IntArray(total)
+            var qHead = 0
+            var qTail = 0
+            visited[seedIdx] = true
+            queue[qTail++] = seedIdx
+
+            val dx4 = intArrayOf(-1, 1, 0, 0)
+            val dy4 = intArrayOf(0, 0, -1, 1)
+
+            while (qHead < qTail) {
+                val cur = queue[qHead++]
+                selected.add(cur)
+                if (selected.size > total / 3) break
+
+                val cx = cur % w
+                val cy = cur / w
+                val cc = pixels[cur]
+                val cR = Color.red(cc)
+                val cG = Color.green(cc)
+                val cB = Color.blue(cc)
+                val cLum = 0.299f * cR + 0.587f * cG + 0.114f * cB
+
+                for (d in 0..3) {
+                    val nx = cx + dx4[d]
+                    val ny = cy + dy4[d]
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+                    val nIdx = ny * w + nx
+                    if (visited[nIdx]) continue
+
+                    val rdx = (nx - sx).toFloat()
+                    val rdy = (ny - sy).toFloat()
+                    if (rdx * rdx + rdy * rdy > maxRadiusSq) continue
+
+                    val nc = pixels[nIdx]
+                    if (Color.alpha(nc) < 25) continue
+                    val nR = Color.red(nc)
+                    val nG = Color.green(nc)
+                    val nB = Color.blue(nc)
+                    val nLum = 0.299f * nR + 0.587f * nG + 0.114f * nB
+
+                    val seedDist = abs(nR - seedR) + abs(nG - seedG) + abs(nB - seedB)
+                    val stepDist = abs(nR - cR) + abs(nG - cG) + abs(nB - cB)
+                    val lumStep = abs(nLum - cLum)
+                    val lumSeed = abs(nLum - seedLum)
+
+                    val pass = seedDist <= strictColorDist ||
+                        (seedDist <= maxColorDist && stepDist < 42f && lumStep < 28f && lumSeed < maxColorDist * 0.6f)
+                    if (pass) {
+                        visited[nIdx] = true
+                        queue[qTail++] = nIdx
+                    }
+                }
+            }
+
+            if (selected.size < 16) {
+                withContext(Dispatchers.Main) {
+                    showToast("Tap closer to the object or raise Magic Tol")
+                }
+                return@launch
+            }
+
+            val outPixels = IntArray(total)
+            for (idx in selected) {
+                val sc = pixels[idx]
+                val cx = idx % w
+                val cy = idx / w
+                var edgeNeighbors = 0
+                for (d in 0..3) {
+                    val nx = cx + dx4[d]
+                    val ny = cy + dy4[d]
+                    if (nx in 0 until w && ny in 0 until h && !visited[ny * w + nx]) {
+                        edgeNeighbors++
+                    }
+                }
+                val alpha = when (edgeNeighbors) {
+                    0 -> 255
+                    1 -> 215
+                    else -> 165
+                }
+                outPixels[idx] = Color.argb(alpha, Color.red(sc), Color.green(sc), Color.blue(sc))
+            }
+            val objBmp = Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888).apply {
+                setHasAlpha(true)
+            }
+
+            withContext(Dispatchers.Main) {
+                if (targetBitmap !== bmp) {
+                    objBmp.recycle()
+                    return@withContext
+                }
+                val baseLayers = curLayers ?: SegmentedTargetLayers(
+                    backgroundLayer = bmp.copy(Bitmap.Config.ARGB_8888, false).apply { setHasAlpha(true) },
+                    foreLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setHasAlpha(true) },
+                    summary = LayerSegmentationSummary(),
+                    objectLayers = emptyList()
+                )
+                val existingMagicCount = baseLayers.objectLayers.count { it.id.startsWith("layer-magic-") }
+                val magicNum = existingMagicCount + 1
+                val firstFaceArea = detectedFaces.firstOrNull()?.let {
+                    max(400f, (it.boxRight - it.boxLeft) * (it.boxBottom - it.boxTop))
+                } ?: (total * 0.18f)
+                val covPct = ((selected.size * 100f) / firstFaceArea).toInt().coerceIn(1, 100)
+                val newLayer = CutoutObjectLayer(
+                    id = "layer-magic-${System.currentTimeMillis()}",
+                    name = "Magic #$magicNum",
+                    kind = CutoutLayerKind.OBJECT,
+                    zOrder = 55 + magicNum,
+                    coveragePct = covPct,
+                    pixelCount = selected.size,
+                    bitmap = objBmp
+                )
+                val nextObjects = (baseLayers.objectLayers + newLayer).sortedBy { it.zOrder }
+                val nextTotal = 2 + nextObjects.size
+                segmentedTargetLayers = baseLayers.copy(
+                    objectLayers = nextObjects,
+                    summary = baseLayers.summary.copy(
+                        hasForegroundObjects = true,
+                        totalLayerCount = nextTotal,
+                        objectLayerCount = nextObjects.size,
+                        decisionNote = "$nextTotal Layers · Added Magic #$magicNum"
+                    )
+                )
+                adjustments = adjustments.copy(preserveTargetLayers = true, showForeLayers = true)
+                showToast("Magic #$magicNum cutout added (${selected.size}px)")
+            }
+        }
+    }
+
+    fun clearMagicCutouts() {
+        val cur = segmentedTargetLayers ?: return
+        val remaining = cur.objectLayers.filterNot { it.id.startsWith("layer-magic-") }
+        val removedIds = cur.objectLayers.filter { it.id.startsWith("layer-magic-") }.map { it.id }.toSet()
+        if (removedIds.isEmpty()) return
+        val nextTotal = 2 + remaining.size
+        segmentedTargetLayers = cur.copy(
+            objectLayers = remaining,
+            summary = cur.summary.copy(
+                totalLayerCount = nextTotal,
+                objectLayerCount = remaining.size,
+                decisionNote = "$nextTotal Layers"
+            )
+        )
+        adjustments = adjustments.copy(hiddenLayerIds = adjustments.hiddenLayerIds - removedIds)
     }
 
     fun toggleCutoutObjectLayer(layerId: String) {
@@ -452,31 +761,52 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val defaultProf = defaultProfId?.let { id -> faceProfiles.find { it.id == id } }
         val angleMetricsSnapshot = angleMetricsCache.toMap()
         val rawFaces = NativeFaceSwapEngine.detectFaces(bmp, defaultProfId)
-        val faces = if (defaultProf != null) {
-            rawFaces.map { f ->
+        val thumbsMap = rawFaces.associate { f ->
+            f.id to NativeFaceSwapEngine.createTargetFaceThumbnail(bmp, f, 96)
+        }
+        val applyAllOnLoad = groupSwapApplyAll || rawFaces.size <= 1
+        val hydratedExtraBitmaps = mutableMapOf<String, Bitmap>()
+        val faces = rawFaces.mapIndexed { idx, f ->
+            if (!applyAllOnLoad && idx > 0) {
+                f.copy(
+                    assignedProfileId = null,
+                    assignedAngleId = null,
+                    angleMatchScore = null,
+                    angleMatchFlipped = false,
+                    enabled = false
+                )
+            } else if (defaultProf != null) {
                 val match = NativeFaceSwapEngine.findBestAngleForPose(
                     profile = defaultProf,
                     angleMetrics = angleMetricsSnapshot,
                     targetYawDeg = f.yawDeg,
                     targetPitchDeg = f.pitchDeg,
-                    targetRollDeg = f.rollDeg
+                    targetRollDeg = f.rollDeg,
+                    targetSmileScore = f.smileScore
                 )
+                val chosenAngleId = match.angleId ?: defaultProf.selectedAngleId
+                if (chosenAngleId != null && angleBitmapCache[chosenAngleId] == null) {
+                    defaultProf.angles.find { it.id == chosenAngleId }?.let { variant ->
+                        NativeStorageHelper.loadBitmapFromFile(variant.filePath, 900)?.let { loaded ->
+                            hydratedExtraBitmaps[chosenAngleId] = loaded
+                        }
+                    }
+                }
                 f.copy(
-                    assignedAngleId = match.angleId ?: defaultProf.selectedAngleId,
+                    assignedAngleId = chosenAngleId,
                     angleMatchScore = match.matchScore,
-                    angleMatchFlipped = match.shouldFlip
+                    angleMatchFlipped = match.shouldFlip,
+                    enabled = true
                 )
+            } else f
+        }
+        if (hydratedExtraBitmaps.isNotEmpty()) {
+            withContext(Dispatchers.Main) {
+                angleBitmapCache.putAll(hydratedExtraBitmaps)
             }
-        } else rawFaces
+        }
         val firstFace = faces.firstOrNull()
-        val scan = NativeClothPhysicsEngine.scanBody(
-            bmp.width.toFloat(),
-            bmp.height.toFloat(),
-            firstFace?.let { (it.boxLeft + it.boxRight) * 0.5f },
-            firstFace?.boxBottom,
-            firstFace?.let { it.boxRight - it.boxLeft },
-            firstFace?.let { it.boxBottom - it.boxTop }
-        )
+        val scan = NativeClothPhysicsEngine.scanBodyWithMlKit(bmp, firstFace)
         val adjSnapshot = adjustments
         val layers = MlKitLayerSegmentationEngine.extractTargetSceneLayers(
             targetBitmap = bmp,
@@ -484,11 +814,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             autoMaskHair = adjSnapshot.autoMaskHair,
             autoMaskAccessories = adjSnapshot.autoMaskAccessories,
             autoMaskObjects = adjSnapshot.autoMaskObjects,
-            preserveTargetLayers = adjSnapshot.preserveTargetLayers
+            preserveTargetLayers = adjSnapshot.preserveTargetLayers,
+            foreheadCutShift = adjSnapshot.foreheadCutShift,
+            foreheadSoftness = adjSnapshot.foreheadSoftness
         )
         withContext(Dispatchers.Main) {
             targetBitmap = bmp
             detectedFaces = faces
+            targetFaceThumbCache.clear()
+            targetFaceThumbCache.putAll(thumbsMap)
             segmentedTargetLayers = layers
             isSegmentingLayers = false
             selectedFaceId = firstFace?.id
@@ -498,7 +832,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             isSkinSamplingMode = false
             isCutoutBrushMode = false
             clearCutoutMask()
-            adjustments = adjustments.copy(manualSkinPatch = null, hiddenLayerIds = emptySet())
+            val resetBase = _adjustments.copy(manualSkinPatch = null, hiddenLayerIds = emptySet())
+            _adjustments = resetBase
+            perFaceAdjustments = if (firstFace != null) mapOf(firstFace.id to resetBase) else emptyMap()
         }
     }
 
@@ -616,14 +952,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val bmp = targetBitmap ?: return
         val face = detectedFaces.find { it.id == faceId } ?: return
         bodySubjectFaceId = faceId
-        bodyScan = NativeClothPhysicsEngine.scanBody(
-            bmp.width.toFloat(),
-            bmp.height.toFloat(),
-            (face.boxLeft + face.boxRight) * 0.5f,
-            face.boxBottom,
-            face.boxRight - face.boxLeft,
-            face.boxBottom - face.boxTop
-        )
+        viewModelScope.launch(Dispatchers.Default) {
+            val scan = NativeClothPhysicsEngine.scanBodyWithMlKit(bmp, face)
+            withContext(Dispatchers.Main) {
+                if (bodySubjectFaceId == faceId && targetBitmap === bmp) {
+                    bodyScan = scan
+                }
+            }
+        }
     }
 
     fun getCutoutThumbForProfile(profileId: String): Bitmap? {
@@ -636,7 +972,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val profile = faceProfiles.find { it.id == activeProfileId } ?: faceProfiles.firstOrNull() ?: return emptyList()
         return profile.angles.mapNotNull { angle ->
             val bmp = angleBitmapCache[angle.id] ?: return@mapNotNull null
-            val metrics = angleMetricsCache[angle.id] ?: return@mapNotNull null
+            val metrics = angleMetricsCache[angle.id] ?: angle.savedMetrics ?: return@mapNotNull null
             Triple(angle, bmp, metrics)
         }
     }
@@ -757,7 +1093,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             val accumulatedExisting = targetProfile.angles
-                .map { it to angleMetricsCache[it.id] }
+                .map { it to (angleMetricsCache[it.id] ?: it.savedMetrics) }
                 .toMutableList()
 
             val newlyAdded = mutableListOf<FaceAngleVariant>()
@@ -789,22 +1125,34 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
                 val metrics = scan.metrics
                 val bucket = classifyFaceAngleBucket(metrics.yawDeg, metrics.pitchDeg)
-                if (NativeFaceSwapEngine.checkDuplicateAngle(accumulatedExisting, metrics, strictAngleDedup = true)) {
+                if (NativeFaceSwapEngine.checkDuplicateAngle(accumulatedExisting, metrics, strictAngleDedup = false)) {
                     skippedDup++
-                    skippedReasons.add("#${idx + 1}: Duplicate ${bucket.shortTag} (${metrics.yawDeg.toInt()}°)")
+                    skippedReasons.add("#${idx + 1}: Identical duplicate ${bucket.shortTag} (${metrics.yawDeg.toInt()}°)")
                     return@forEachIndexed
                 }
 
                 val ts = System.currentTimeMillis()
                 val angleId = "angle-${ts}-$idx"
                 val cutoutBmp = NativeFaceSwapEngine.createCutoutFaceAvatar(bmp, metrics, 240)
-                val fullPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png")
+                val fullPath = NativeStorageHelper.saveProfileAngleBitmap(
+                    ctx,
+                    profileId,
+                    bmp,
+                    "$angleId.jpg",
+                    preferJpegWhenOpaque = true
+                ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png")
                 if (fullPath == null) {
                     skippedNoFace++
                     skippedReasons.add("#${idx + 1}: Storage write failed")
                     return@forEachIndexed
                 }
-                val cutoutPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
+                val cutoutPath = NativeStorageHelper.saveProfileAngleBitmap(
+                    ctx,
+                    profileId,
+                    cutoutBmp,
+                    "${angleId}_cutout.png",
+                    preferJpegWhenOpaque = false
+                ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
 
                 val variant = FaceAngleVariant(
                     id = angleId,
@@ -814,7 +1162,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     yawDeg = metrics.yawDeg,
                     pitchDeg = metrics.pitchDeg,
                     rollDeg = metrics.rollDeg,
-                    createdAt = ts + idx
+                    smileScore = metrics.smileScore,
+                    createdAt = ts + idx,
+                    savedMetrics = metrics
                 )
                 newlyAdded.add(variant)
                 accumulatedExisting.add(variant to metrics)
@@ -850,7 +1200,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         newMetrics[primary.id]?.let { profileMetricsCache[profileId] = it }
                     }
                     persistFaceProfiles(updatedList)
-                    activeProfileId = profileId
+                    setActiveProfileIdPersisted(profileId)
                     assignProfileToSelectedOrAll(profileId)
                 }
 
@@ -864,11 +1214,24 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     skippedReasons = skippedReasons
                 )
                 val summaryMsg = buildString {
-                    append("Added ${newlyAdded.size}/${uris.size} angles")
-                    if (skippedDup > 0) append(" · $skippedDup duplicate skipped")
+                    append("Saved ${newlyAdded.size}/${uris.size} faces locally")
+                    if (skippedDup > 0) append(" · $skippedDup exact duplicate skipped")
                     if (skippedNoFace > 0) append(" · $skippedNoFace no-face")
                 }
                 showToast(summaryMsg)
+            }
+        }
+    }
+
+    fun saveTargetFaceToProfile(faceId: String? = null, targetProfileId: String? = null) {
+        val bmp = targetBitmap ?: return
+        val face = (faceId?.let { id -> detectedFaces.find { it.id == id } } ?: getSelectedOrPrimaryFace()) ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val cropBmp = NativeFaceSwapEngine.extractFaceCropForProfile(bmp, face, 640)
+            if (!targetProfileId.isNullOrBlank() && faceProfiles.any { it.id == targetProfileId }) {
+                saveAngleIntoProfileBitmap(targetProfileId, cropBmp)
+            } else {
+                saveNewFaceProfileBitmap(cropBmp, null)
             }
         }
     }
@@ -879,10 +1242,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val ts = System.currentTimeMillis()
         val profileId = "profile-$ts"
         val angleId = "angle-$ts"
-        val fullPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png")
+        val fullPath = NativeStorageHelper.saveProfileAngleBitmap(
+            ctx,
+            profileId,
+            bmp,
+            "$angleId.jpg",
+            preferJpegWhenOpaque = true
+        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png")
             ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$profileId.png")
             ?: ""
-        val cutoutPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
+        val cutoutPath = NativeStorageHelper.saveProfileAngleBitmap(
+            ctx,
+            profileId,
+            cutoutBmp,
+            "${angleId}_cutout.png",
+            preferJpegWhenOpaque = false
+        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
         val bucket = classifyFaceAngleBucket(metrics.yawDeg, metrics.pitchDeg)
         val angleVariant = FaceAngleVariant(
             id = angleId,
@@ -892,7 +1267,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             yawDeg = metrics.yawDeg,
             pitchDeg = metrics.pitchDeg,
             rollDeg = metrics.rollDeg,
-            createdAt = ts
+            smileScore = metrics.smileScore,
+            createdAt = ts,
+            savedMetrics = metrics
         )
         withContext(Dispatchers.Main) {
             val finalName = name?.trim()?.takeIf { it.isNotBlank() } ?: "Profile ${faceProfiles.size + 1}"
@@ -911,9 +1288,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             profileBitmapCache[profileId] = bmp
             profileMetricsCache[profileId] = metrics
             persistFaceProfiles(updatedList)
-            activeProfileId = profileId
+            setActiveProfileIdPersisted(profileId)
             assignProfileToSelectedOrAll(profileId)
-            showToast("Saved '$finalName' (${bucket.shortTag})")
+            showToast("Saved '$finalName' locally (${bucket.shortTag})")
         }
     }
 
@@ -923,10 +1300,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
-        val existingPairs = targetProfile.angles.map { it to angleMetricsCache[it.id] }
-        if (NativeFaceSwapEngine.checkDuplicateAngle(existingPairs, metrics)) {
+        val existingPairs = targetProfile.angles.map { it to (angleMetricsCache[it.id] ?: it.savedMetrics) }
+        if (NativeFaceSwapEngine.checkDuplicateAngle(existingPairs, metrics, strictAngleDedup = false)) {
             withContext(Dispatchers.Main) {
-                showToast("Same face angle already saved in '${targetProfile.name}'")
+                showToast("Identical face photo already saved in '${targetProfile.name}'")
             }
             return
         }
@@ -934,8 +1311,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val cutoutBmp = NativeFaceSwapEngine.createCutoutFaceAvatar(bmp, metrics, 240)
         val ts = System.currentTimeMillis()
         val angleId = "angle-$ts"
-        val fullPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png") ?: return
-        val cutoutPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
+        val fullPath = NativeStorageHelper.saveProfileAngleBitmap(
+            ctx,
+            profileId,
+            bmp,
+            "$angleId.jpg",
+            preferJpegWhenOpaque = true
+        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, bmp, "$angleId.png") ?: return
+        val cutoutPath = NativeStorageHelper.saveProfileAngleBitmap(
+            ctx,
+            profileId,
+            cutoutBmp,
+            "${angleId}_cutout.png",
+            preferJpegWhenOpaque = false
+        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_cutout.png")
         val bucket = classifyFaceAngleBucket(metrics.yawDeg, metrics.pitchDeg)
         val newAngle = FaceAngleVariant(
             id = angleId,
@@ -945,7 +1334,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             yawDeg = metrics.yawDeg,
             pitchDeg = metrics.pitchDeg,
             rollDeg = metrics.rollDeg,
-            createdAt = ts
+            smileScore = metrics.smileScore,
+            createdAt = ts,
+            savedMetrics = metrics
         )
 
         withContext(Dispatchers.Main) {
@@ -965,10 +1356,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             profileBitmapCache[profileId] = bmp
             profileMetricsCache[profileId] = metrics
             persistFaceProfiles(updatedList)
-            activeProfileId = profileId
+            setActiveProfileIdPersisted(profileId)
             assignProfileToSelectedOrAll(profileId)
             val totalCount = updatedList.find { it.id == profileId }?.angles?.size ?: 1
-            showToast("Added ${bucket.shortTag} angle to '${targetProfile.name}' ($totalCount angles)")
+            showToast("Saved ${bucket.shortTag} to '${targetProfile.name}' ($totalCount angles)")
         }
     }
 
@@ -980,13 +1371,32 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
         faceProfiles = updatedList
         angleBitmapCache[angleId]?.let { profileBitmapCache[profileId] = it }
-        angleMetricsCache[angleId]?.let { profileMetricsCache[profileId] = it }
+        (angleMetricsCache[angleId] ?: angle.savedMetrics)?.let { profileMetricsCache[profileId] = it }
         persistFaceProfiles(updatedList)
-        activeProfileId = profileId
+        setActiveProfileIdPersisted(profileId)
 
+        if (angleBitmapCache[angleId] == null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val loaded = NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900) ?: return@launch
+                val metrics = angleMetricsCache[angleId] ?: angle.savedMetrics ?: NativeFaceSwapEngine.detectSourceFaceMetrics(loaded)
+                withContext(Dispatchers.Main) {
+                    angleBitmapCache[angleId] = loaded
+                    angleMetricsCache[angleId] = metrics
+                    profileBitmapCache[profileId] = loaded
+                    profileMetricsCache[profileId] = metrics
+                }
+            }
+        }
+
+        val targetId = selectedFaceId ?: detectedFaces.firstOrNull()?.id
+        val applyAll = groupSwapApplyAll || detectedFaces.size <= 1
         detectedFaces = detectedFaces.map { face ->
-            val matchesTarget = (selectedFaceId == null || face.id == selectedFaceId) || face.assignedProfileId == profileId
-            if (matchesTarget && (face.assignedProfileId == profileId || selectedFaceId == face.id || selectedFaceId == null)) {
+            val shouldUpdate = if (applyAll) {
+                face.assignedProfileId == profileId || face.id == targetId
+            } else {
+                face.id == targetId
+            }
+            if (shouldUpdate) {
                 face.copy(
                     assignedProfileId = profileId,
                     assignedAngleId = angleId,
@@ -1011,9 +1421,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         )
         val updated = listOf(item) + faceProfiles
         faceProfiles = updated
-        activeProfileId = profileId
+        setActiveProfileIdPersisted(profileId)
         persistFaceProfiles(updated)
-        showToast("Created profile '$clean' — now add face photos")
+        showToast("Created profile '$clean' — add unlimited face angles")
         return profileId
     }
 
@@ -1109,8 +1519,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val metrics = NativeFaceSwapEngine.detectSourceFaceMetrics(editedBmp)
         val cutoutBmp = NativeFaceSwapEngine.createCutoutFaceAvatar(editedBmp, metrics, 240)
         val ts = System.currentTimeMillis()
-        val fullPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, editedBmp, "${angleId}_v${ts}.png") ?: return
-        val cutoutPath = NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_v${ts}_cutout.png")
+        val fullPath = NativeStorageHelper.saveProfileAngleBitmap(
+            ctx,
+            profileId,
+            editedBmp,
+            "${angleId}_v${ts}.jpg",
+            preferJpegWhenOpaque = true
+        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, editedBmp, "${angleId}_v${ts}.png") ?: return
+        val cutoutPath = NativeStorageHelper.saveProfileAngleBitmap(
+            ctx,
+            profileId,
+            cutoutBmp,
+            "${angleId}_v${ts}_cutout.png",
+            preferJpegWhenOpaque = false
+        ) ?: NativeStorageHelper.saveBitmapToInternalFile(ctx, cutoutBmp, "${angleId}_v${ts}_cutout.png")
         val bucket = classifyFaceAngleBucket(metrics.yawDeg, metrics.pitchDeg)
 
         val updatedAngle = oldAngle.copy(
@@ -1119,7 +1541,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             bucket = bucket,
             yawDeg = metrics.yawDeg,
             pitchDeg = metrics.pitchDeg,
-            rollDeg = metrics.rollDeg
+            rollDeg = metrics.rollDeg,
+            smileScore = metrics.smileScore,
+            savedMetrics = metrics
         )
 
         NativeStorageHelper.deleteInternalFile(oldAngle.filePath)
@@ -1230,7 +1654,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         angleMetrics = angleMetricsCache,
                         targetYawDeg = face.yawDeg,
                         targetPitchDeg = face.pitchDeg,
-                        targetRollDeg = face.rollDeg
+                        targetRollDeg = face.rollDeg,
+                        targetSmileScore = face.smileScore
                     )
                     face.copy(
                         assignedAngleId = match.angleId ?: nextPrimary.id,
@@ -1248,7 +1673,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val removed = faceProfiles.find { it.id == profileId }
         val updated = faceProfiles.filterNot { it.id == profileId }
         faceProfiles = updated
-        persistFaceProfiles(updated)
         profileBitmapCache.remove(profileId)
         profileMetricsCache.remove(profileId)
         NativeStorageHelper.deleteInternalFile(removed?.customFilePath)
@@ -1259,11 +1683,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeStorageHelper.deleteInternalFile(angle.filePath)
             NativeStorageHelper.deleteInternalFile(angle.cutoutFilePath)
         }
+        NativeStorageHelper.deleteProfileFolder(ctx, profileId)
+        persistFaceProfiles(updated)
 
         val fallback = updated.firstOrNull()
         val fallbackId = fallback?.id ?: ""
         if (activeProfileId == profileId) {
-            activeProfileId = fallbackId
+            setActiveProfileIdPersisted(fallbackId)
         }
         detectedFaces = detectedFaces.map { face ->
             if (face.assignedProfileId == profileId) {
@@ -1273,7 +1699,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         angleMetrics = angleMetricsCache,
                         targetYawDeg = face.yawDeg,
                         targetPitchDeg = face.pitchDeg,
-                        targetRollDeg = face.rollDeg
+                        targetRollDeg = face.rollDeg,
+                        targetSmileScore = face.smileScore
                     )
                     face.copy(
                         assignedProfileId = fallback.id,
@@ -1295,16 +1722,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun scanAndSelectProfileForSwap(profileId: String, silentToast: Boolean = false) {
-        activeProfileId = profileId
+        setActiveProfileIdPersisted(profileId)
         val profile = faceProfiles.find { it.id == profileId }
+        val targetFaceId = selectedFaceId ?: detectedFaces.firstOrNull()?.id
+        val applyAllFaces = groupSwapApplyAll || detectedFaces.size <= 1
+
         if (profile == null) {
             detectedFaces = detectedFaces.map { face ->
-                if (selectedFaceId == null || face.id == selectedFaceId) {
+                if (applyAllFaces || face.id == targetFaceId) {
                     face.copy(
                         assignedProfileId = null,
                         assignedAngleId = null,
                         angleMatchScore = null,
-                        angleMatchFlipped = false
+                        angleMatchFlipped = false,
+                        enabled = false
                     )
                 } else face
             }
@@ -1314,7 +1745,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
         if (profile.angles.isEmpty()) {
             detectedFaces = detectedFaces.map { face ->
-                if (selectedFaceId == null || face.id == selectedFaceId) {
+                if (applyAllFaces || face.id == targetFaceId) {
                     face.copy(
                         assignedProfileId = profile.id,
                         assignedAngleId = null,
@@ -1336,11 +1767,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             val hydratedMetrics = mutableMapOf<String, SourceFaceMetrics>()
             val hydratedBitmaps = mutableMapOf<String, Bitmap>()
             for (angle in profile.angles) {
-                val bmp = angleBitmapCache[angle.id] ?: NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900)
-                if (bmp != null) {
-                    hydratedBitmaps[angle.id] = bmp
-                    val metrics = angleMetricsCache[angle.id] ?: NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
-                    hydratedMetrics[angle.id] = metrics
+                val cachedM = angleMetricsCache[angle.id] ?: angle.savedMetrics
+                if (cachedM != null) {
+                    hydratedMetrics[angle.id] = cachedM
+                } else {
+                    val bmp = angleBitmapCache[angle.id] ?: NativeStorageHelper.loadBitmapFromFile(angle.filePath, 900)
+                    if (bmp != null) {
+                        hydratedBitmaps[angle.id] = bmp
+                        hydratedMetrics[angle.id] = NativeFaceSwapEngine.detectSourceFaceMetrics(bmp)
+                    }
                 }
             }
 
@@ -1352,20 +1787,31 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 detectedFaces
             }
 
+            val effTargetId = selectedFaceId ?: currentFaces.firstOrNull()?.id
+            val effApplyAll = groupSwapApplyAll || currentFaces.size <= 1
             var bestMatchScore = 0
             val matchedFaces = currentFaces.map { face ->
-                if (selectedFaceId == null || face.id == selectedFaceId) {
+                if (effApplyAll || face.id == effTargetId) {
                     val match = NativeFaceSwapEngine.findBestAngleForPose(
                         profile = profile,
                         angleMetrics = mergedMetrics,
                         targetYawDeg = face.yawDeg,
                         targetPitchDeg = face.pitchDeg,
-                        targetRollDeg = face.rollDeg
+                        targetRollDeg = face.rollDeg,
+                        targetSmileScore = face.smileScore
                     )
                     if (match.matchScore > bestMatchScore) bestMatchScore = match.matchScore
+                    val chosenAngleId = match.angleId ?: profile.selectedAngleId
+                    if (chosenAngleId != null && angleBitmapCache[chosenAngleId] == null && hydratedBitmaps[chosenAngleId] == null) {
+                        profile.angles.find { it.id == chosenAngleId }?.let { variant ->
+                            NativeStorageHelper.loadBitmapFromFile(variant.filePath, 900)?.let { loaded ->
+                                hydratedBitmaps[chosenAngleId] = loaded
+                            }
+                        }
+                    }
                     face.copy(
                         assignedProfileId = profile.id,
-                        assignedAngleId = match.angleId ?: profile.selectedAngleId,
+                        assignedAngleId = chosenAngleId,
                         angleMatchScore = match.matchScore,
                         angleMatchFlipped = match.shouldFlip,
                         enabled = true
@@ -1375,14 +1821,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
 
+            val fallbackPrimaryId = matchedFaces.firstOrNull { it.assignedProfileId == profile.id }?.assignedAngleId
+                ?: profile.selectedAngleId
+                ?: profile.angles.first().id
+            if (angleBitmapCache[fallbackPrimaryId] == null && hydratedBitmaps[fallbackPrimaryId] == null) {
+                profile.angles.find { it.id == fallbackPrimaryId }?.let { variant ->
+                    NativeStorageHelper.loadBitmapFromFile(variant.filePath, 900)?.let { loaded ->
+                        hydratedBitmaps[fallbackPrimaryId] = loaded
+                    }
+                }
+            }
+
             withContext(Dispatchers.Main) {
                 hydratedBitmaps.forEach { (k, v) -> angleBitmapCache[k] = v }
                 hydratedMetrics.forEach { (k, v) -> angleMetricsCache[k] = v }
-                val primaryId = matchedFaces.firstOrNull { it.assignedProfileId == profile.id }?.assignedAngleId
-                    ?: profile.selectedAngleId
-                    ?: profile.angles.first().id
-                angleBitmapCache[primaryId]?.let { profileBitmapCache[profile.id] = it }
-                angleMetricsCache[primaryId]?.let { profileMetricsCache[profile.id] = it }
+                angleBitmapCache[fallbackPrimaryId]?.let { profileBitmapCache[profile.id] = it }
+                angleMetricsCache[fallbackPrimaryId]?.let { profileMetricsCache[profile.id] = it }
 
                 detectedFaces = matchedFaces
                 if (selectedFaceId == null && matchedFaces.isNotEmpty()) {
@@ -1409,21 +1863,46 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun autoMatchAllTargetFaces() {
         val fallbackProf = faceProfiles.find { it.id == activeProfileId } ?: faceProfiles.firstOrNull()
         if (fallbackProf == null) return
+        val metricsSnapshot = angleMetricsCache.toMap().toMutableMap()
+        faceProfiles.forEach { p ->
+            p.angles.forEach { a ->
+                if (!metricsSnapshot.containsKey(a.id) && a.savedMetrics != null) {
+                    metricsSnapshot[a.id] = a.savedMetrics
+                }
+            }
+        }
+        val missingAngleIds = mutableListOf<Pair<String, String>>()
         detectedFaces = detectedFaces.map { face ->
             val prof = faceProfiles.find { it.id == face.assignedProfileId } ?: fallbackProf
             val match = NativeFaceSwapEngine.findBestAngleForPose(
                 profile = prof,
-                angleMetrics = angleMetricsCache,
+                angleMetrics = metricsSnapshot,
                 targetYawDeg = face.yawDeg,
                 targetPitchDeg = face.pitchDeg,
-                targetRollDeg = face.rollDeg
+                targetRollDeg = face.rollDeg,
+                targetSmileScore = face.smileScore
             )
+            val chosenAngleId = match.angleId ?: prof.selectedAngleId
+            if (chosenAngleId != null && angleBitmapCache[chosenAngleId] == null) {
+                prof.angles.find { it.id == chosenAngleId }?.let { missingAngleIds.add(chosenAngleId to it.filePath) }
+            }
             face.copy(
                 assignedProfileId = prof.id,
-                assignedAngleId = match.angleId ?: prof.selectedAngleId,
+                assignedAngleId = chosenAngleId,
                 angleMatchScore = match.matchScore,
                 angleMatchFlipped = match.shouldFlip
             )
+        }
+        if (missingAngleIds.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val loaded = mutableMapOf<String, Bitmap>()
+                missingAngleIds.distinctBy { it.first }.forEach { (id, path) ->
+                    NativeStorageHelper.loadBitmapFromFile(path, 900)?.let { loaded[id] = it }
+                }
+                if (loaded.isNotEmpty()) {
+                    withContext(Dispatchers.Main) { angleBitmapCache.putAll(loaded) }
+                }
+            }
         }
         lastScanMatchScore = detectedFaces.mapNotNull { it.angleMatchScore }.maxOrNull() ?: 98
         showToast("Matched best face angles (${lastScanMatchScore}%) to target poses")
@@ -1471,7 +1950,83 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         showToast(if (nextFlip) "Flipped face Left <-> Right" else "Restored face orientation")
     }
 
+    fun selectTargetFace(faceId: String) {
+        val face = detectedFaces.find { it.id == faceId } ?: return
+        val prevId = selectedFaceId
+        if (prevId != null && prevId != faceId) {
+            perFaceAdjustments = perFaceAdjustments.toMutableMap().apply { put(prevId, _adjustments) }
+        }
+        selectedFaceId = faceId
+
+        val globalBase = _adjustments
+        val loaded = perFaceAdjustments[faceId]?.copy(
+            showBackgroundLayer = globalBase.showBackgroundLayer,
+            showFaceLayer = globalBase.showFaceLayer,
+            showForeLayers = globalBase.showForeLayers,
+            preserveTargetLayers = globalBase.preserveTargetLayers,
+            showGeometricMesh = globalBase.showGeometricMesh,
+            hiddenLayerIds = globalBase.hiddenLayerIds,
+            autoMaskHair = globalBase.autoMaskHair,
+            autoMaskAccessories = globalBase.autoMaskAccessories,
+            autoMaskObjects = globalBase.autoMaskObjects
+        ) ?: globalBase.copy(manualSkinPatch = null)
+
+        _adjustments = loaded
+        if (faceId !in perFaceAdjustments) {
+            perFaceAdjustments = perFaceAdjustments.toMutableMap().apply { put(faceId, loaded) }
+        }
+        if (face.assignedProfileId != null) {
+            setActiveProfileIdPersisted(face.assignedProfileId)
+        }
+        val angleId = face.assignedAngleId
+        if (face.assignedProfileId != null && angleId != null && angleBitmapCache[angleId] == null) {
+            val angleVariant = faceProfiles.find { it.id == face.assignedProfileId }?.angles?.find { it.id == angleId }
+            if (angleVariant != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    NativeStorageHelper.loadBitmapFromFile(angleVariant.filePath, 900)?.let { loaded ->
+                        withContext(Dispatchers.Main) { angleBitmapCache[angleId] = loaded }
+                    }
+                }
+            }
+        }
+        face.angleMatchScore?.let { lastScanMatchScore = it }
+    }
+
+    fun clearSelectedFaceSwap() {
+        val targetId = selectedFaceId ?: detectedFaces.firstOrNull()?.id ?: return
+        detectedFaces = detectedFaces.map { f ->
+            if (f.id == targetId) {
+                f.copy(
+                    assignedProfileId = null,
+                    assignedAngleId = null,
+                    angleMatchScore = null,
+                    angleMatchFlipped = false,
+                    enabled = false
+                )
+            } else f
+        }
+        showToast("Kept original face")
+    }
+
+    fun syncAdjustmentsToAllFaces() {
+        if (detectedFaces.isEmpty()) return
+        val base = _adjustments
+        val nextMap = perFaceAdjustments.toMutableMap()
+        detectedFaces.forEach { f ->
+            val existingPatch = nextMap[f.id]?.manualSkinPatch
+            nextMap[f.id] = base.copy(manualSkinPatch = existingPatch)
+        }
+        perFaceAdjustments = nextMap
+        showToast("Synced blend & expression to all faces")
+    }
+
     fun toggleFaceEnabled(faceId: String) {
+        val target = detectedFaces.find { it.id == faceId } ?: return
+        if (!target.enabled && target.assignedProfileId == null && activeProfileId.isNotBlank()) {
+            selectTargetFace(faceId)
+            scanAndSelectProfileForSwap(activeProfileId, silentToast = true)
+            return
+        }
         detectedFaces = detectedFaces.map { f ->
             if (f.id == faceId) f.copy(enabled = !f.enabled) else f
         }
@@ -1516,6 +2071,39 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             if (l.assetId == selectedWardrobeId) {
                 val next = exactScale ?: (l.scale + (delta ?: 0f))
                 l.copy(scale = next.coerceIn(0.25f, 2.2f))
+            } else l
+        }
+    }
+
+    fun updateActiveLayerLength(lengthScale: Float) {
+        fittedLayers = fittedLayers.map { l ->
+            if (l.assetId == selectedWardrobeId) {
+                l.copy(lengthScale = lengthScale.coerceIn(0.70f, 1.45f))
+            } else l
+        }
+    }
+
+    fun updateActiveLayerRotation(rotationDeg: Float) {
+        fittedLayers = fittedLayers.map { l ->
+            if (l.assetId == selectedWardrobeId) {
+                l.copy(rotation = rotationDeg.coerceIn(-45f, 45f))
+            } else l
+        }
+    }
+
+    fun nudgeActiveLayerOffset(dxImg: Float, dyImg: Float) {
+        fittedLayers = fittedLayers.map { l ->
+            if (l.assetId == selectedWardrobeId) {
+                l.copy(offsetX = l.offsetX + dxImg, offsetY = l.offsetY + dyImg)
+            } else l
+        }
+    }
+
+    fun resetActiveLayerTransform() {
+        val defaultScale = wardrobeAssets.find { it.id == selectedWardrobeId }?.defaultScale ?: 1.0f
+        fittedLayers = fittedLayers.map { l ->
+            if (l.assetId == selectedWardrobeId) {
+                l.copy(scale = defaultScale, lengthScale = 1.0f, rotation = 0f, offsetX = 0f, offsetY = 0f)
             } else l
         }
     }
@@ -1622,11 +2210,89 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         toastMessage = msg
     }
 
+    private fun serializeSourceMetrics(m: SourceFaceMetrics): JSONObject {
+        return JSONObject().apply {
+            put("cropLeft", m.cropLeft.toDouble())
+            put("cropTop", m.cropTop.toDouble())
+            put("cropRight", m.cropRight.toDouble())
+            put("cropBottom", m.cropBottom.toDouble())
+            put("eyeMidXRatio", m.eyeMidXRatio.toDouble())
+            put("eyeMidYRatio", m.eyeMidYRatio.toDouble())
+            put("eyeDistRatio", m.eyeDistRatio.toDouble())
+            put("rollDeg", m.rollDeg.toDouble())
+            put("yawDeg", m.yawDeg.toDouble())
+            put("pitchDeg", m.pitchDeg.toDouble())
+            put("noseYRatio", m.noseYRatio.toDouble())
+            put("mouthYRatio", m.mouthYRatio.toDouble())
+            put("aspectRatio", m.aspectRatio.toDouble())
+            put("smileScore", m.smileScore.toDouble())
+            put("mouthWidthRatio", m.mouthWidthRatio.toDouble())
+            put("mouthOpenRatio", m.mouthOpenRatio.toDouble())
+            put("browHeightRatio", m.browHeightRatio.toDouble())
+            val cArr = JSONArray()
+            m.contourNorm.forEach { pt ->
+                cArr.put(JSONArray().apply {
+                    put(pt.x.toDouble())
+                    put(pt.y.toDouble())
+                })
+            }
+            put("contourNorm", cArr)
+            val vArr = JSONArray()
+            m.visualSignature.forEach { v -> vArr.put(v.toDouble()) }
+            put("visualSignature", vArr)
+        }
+    }
+
+    private fun parseSourceMetrics(o: JSONObject?): SourceFaceMetrics? {
+        if (o == null) return null
+        return try {
+            val contour = mutableListOf<Point2D>()
+            o.optJSONArray("contourNorm")?.let { cArr ->
+                for (i in 0 until cArr.length()) {
+                    val pair = cArr.optJSONArray(i)
+                    if (pair != null && pair.length() >= 2) {
+                        contour.add(Point2D(pair.optDouble(0, 0.5).toFloat(), pair.optDouble(1, 0.5).toFloat()))
+                    }
+                }
+            }
+            val sig = mutableListOf<Float>()
+            o.optJSONArray("visualSignature")?.let { vArr ->
+                for (i in 0 until vArr.length()) {
+                    sig.add(vArr.optDouble(i, 0.0).toFloat())
+                }
+            }
+            SourceFaceMetrics(
+                cropLeft = o.optDouble("cropLeft", 0.25).toFloat(),
+                cropTop = o.optDouble("cropTop", 0.16).toFloat(),
+                cropRight = o.optDouble("cropRight", 0.75).toFloat(),
+                cropBottom = o.optDouble("cropBottom", 0.68).toFloat(),
+                eyeMidXRatio = o.optDouble("eyeMidXRatio", 0.5).toFloat(),
+                eyeMidYRatio = o.optDouble("eyeMidYRatio", 0.36).toFloat(),
+                eyeDistRatio = o.optDouble("eyeDistRatio", 0.45).toFloat(),
+                rollDeg = o.optDouble("rollDeg", 0.0).toFloat(),
+                yawDeg = o.optDouble("yawDeg", 0.0).toFloat(),
+                pitchDeg = o.optDouble("pitchDeg", 0.0).toFloat(),
+                noseYRatio = o.optDouble("noseYRatio", 0.56).toFloat(),
+                mouthYRatio = o.optDouble("mouthYRatio", 0.74).toFloat(),
+                aspectRatio = o.optDouble("aspectRatio", 0.86).toFloat(),
+                contourNorm = contour,
+                visualSignature = sig,
+                smileScore = o.optDouble("smileScore", 0.5).toFloat(),
+                mouthWidthRatio = o.optDouble("mouthWidthRatio", 0.38).toFloat(),
+                mouthOpenRatio = o.optDouble("mouthOpenRatio", 0.04).toFloat(),
+                browHeightRatio = o.optDouble("browHeightRatio", 0.25).toFloat()
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun persistFaceProfiles(list: List<FaceProfileItem>) {
         val arr = JSONArray()
         list.forEach { item ->
             val anglesArr = JSONArray()
             item.angles.forEach { angle ->
+                val metrics = angleMetricsCache[angle.id] ?: angle.savedMetrics
                 anglesArr.put(
                     JSONObject().apply {
                         put("id", angle.id)
@@ -1636,7 +2302,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         put("yawDeg", angle.yawDeg.toDouble())
                         put("pitchDeg", angle.pitchDeg.toDouble())
                         put("rollDeg", angle.rollDeg.toDouble())
+                        put("smileScore", (metrics?.smileScore ?: angle.smileScore).toDouble())
                         put("createdAt", angle.createdAt)
+                        if (metrics != null) {
+                            put("savedMetrics", serializeSourceMetrics(metrics))
+                        }
                     }
                 )
             }
@@ -1649,63 +2319,82 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
             arr.put(obj)
         }
-        prefs.edit().putString("custom_face_profiles_v2", arr.toString()).apply()
+        val json = arr.toString()
+        prefs.edit().putString("custom_face_profiles_v2", json).commit()
+        NativeStorageHelper.saveProfileDbJson(ctx, json)
+        profileStorageStats = NativeStorageHelper.getProfileStorageStats(ctx)
+    }
+
+    private fun parseProfileDbV2Json(raw: String?): List<FaceProfileItem> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { idx ->
+                val o = arr.getJSONObject(idx)
+                val id = o.getString("id")
+                val name = o.optString("name", "Profile ${idx + 1}")
+                val fallbackPath = o.optString("customFilePath", "")
+                val selectedAngleId = o.optString("selectedAngleId", "").takeIf { it.isNotBlank() }
+                val anglesJson = o.optJSONArray("angles")
+                val parsedAngles = if (anglesJson != null) {
+                    (0 until anglesJson.length()).mapNotNull { aIdx ->
+                        val ao = anglesJson.optJSONObject(aIdx) ?: return@mapNotNull null
+                        val fPath = ao.optString("filePath", "")
+                        if (fPath.isBlank()) null
+                        else {
+                            val bucketName = ao.optString("bucket", FaceAngleBucket.FRONT.name)
+                            val bucket = runCatching { FaceAngleBucket.valueOf(bucketName) }
+                                .getOrDefault(FaceAngleBucket.FRONT)
+                            val savedM = parseSourceMetrics(ao.optJSONObject("savedMetrics"))
+                            FaceAngleVariant(
+                                id = ao.getString("id"),
+                                filePath = fPath,
+                                cutoutFilePath = ao.optString("cutoutFilePath", "").takeIf { it.isNotBlank() },
+                                bucket = bucket,
+                                yawDeg = ao.optDouble("yawDeg", 0.0).toFloat(),
+                                pitchDeg = ao.optDouble("pitchDeg", 0.0).toFloat(),
+                                rollDeg = ao.optDouble("rollDeg", 0.0).toFloat(),
+                                smileScore = ao.optDouble("smileScore", savedM?.smileScore?.toDouble() ?: 0.5).toFloat(),
+                                createdAt = ao.optLong("createdAt", System.currentTimeMillis()),
+                                savedMetrics = savedM
+                            )
+                        }
+                    }
+                } else emptyList()
+
+                val finalAngles = if (parsedAngles.isNotEmpty()) parsedAngles
+                else if (fallbackPath.isNotBlank()) listOf(
+                    FaceAngleVariant(
+                        id = "$id-angle-0",
+                        filePath = fallbackPath,
+                        bucket = FaceAngleBucket.FRONT
+                    )
+                ) else emptyList()
+
+                FaceProfileItem(
+                    id = id,
+                    name = name,
+                    customFilePath = fallbackPath.takeIf { it.isNotBlank() } ?: finalAngles.firstOrNull()?.filePath,
+                    angles = finalAngles,
+                    selectedAngleId = selectedAngleId ?: finalAngles.firstOrNull()?.id
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun loadSavedFaceProfiles(): List<FaceProfileItem> {
-        val rawV2 = prefs.getString("custom_face_profiles_v2", null)
-        if (!rawV2.isNullOrBlank()) {
-            return try {
-                val arr = JSONArray(rawV2)
-                (0 until arr.length()).mapNotNull { idx ->
-                    val o = arr.getJSONObject(idx)
-                    val id = o.getString("id")
-                    val name = o.optString("name", "Profile ${idx + 1}")
-                    val fallbackPath = o.optString("customFilePath", "")
-                    val selectedAngleId = o.optString("selectedAngleId", "").takeIf { it.isNotBlank() }
-                    val anglesJson = o.optJSONArray("angles")
-                    val parsedAngles = if (anglesJson != null) {
-                        (0 until anglesJson.length()).mapNotNull { aIdx ->
-                            val ao = anglesJson.optJSONObject(aIdx) ?: return@mapNotNull null
-                            val fPath = ao.optString("filePath", "")
-                            if (fPath.isBlank()) null
-                            else {
-                                val bucketName = ao.optString("bucket", FaceAngleBucket.FRONT.name)
-                                val bucket = runCatching { FaceAngleBucket.valueOf(bucketName) }
-                                    .getOrDefault(FaceAngleBucket.FRONT)
-                                FaceAngleVariant(
-                                    id = ao.getString("id"),
-                                    filePath = fPath,
-                                    cutoutFilePath = ao.optString("cutoutFilePath", "").takeIf { it.isNotBlank() },
-                                    bucket = bucket,
-                                    yawDeg = ao.optDouble("yawDeg", 0.0).toFloat(),
-                                    pitchDeg = ao.optDouble("pitchDeg", 0.0).toFloat(),
-                                    rollDeg = ao.optDouble("rollDeg", 0.0).toFloat(),
-                                    createdAt = ao.optLong("createdAt", System.currentTimeMillis())
-                                )
-                            }
-                        }
-                    } else emptyList()
-
-                    val finalAngles = if (parsedAngles.isNotEmpty()) parsedAngles
-                    else if (fallbackPath.isNotBlank()) listOf(
-                        FaceAngleVariant(
-                            id = "$id-angle-0",
-                            filePath = fallbackPath,
-                            bucket = FaceAngleBucket.FRONT
-                        )
-                    ) else emptyList()
-
-                    FaceProfileItem(
-                        id = id,
-                        name = name,
-                        customFilePath = fallbackPath.takeIf { it.isNotBlank() } ?: finalAngles.firstOrNull()?.filePath,
-                        angles = finalAngles,
-                        selectedAngleId = selectedAngleId ?: finalAngles.firstOrNull()?.id
-                    )
-                }
-            } catch (_: Exception) {
-                emptyList()
+        val fileList = parseProfileDbV2Json(NativeStorageHelper.loadProfileDbJson(ctx))
+        val prefList = parseProfileDbV2Json(prefs.getString("custom_face_profiles_v2", null))
+        if (fileList.isNotEmpty() || prefList.isNotEmpty()) {
+            val fileAngles = fileList.sumOf { it.angles.size }
+            val prefAngles = prefList.sumOf { it.angles.size }
+            return when {
+                fileList.size > prefList.size -> fileList
+                prefList.size > fileList.size -> prefList
+                fileAngles >= prefAngles && fileList.isNotEmpty() -> fileList
+                else -> prefList
             }
         }
 
@@ -1884,6 +2573,33 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             )
         } catch (_: Exception) {
             CutoutToolbarPrefs()
+        }
+    }
+
+    private fun persistLiveFitCalibration(cfg: LiveCameraConfig) {
+        val obj = JSONObject().apply {
+            put("clothWidthScale", cfg.clothWidthScale.toDouble())
+            put("clothLengthScale", cfg.clothLengthScale.toDouble())
+            put("clothCollarOffset", cfg.clothCollarOffset.toDouble())
+            put("clothFitHug", cfg.clothFitHug.toDouble())
+            put("showBodyMeasurements", cfg.showBodyMeasurements)
+        }
+        prefs.edit().putString("live_fit_calibration_v1", obj.toString()).apply()
+    }
+
+    private fun loadSavedLiveFitCalibration(base: LiveCameraConfig): LiveCameraConfig {
+        val raw = prefs.getString("live_fit_calibration_v1", null) ?: return base
+        return try {
+            val o = JSONObject(raw)
+            base.copy(
+                clothWidthScale = o.optDouble("clothWidthScale", base.clothWidthScale.toDouble()).toFloat().coerceIn(0.75f, 1.55f),
+                clothLengthScale = o.optDouble("clothLengthScale", base.clothLengthScale.toDouble()).toFloat().coerceIn(0.75f, 1.40f),
+                clothCollarOffset = o.optDouble("clothCollarOffset", base.clothCollarOffset.toDouble()).toFloat().coerceIn(-80f, 80f),
+                clothFitHug = o.optDouble("clothFitHug", base.clothFitHug.toDouble()).toFloat().coerceIn(0f, 1f),
+                showBodyMeasurements = o.optBoolean("showBodyMeasurements", base.showBodyMeasurements)
+            )
+        } catch (_: Exception) {
+            base
         }
     }
 }

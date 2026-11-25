@@ -1,11 +1,7 @@
 package com.facemorph.studio.engine
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RadialGradient
-import android.graphics.Shader
 import com.facemorph.studio.model.CutoutLayerKind
 import com.facemorph.studio.model.CutoutObjectLayer
 import com.facemorph.studio.model.DetectedFaceData
@@ -17,16 +13,17 @@ import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.math.abs
-import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Adaptive ML Kit Segmentation + Facial Contour Object-Scanning Pipeline.
  * Automatically scans target faces for overlapping occluders (forehead/crown, hair strands,
- * jewelry/veil/glasses, hands/fingers, and external foreground props), runs connected-component
- * clustering, and dynamically creates 2 base layers + K object cutout layers ordered by z-depth.
+ * jewelry/veil/glasses/maang tikka/bindi, hands/fingers, and external foreground props),
+ * runs connected-component clustering, and dynamically creates 2 base layers + K object cutout layers ordered by z-depth.
  */
 object MlKitLayerSegmentationEngine {
 
@@ -128,14 +125,15 @@ object MlKitLayerSegmentationEngine {
         autoMaskAccessories: Boolean,
         autoMaskObjects: Boolean,
         preserveTargetLayers: Boolean = true,
-        sensitivity: Int = 72
+        sensitivity: Int = 72,
+        foreheadCutShift: Float = 0f,
+        foreheadSoftness: Float = 0.50f
     ): SegmentedTargetLayers {
         val w = targetBitmap.width
         val h = targetBitmap.height
 
-        val backgroundLayer = targetBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val backgroundLayer = targetBitmap.copy(Bitmap.Config.ARGB_8888, false)
         backgroundLayer.setHasAlpha(true)
-        val bgCanvas = Canvas(backgroundLayer)
 
         val foreLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
             setHasAlpha(true)
@@ -154,7 +152,7 @@ object MlKitLayerSegmentationEngine {
         var totalFacePixels = 0
         var handObjectCount = 0
         var hairLayerCount = 0
-        val objectLayers = ArrayList<CutoutObjectLayer>(8)
+        val objectLayers = ArrayList<CutoutObjectLayer>(10)
 
         if (faces.isEmpty() || !preserveTargetLayers) {
             return SegmentedTargetLayers(
@@ -197,19 +195,20 @@ object MlKitLayerSegmentationEngine {
             }
             val eyeMidX = (viewerLeft.x + viewerRight.x) * 0.5f
             val eyeMidY = (viewerLeft.y + viewerRight.y) * 0.5f
-            val eyeDist = hypot(
-                (viewerRight.x - viewerLeft.x).toDouble(),
-                (viewerRight.y - viewerLeft.y).toDouble()
-            ).toFloat()
-            val eyeAngleDeg = Math.toDegrees(
-                atan2((viewerRight.y - viewerLeft.y).toDouble(), (viewerRight.x - viewerLeft.x).toDouble())
-            ).toFloat()
+            val eyeDist = max(
+                18f,
+                hypot(
+                    (viewerRight.x - viewerLeft.x).toDouble(),
+                    (viewerRight.y - viewerLeft.y).toDouble()
+                ).toFloat()
+            )
 
             val bw = max(36f, face.boxRight - face.boxLeft)
             val bh = max(44f, face.boxBottom - face.boxTop)
-            val rx0 = (face.boxLeft - bw * 0.22f).toInt().coerceIn(0, w - 1)
-            val ry0 = (face.boxTop - bh * 0.26f).toInt().coerceIn(0, h - 1)
-            val rx1 = (face.boxRight + bw * 0.22f).toInt().coerceIn(rx0 + 1, w)
+            // Expand ROI generously above forehead & temples to capture crown hair, bangs & forehead jewelry
+            val rx0 = (face.boxLeft - bw * 0.28f).toInt().coerceIn(0, w - 1)
+            val ry0 = (face.boxTop - bh * 0.36f).toInt().coerceIn(0, h - 1)
+            val rx1 = (face.boxRight + bw * 0.28f).toInt().coerceIn(rx0 + 1, w)
             val ry1 = (face.boxBottom + bh * 0.20f).toInt().coerceIn(ry0 + 1, h)
             val rw = rx1 - rx0
             val rh = ry1 - ry0
@@ -227,88 +226,109 @@ object MlKitLayerSegmentationEngine {
             val skinB = cheekRgb.third
             val skinLum = 0.299f * skinR + 0.587f * skinG + 0.114f * skinB
 
-            // 1) Paint smooth cheek-toned cavity bed onto Background Layer
-            val cavColor = Color.argb(
-                235,
-                skinR.toInt().coerceIn(0, 255),
-                skinG.toInt().coerceIn(0, 255),
-                skinB.toInt().coerceIn(0, 255)
-            )
-            val cavTrans = Color.argb(
-                0,
-                skinR.toInt().coerceIn(0, 255),
-                skinG.toInt().coerceIn(0, 255),
-                skinB.toInt().coerceIn(0, 255)
-            )
-            val cavX = eyeMidX * 0.56f + lm.lips.x * 0.44f
-            val cavY = eyeMidY * 0.58f + lm.lips.y * 0.42f
-            val cavRx = max(10f, eyeDist * 0.78f)
-            val cavRy = max(12f, abs(lm.lips.y - eyeMidY) * 0.86f)
-            val cavShader = RadialGradient(
-                0f,
-                0f,
-                1f,
-                intArrayOf(cavColor, cavColor, cavTrans),
-                floatArrayOf(0f, 0.56f, 1f),
-                Shader.TileMode.CLAMP
-            )
-            val cavPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { shader = cavShader }
-            val saveCount = bgCanvas.save()
-            bgCanvas.translate(cavX, cavY)
-            bgCanvas.rotate(eyeAngleDeg)
-            bgCanvas.scale(cavRx, cavRy)
-            bgCanvas.drawCircle(0f, 0f, 1f, cavPaint)
-            bgCanvas.restoreToCount(saveCount)
+            // Head-roll rotation so forehead & brow cuts tilt accurately with tilted faces
+            val rollRad = Math.toRadians((-face.rollDeg).toDouble()).toFloat()
+            val cosR = cos(rollRad)
+            val sinR = sin(rollRad)
 
-            // 2) Compute ROI signals & per-pixel semantic classification
+            fun toHeadRot(imgX: Float, imgY: Float): Pair<Float, Float> {
+                val dx = imgX - eyeMidX
+                val dy = imgY - eyeMidY
+                return (dx * cosR - dy * sinR) to (dx * sinR + dy * cosR)
+            }
+
+            val clampedCutShift = foreheadCutShift.coerceIn(-0.14f, 0.14f)
+            val browPts = face.leftBrowTop + face.rightBrowTop
+            val browRotY = if (browPts.isNotEmpty()) {
+                browPts.map { toHeadRot(it.x, it.y).second }.average().toFloat()
+            } else {
+                -eyeDist * 0.28f
+            }
+            val foreCutRotY = (browRotY - eyeDist * (0.10f - clampedCutShift * 1.15f))
+                .coerceIn(-bh * 0.48f, -eyeDist * 0.02f)
+
             val roiTotal = rw * rh
             val roiLum = FloatArray(roiTotal)
             val roiPersonConf = FloatArray(roiTotal)
             val roiRNorm = FloatArray(roiTotal)
+            val roiRotX = FloatArray(roiTotal)
+            val roiRotY = FloatArray(roiTotal)
             val roiAlpha = FloatArray(roiTotal)
             val roiCat = IntArray(roiTotal)
 
-            val browAvgY = (face.leftBrowTop + face.rightBrowTop)
-                .takeIf { it.isNotEmpty() }
-                ?.let { pts -> pts.map { it.y }.average().toFloat() }
-            val foreCutY = browAvgY?.let { it - eyeDist * 0.08f } ?: (eyeMidY - eyeDist * 0.34f)
-            val foreCutRatio = ((foreCutY - ry0) / max(1f, rh.toFloat())).coerceIn(0.10f, 0.38f)
+            val faceCenterX = (face.boxLeft + face.boxRight) * 0.5f
+            val faceCenterY = (face.boxTop + face.boxBottom) * 0.5f
+            val (centerRotX, centerRotY) = toHeadRot(faceCenterX, faceCenterY)
+            val invRx = 1f / max(18f, bw * 0.54f)
+            val invRy = 1f / max(22f, bh * 0.56f)
 
-            val darkHairCutoff = min(82f, skinLum * 0.54f + thresholdBias * 0.3f)
-            val brightJewelCutoff = max(186f, skinLum + 24f - thresholdBias * 0.3f)
-
-            val halfW = rw * 0.5f
-            val halfH = rh * 0.5f
-            val invRx = 1f / max(1f, halfW * 0.94f)
-            val invRy = 1f / max(1f, halfH * 0.94f)
+            var hairSumR = 0L
+            var hairSumG = 0L
+            var hairSumB = 0L
+            var hairSampleCount = 0
 
             for (ly in 0 until rh) {
                 val imgY = ry0 + ly
-                val ny = (ly - halfH) * invRy
-                val jawTaper = if (ny > 0.14f) (1f - (ny - 0.14f) * 0.16f).coerceIn(0.82f, 1f) else 1f
                 val rowOff = ly * rw
                 val imgRow = imgY * w
                 for (lx in 0 until rw) {
                     val imgX = rx0 + lx
                     val c = srcPixels[imgRow + imgX]
                     val idx = rowOff + lx
-                    roiLum[idx] = 0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c)
-                    roiPersonConf[idx] = sampleBilinearConfidence(rawMask, imgX, imgY, w, h)
-                    val nx = ((lx - halfW) * invRx) / jawTaper
+                    val r = Color.red(c)
+                    val g = Color.green(c)
+                    val b = Color.blue(c)
+                    val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                    val conf = sampleBilinearConfidence(rawMask, imgX, imgY, w, h)
+                    roiLum[idx] = lum
+                    roiPersonConf[idx] = conf
+
+                    val (rxHead, ryHead) = toHeadRot(imgX.toFloat(), imgY.toFloat())
+                    roiRotX[idx] = rxHead
+                    roiRotY[idx] = ryHead
+
+                    val relX = rxHead - centerRotX
+                    val relY = ryHead - centerRotY
+                    val ny = relY * invRy
+                    val jawTaper = if (ny > 0.12f) (1f - (ny - 0.12f) * 0.16f).coerceIn(0.82f, 1f) else 1f
+                    val nx = (relX * invRx) / jawTaper
                     roiRNorm[idx] = hypot(nx.toDouble(), ny.toDouble()).toFloat()
+
+                    // Sample target hair color in crown above forehead OR side temple hair rim (when top of head is cropped)
+                    val isCrownBand = ryHead < foreCutRotY - eyeDist * 0.14f
+                    val isTempleHairBand = abs(rxHead) > bw * 0.44f && ryHead < eyeDist * 0.45f
+                    if (conf > 0.25f && Color.alpha(c) > 40 && (isCrownBand || isTempleHairBand)) {
+                        val skinDist = abs(r - skinR) + abs(g - skinG) + abs(b - skinB)
+                        if (skinDist > 34f || lum < skinLum * 0.74f) {
+                            hairSumR += r
+                            hairSumG += g
+                            hairSumB += b
+                            hairSampleCount++
+                        }
+                    }
                 }
             }
+
+            val hasHairSample = hairSampleCount >= 14
+            val hairRefR = if (hasHairSample) hairSumR.toFloat() / hairSampleCount else 32f
+            val hairRefG = if (hasHairSample) hairSumG.toFloat() / hairSampleCount else 28f
+            val hairRefB = if (hasHairSample) hairSumB.toFloat() / hairSampleCount else 26f
+            val hairRefLum = 0.299f * hairRefR + 0.587f * hairRefG + 0.114f * hairRefB
+
+            val darkHairCutoff = min(94f, skinLum * 0.65f + thresholdBias * 0.35f)
+            val brightJewelCutoff = max(182f, skinLum + 20f - thresholdBias * 0.3f)
 
             val visited = BooleanArray(roiTotal)
             val queue = IntArray(roiTotal)
             var qHead = 0
             var qTail = 0
-            val rhInv = 1f / max(1, rh - 1)
-            val rwInv = 1f / max(1, rw - 1)
             var faceAreaPixels = 0
 
+            val faceHalfWRot = max(18f, bw * 0.52f)
+            val clampedSoftness = foreheadSoftness.coerceIn(0.15f, 1.0f)
+            val fadeBandY = max(4f, eyeDist * (0.05f + clampedSoftness * 0.26f))
+
             for (ly in 0 until rh) {
-                val v = ly * rhInv
                 val rowOff = ly * rw
                 val yUp = if (ly > 0) (ly - 1) * rw else rowOff
                 val yDn = if (ly < rh - 1) (ly + 1) * rw else rowOff
@@ -317,77 +337,112 @@ object MlKitLayerSegmentationEngine {
                 for (lx in 0 until rw) {
                     val idx = rowOff + lx
                     val rVal = roiRNorm[idx]
-                    if (rVal > 1.04f) continue
-                    faceAreaPixels++
-                    totalFacePixels++
+                    if (rVal > 1.18f) continue
 
                     val c = srcPixels[imgRow + rx0 + lx]
                     if (Color.alpha(c) < 25) continue
+
+                    val rotX = roiRotX[idx]
+                    val rotY = roiRotY[idx]
+                    val uAbs = abs(rotX / faceHalfWRot)
+                    val isUpperHairOrCrown = rotY < foreCutRotY - eyeDist * 0.05f
+                    if (rVal <= 1.04f) {
+                        faceAreaPixels++
+                        totalFacePixels++
+                    } else if (!isUpperHairOrCrown && uAbs < 0.85f) {
+                        continue
+                    }
 
                     val r = Color.red(c)
                     val g = Color.green(c)
                     val b = Color.blue(c)
                     val tLum = roiLum[idx]
                     val pConf = roiPersonConf[idx]
-                    val uAbs = abs(lx * rwInv - 0.5f) * 2f
 
                     val xL = if (lx > 0) lx - 1 else lx
                     val xR = if (lx < rw - 1) lx + 1 else lx
                     val tGrad = (abs(roiLum[rowOff + xR] - roiLum[rowOff + xL]) +
                         abs(roiLum[yDn + lx] - roiLum[yUp + lx])) * 0.5f
 
-                    val inOcularCore = v in (foreCutRatio + 0.02f)..(foreCutRatio + 0.27f) && uAbs < 0.72f
-
-                    var reveal = 0f
-                    var cat = CAT_NONE
-
-                    // A) Forehead / Crown above eyebrows
-                    val archedCut = foreCutRatio - uAbs * 0.035f
-                    if (v < archedCut && pConf > 0.18f) {
-                        val ft = ((archedCut - v) / 0.095f).coerceIn(0f, 1f)
-                        val fa = ft * ft * (3f - 2f * ft) * 0.96f
-                        if (fa > reveal) {
-                            reveal = fa
-                            cat = CAT_FOREHEAD
-                        }
-                    }
+                    val archedCutRotY = foreCutRotY - uAbs * (eyeDist * 0.055f)
+                    // Protect the left & right orbital eye sockets/lashes while leaving center glabella open for bindis/tikka drops
+                    val inEyeSocket = (rotY in (archedCutRotY + eyeDist * 0.03f)..(eyeDist * 0.30f)) &&
+                        (uAbs in 0.17f..0.78f)
+                    val inNoseMouthCore = (rotY in (eyeDist * 0.08f)..(eyeDist * 1.10f)) && uAbs < 0.45f
 
                     val maxC = max(r, max(g, b))
                     val minC = min(r, min(g, b))
                     val sat = if (maxC > 0) (maxC - minC).toFloat() / maxC else 0f
+                    val colorDist = abs(r - skinR) + abs(g - skinG) + abs(b - skinB)
 
-                    // B) Bright jewelry / veil / glasses / maang tikka
-                    if (autoMaskAccessories) {
-                        val inUpperZone = v < (foreCutRatio + 0.14f) && uAbs < 0.80f
-                        val inMidOrnament = v < (foreCutRatio + 0.18f) && uAbs < 0.24f
-                        if ((inUpperZone || inMidOrnament || rVal > 0.78f) &&
-                            tLum > brightJewelCutoff &&
-                            (tGrad > 8f || sat < 0.22f)
-                        ) {
-                            val aa = ((tLum - (brightJewelCutoff - 6f)) / 40f).coerceIn(0f, 1f) * 0.95f
-                            if (aa > reveal || (inMidOrnament && aa > 0.35f)) {
-                                reveal = max(reveal, aa)
+                    var reveal = 0f
+                    var cat = CAT_NONE
+
+                    // PRIORITY 1: Forehead jewelry (maang tikka, bindi, matha patti, pearls, gold chains, crown/veil, glasses bridge)
+                    if (autoMaskAccessories && !inEyeSocket && rVal <= 1.16f) {
+                        val inUpperForeZone = rotY < (archedCutRotY + eyeDist * 0.26f) && uAbs < 0.94f
+                        val inGlabellaOrnament = rotY < (eyeDist * 0.12f) && uAbs < 0.23f
+                        val inTempleOrRim = rVal > 0.76f && rotY < eyeDist * 0.36f
+                        if (inUpperForeZone || inGlabellaOrnament || inTempleOrRim) {
+                            val isBrightJewel = tLum > brightJewelCutoff && (tGrad > 6f || sat < 0.26f || colorDist > 32f)
+                            val isGoldMetal = r > skinR * 0.78f && (r - b) > 22f && colorDist > 26f &&
+                                ((sat > 0.30f && (r - b) > 32f) || tGrad > 8.5f)
+                            val isColoredGemOrBindi = sat > 0.34f && colorDist > 38f && (inGlabellaOrnament || rotY < archedCutRotY + eyeDist * 0.18f)
+                            val isDarkBindi = inGlabellaOrnament && uAbs < 0.16f &&
+                                rotY > (archedCutRotY - eyeDist * 0.16f) &&
+                                tLum < skinLum * 0.64f && colorDist > 36f
+                            val isFiligreeChain = (inGlabellaOrnament || (rotY < archedCutRotY + eyeDist * 0.08f && uAbs < 0.84f)) &&
+                                colorDist > 38f && tGrad > 9.5f && tLum > 38f &&
+                                !(hasHairSample && abs(r - hairRefR) + abs(g - hairRefG) + abs(b - hairRefB) < 38f)
+
+                            if (isBrightJewel || isGoldMetal || isColoredGemOrBindi || isDarkBindi || isFiligreeChain) {
+                                val jewelStrength = when {
+                                    isBrightJewel -> ((tLum - (brightJewelCutoff - 10f)) / 30f).coerceIn(0.72f, 1f)
+                                    isColoredGemOrBindi -> (colorDist / 66f).coerceIn(0.78f, 1f)
+                                    isDarkBindi -> ((skinLum * 0.72f - tLum) / 34f).coerceIn(0.82f, 1f)
+                                    isGoldMetal -> (colorDist / 58f).coerceIn(0.75f, 1f)
+                                    else -> (tGrad / 20f).coerceIn(0.72f, 0.98f)
+                                }
+                                reveal = if (jewelStrength > 0.82f) 1f else jewelStrength
                                 cat = CAT_ACCESSORY
                             }
                         }
                     }
 
-                    // C) Hair strands / bangs on forehead, temples, outer jaw rim
-                    if (autoMaskHair) {
-                        val inHairZone = v < (foreCutRatio + 0.09f) || uAbs > 0.72f || rVal > 0.84f
-                        if (!inOcularCore && inHairZone && tLum < darkHairCutoff && pConf > 0.25f) {
-                            val ha = ((darkHairCutoff + 4f - tLum) / 34f).coerceIn(0f, 1f) * 0.95f
-                            if (ha >= reveal) {
-                                reveal = ha
+                    // PRIORITY 2: Hair (dark, brown, auburn, blonde, silver, bangs, crown & side locks)
+                    if (cat == CAT_NONE && autoMaskHair && !inEyeSocket && !inNoseMouthCore) {
+                        val inHairZone = rotY < (archedCutRotY + eyeDist * 0.14f) || uAbs > 0.70f || rVal > 0.78f
+                        val passHairPerson = pConf > 0.06f || rVal <= 1.00f
+                        if (inHairZone && passHairPerson) {
+                            val hairDist = if (hasHairSample) {
+                                abs(r - hairRefR) + abs(g - hairRefG) + abs(b - hairRefB)
+                            } else 999f
+                            val isDarkHair = tLum < darkHairCutoff
+                            val matchesTargetHair = hasHairSample &&
+                                hairDist < 84f &&
+                                hairDist < colorDist * 0.92f &&
+                                colorDist > 22f
+                            val isColoredOrLitHair = colorDist > 36f &&
+                                (tLum < skinLum - 12f || tLum > skinLum + 22f) &&
+                                (rotY < archedCutRotY + eyeDist * 0.06f || rVal > 0.80f) &&
+                                sat < 0.62f &&
+                                (tLum < skinLum - 14f || tGrad > 7f || rVal > 0.86f)
+
+                            if (isDarkHair || matchesTargetHair || isColoredOrLitHair) {
+                                val ha = when {
+                                    isDarkHair -> ((darkHairCutoff + 8f - tLum) / 32f).coerceIn(0.70f, 1f)
+                                    matchesTargetHair -> ((86f - hairDist) / 44f).coerceIn(0.68f, 1f)
+                                    else -> (colorDist / 72f).coerceIn(0.62f, 0.98f)
+                                }
+                                reveal = if (ha > 0.84f) 1f else ha
                                 cat = CAT_HAIR
                             }
                         }
                     }
 
-                    // D) Perimeter-seeded hands, fingers & foreground objects
-                    if (autoMaskObjects && !inOcularCore && rVal in 0.72f..1.00f) {
-                        val colorDist = abs(r - skinR) + abs(g - skinG) + abs(b - skinB)
-                        val isForeignTint = colorDist > (60f - thresholdBias * 0.5f) ||
+                    // PRIORITY 3: Perimeter-seeded hands, fingers & foreground props crossing cheeks/chin
+                    if (cat == CAT_NONE && autoMaskObjects && !inEyeSocket && rVal in 0.70f..1.02f) {
+                        val isForeignTint = colorDist > (58f - thresholdBias * 0.5f) ||
                             tLum < darkHairCutoff ||
                             (tLum > brightJewelCutoff && sat < 0.26f)
                         val isSkinLike = r >= g && (r - b) > 4 && tLum in 42f..242f
@@ -397,15 +452,25 @@ object MlKitLayerSegmentationEngine {
                         if (isForeignTint || isHandRidge) {
                             visited[idx] = true
                             queue[qTail++] = idx
-                            val objAlpha = if (isForeignTint) 0.92f else 0.85f
-                            if (objAlpha >= reveal) {
-                                reveal = objAlpha
-                                cat = when {
-                                    isHandRidge && !isForeignTint -> CAT_HAND_FINGER
-                                    tLum < darkHairCutoff -> CAT_HAIR
-                                    else -> CAT_OBJECT
-                                }
+                            reveal = if (isForeignTint) 0.94f else 0.88f
+                            cat = when {
+                                isHandRidge && !isForeignTint -> CAT_HAND_FINGER
+                                tLum < darkHairCutoff -> CAT_HAIR
+                                else -> CAT_OBJECT
                             }
+                        }
+                    }
+
+                    // PRIORITY 4: Clean Forehead skin above tilted brow line (solid core opacity so donor forehead never ghosts through)
+                    val inForeheadSpan = rVal <= 1.08f || (uAbs < 0.92f && rotY > foreCutRotY - bh * 0.42f)
+                    val passForePerson = pConf > 0.08f || rVal <= 0.98f
+                    if (cat == CAT_NONE && inForeheadSpan && rotY < archedCutRotY && passForePerson) {
+                        val ft = ((archedCutRotY - rotY) / fadeBandY).coerceIn(0f, 1f)
+                        val smoothFt = ft * ft * (3f - 2f * ft)
+                        val fa = if (ft >= 0.62f) 1f else smoothFt
+                        if (fa > 0.04f) {
+                            reveal = fa
+                            cat = CAT_FOREHEAD
                         }
                     }
 
@@ -435,11 +500,13 @@ object MlKitLayerSegmentationEngine {
                         if (visited[nIdx]) continue
 
                         val nr = roiRNorm[nIdx]
-                        if (nr < 0.36f || nr > 1.00f) continue
+                        if (nr < 0.36f || nr > 1.02f) continue
 
-                        val nv = ny * rhInv
-                        val nuAbs = abs(nx * rwInv - 0.5f) * 2f
-                        if (nv in (foreCutRatio + 0.02f)..(foreCutRatio + 0.26f) && nuAbs < 0.68f) continue
+                        val nRotX = roiRotX[nIdx]
+                        val nRotY = roiRotY[nIdx]
+                        val nuAbs = abs(nRotX / faceHalfWRot)
+                        val nArch = foreCutRotY - nuAbs * (eyeDist * 0.055f)
+                        if ((nRotY in (nArch + eyeDist * 0.03f)..(eyeDist * 0.30f)) && (nuAbs in 0.17f..0.78f)) continue
 
                         val nPix = srcPixels[(ry0 + ny) * w + rx0 + nx]
                         if (Color.alpha(nPix) < 25) continue
@@ -494,7 +561,12 @@ object MlKitLayerSegmentationEngine {
             }
 
             // 3) Connected-Component Object Clustering -> Dynamic N-Layer Materialization
-            val minObjPixels = max(36, (faceAreaPixels * 0.008f).toInt())
+            // Use category-sensitive minimum cluster sizes so delicate forehead jewelry (bindis/maang tikka)
+            // and thin bangs/hair strands are never dropped!
+            val minObjPixels = max(32, (faceAreaPixels * 0.005f).toInt())
+            val minHairPixels = max(16, (faceAreaPixels * 0.0014f).toInt())
+            val minAccessoryPixels = max(6, (faceAreaPixels * 0.00025f).toInt())
+            val minForeheadPixels = max(16, minObjPixels / 2)
             val cclVisited = BooleanArray(roiTotal)
             val cclQueue = IntArray(roiTotal)
             val foreheadPixels = ArrayList<Int>(roiTotal / 4)
@@ -537,7 +609,12 @@ object MlKitLayerSegmentationEngine {
                     }
                 }
 
-                if (comp.size >= minObjPixels) {
+                val requiredMin = when (cat) {
+                    CAT_ACCESSORY -> minAccessoryPixels
+                    CAT_HAIR -> minHairPixels
+                    else -> minObjPixels
+                }
+                if (comp.size >= requiredMin) {
                     rawClusters.add(RawCluster(cat, comp.toIntArray(), sumX, sumY))
                 }
             }
@@ -568,7 +645,7 @@ object MlKitLayerSegmentationEngine {
             val safeDenom = max(1, faceAreaPixels)
             val prefix = if (faces.size > 1) "P${faceIndex + 1} · " else ""
 
-            if (foreheadPixels.size >= minObjPixels) {
+            if (foreheadPixels.size >= minForeheadPixels) {
                 hasForeheadLayer = true
                 val fhArr = foreheadPixels.toIntArray()
                 val covPct = ((fhArr.size * 100f) / safeDenom).toInt().coerceIn(1, 100)
@@ -585,12 +662,60 @@ object MlKitLayerSegmentationEngine {
                 )
             }
 
-            rawClusters.sortByDescending { it.pixels.size }
-            val catCounts = IntArray(6)
+            // Consolidate accessory pearls/chain beads into clean anatomical zones (Tikka/Crown, Crown/Veil, Jewelry)
+            // so intricate maang tikka or matha-patti beads never drop past the 4-layer cap.
+            val nonAccClusters = ArrayList<RawCluster>(rawClusters.size)
+            val tikkaPixels = ArrayList<Int>(256)
+            var tikkaSumX = 0L
+            var tikkaSumY = 0L
+            val crownVeilPixels = ArrayList<Int>(256)
+            var crownSumX = 0L
+            var crownSumY = 0L
+            val lowerJewelryPixels = ArrayList<Int>(256)
+            var lowerJSumX = 0L
+            var lowerJSumY = 0L
+
             for (cl in rawClusters) {
+                if (cl.cat == CAT_ACCESSORY) {
+                    val cxNorm = cl.sumX.toFloat() / max(1, cl.pixels.size * rw)
+                    val cyNorm = cl.sumY.toFloat() / max(1, cl.pixels.size * rh)
+                    when {
+                        cyNorm < 0.48f && cxNorm in 0.30f..0.70f -> {
+                            cl.pixels.forEach { tikkaPixels.add(it) }
+                            tikkaSumX += cl.sumX
+                            tikkaSumY += cl.sumY
+                        }
+                        cyNorm < 0.48f -> {
+                            cl.pixels.forEach { crownVeilPixels.add(it) }
+                            crownSumX += cl.sumX
+                            crownSumY += cl.sumY
+                        }
+                        else -> {
+                            cl.pixels.forEach { lowerJewelryPixels.add(it) }
+                            lowerJSumX += cl.sumX
+                            lowerJSumY += cl.sumY
+                        }
+                    }
+                } else {
+                    nonAccClusters.add(cl)
+                }
+            }
+            if (tikkaPixels.isNotEmpty()) {
+                nonAccClusters.add(RawCluster(CAT_ACCESSORY, tikkaPixels.toIntArray(), tikkaSumX, tikkaSumY))
+            }
+            if (crownVeilPixels.isNotEmpty()) {
+                nonAccClusters.add(RawCluster(CAT_ACCESSORY, crownVeilPixels.toIntArray(), crownSumX, crownSumY))
+            }
+            if (lowerJewelryPixels.isNotEmpty()) {
+                nonAccClusters.add(RawCluster(CAT_ACCESSORY, lowerJewelryPixels.toIntArray(), lowerJSumX, lowerJSumY))
+            }
+
+            nonAccClusters.sortByDescending { it.pixels.size }
+            val catCounts = IntArray(6)
+            for (cl in nonAccClusters) {
                 val limit = when (cl.cat) {
-                    CAT_HAIR -> 3
-                    CAT_ACCESSORY -> 2
+                    CAT_HAIR -> 4
+                    CAT_ACCESSORY -> 3
                     CAT_HAND_FINGER -> 2
                     else -> 3
                 }
@@ -620,8 +745,11 @@ object MlKitLayerSegmentationEngine {
                     }
                     CAT_ACCESSORY -> {
                         hasForegroundObjects = true
-                        if (cyNorm < 0.36f) "${prefix}Crown/Veil"
-                        else "${prefix}Jewelry${if (count > 1) " #$count" else ""}"
+                        when {
+                            cyNorm < 0.48f && cxNorm in 0.30f..0.70f -> "${prefix}Tikka/Crown"
+                            cyNorm < 0.48f -> "${prefix}Crown/Veil"
+                            else -> "${prefix}Jewelry${if (count > 1) " #$count" else ""}"
+                        }
                     }
                     else -> {
                         hasForegroundObjects = true

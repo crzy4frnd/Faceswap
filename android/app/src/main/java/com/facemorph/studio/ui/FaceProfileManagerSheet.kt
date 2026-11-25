@@ -53,8 +53,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -137,7 +135,6 @@ fun FaceProfileManagerDialog(
         editPreviewBmp = null
     }
 
-    // Multi-Select Gallery Picker (scans all selected photos & rejects duplicate angles)
     val multiGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         val targetId = pendingProfileId
         pendingProfileId = null
@@ -153,7 +150,6 @@ fun FaceProfileManagerDialog(
         }
     }
 
-    // Single-photo Gallery Picker used when replacing an existing face slot in Edit mode
     val replaceGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val replaceTarget = pendingReplacePair
         pendingReplacePair = null
@@ -213,7 +209,26 @@ fun FaceProfileManagerDialog(
     }
 
     val activeEditPair = editingFacePair
-    val editSourceBmp = activeEditPair?.let { (_, angleId) -> viewModel.angleBitmapCache[angleId] }
+    val cachedEditBmp = activeEditPair?.let { (_, angleId) -> viewModel.angleBitmapCache[angleId] }
+    var lazyEditBmp by remember(activeEditPair) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(activeEditPair, cachedEditBmp) {
+        if (activeEditPair == null || cachedEditBmp != null) {
+            lazyEditBmp = null
+            return@LaunchedEffect
+        }
+        val (profId, angId) = activeEditPair
+        val fPath = viewModel.faceProfiles.find { it.id == profId }?.angles?.find { it.id == angId }?.filePath
+        if (!fPath.isNullOrBlank()) {
+            val loaded = withContext(Dispatchers.IO) {
+                NativeStorageHelper.loadBitmapFromFile(fPath, 900)
+            }
+            if (loaded != null) {
+                viewModel.angleBitmapCache[angId] = loaded
+                lazyEditBmp = loaded
+            }
+        }
+    }
+    val editSourceBmp = cachedEditBmp ?: lazyEditBmp
 
     LaunchedEffect(
         activeEditPair,
@@ -266,10 +281,10 @@ fun FaceProfileManagerDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
-                .heightIn(max = 700.dp),
-            shape = RoundedCornerShape(16.dp),
-            color = Color(0xFF0A1020),
-            border = BorderStroke(1.dp, Color(0xFF1E293B))
+                .heightIn(max = 720.dp),
+            shape = RoundedCornerShape(26.dp),
+            color = StudioColors.SurfaceContainerLow,
+            tonalElevation = 6.dp
         ) {
             if (activeEditPair != null) {
                 val (editProfId, editAngleId) = activeEditPair
@@ -282,9 +297,10 @@ fun FaceProfileManagerDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    StudioSheetDragHandle()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -293,30 +309,30 @@ fun FaceProfileManagerDialog(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF312E81)),
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(StudioColors.PrimaryContainer),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(Icons.Default.Edit, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.Edit, contentDescription = null, tint = StudioColors.Primary, modifier = Modifier.size(18.dp))
                             }
-                            Spacer(Modifier.width(8.dp))
+                            Spacer(Modifier.width(10.dp))
                             Column {
                                 Text(
                                     "Edit Face · ${editProfile?.name ?: "Profile"}",
-                                    color = Color.White,
-                                    fontSize = 15.sp,
+                                    color = StudioColors.TextPrimary,
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
                                     "Replace photo, flip, rotate, adjust tone, or delete",
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 10.sp
+                                    color = StudioColors.TextSecondary,
+                                    fontSize = 11.sp
                                 )
                             }
                         }
-                        IconButton(onClick = { editingFacePair = null }, modifier = Modifier.size(30.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "Back", tint = Color(0xFF94A3B8), modifier = Modifier.size(18.dp))
+                        IconButton(onClick = { editingFacePair = null }, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Back", tint = StudioColors.TextSecondary, modifier = Modifier.size(20.dp))
                         }
                     }
 
@@ -324,9 +340,8 @@ fun FaceProfileManagerDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(180.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF060A13))
-                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp)),
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(StudioColors.SurfaceContainerLowest),
                         contentAlignment = Alignment.Center
                     ) {
                         if (previewToShow != null) {
@@ -334,159 +349,110 @@ fun FaceProfileManagerDialog(
                                 bitmap = previewToShow.asImageBitmap(),
                                 contentDescription = null,
                                 contentScale = ContentScale.Fit,
-                                modifier = Modifier.fillMaxSize().padding(8.dp)
+                                modifier = Modifier.fillMaxSize().padding(10.dp)
                             )
                         }
                     }
 
-                    // Replace photo row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
+                        StudioTonalActionButton(
+                            label = "Replace Gallery",
+                            icon = Icons.Default.PhotoLibrary,
                             onClick = { launchReplaceGallery(editProfId, editAngleId) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF312E81)),
-                            shape = RoundedCornerShape(9.dp),
-                            modifier = Modifier.weight(1f).height(36.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp)
-                        ) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text("Replace Gallery", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Button(
+                            containerColor = StudioColors.PrimaryContainer,
+                            contentColor = StudioColors.OnPrimaryContainer,
+                            iconTint = StudioColors.Primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        StudioTonalActionButton(
+                            label = "Retake Camera",
+                            icon = Icons.Default.CameraAlt,
                             onClick = { launchReplaceCamera(editProfId, editAngleId) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0369A1)),
-                            shape = RoundedCornerShape(9.dp),
-                            modifier = Modifier.weight(1f).height(36.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp)
-                        ) {
-                            Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text("Retake Camera", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
+                            containerColor = StudioColors.SecondaryContainer,
+                            contentColor = StudioColors.OnSecondaryContainer,
+                            iconTint = StudioColors.Secondary,
+                            modifier = Modifier.weight(1f)
+                        )
                     }
 
-                    // Orientation quick controls
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (editFlipH) Color(0xFF4F46E5) else Color(0xFF111827))
-                                .border(1.dp, if (editFlipH) Color(0xFF818CF8) else Color(0xFF334155), RoundedCornerShape(8.dp))
-                                .clickable { editFlipH = !editFlipH }
-                                .padding(vertical = 7.dp)
-                        ) {
-                            Icon(Icons.Default.Flip, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Flip", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF111827))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                                .clickable { editBaseRotateDeg = (editBaseRotateDeg - 90f) % 360f }
-                                .padding(vertical = 7.dp)
-                        ) {
-                            Icon(Icons.Default.RotateLeft, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("-90°", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF111827))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                                .clickable { editBaseRotateDeg = (editBaseRotateDeg + 90f) % 360f }
-                                .padding(vertical = 7.dp)
-                        ) {
-                            Icon(Icons.Default.RotateRight, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("+90°", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF111827))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                                .clickable {
-                                    editFlipH = false
-                                    editBaseRotateDeg = 0f
-                                    editTiltDeg = 0f
-                                    editBrightness = 0f
-                                    editContrast = 0f
-                                    editWarmth = 0f
-                                }
-                                .padding(vertical = 7.dp)
-                        ) {
-                            Icon(Icons.Default.RestartAlt, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Reset", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
+                        StudioFilterChip(
+                            label = "Flip",
+                            selected = editFlipH,
+                            icon = Icons.Default.Flip,
+                            onClick = { editFlipH = !editFlipH },
+                            modifier = Modifier.weight(1f)
+                        )
+                        StudioFilterChip(
+                            label = "-90°",
+                            selected = false,
+                            icon = Icons.Default.RotateLeft,
+                            onClick = { editBaseRotateDeg = (editBaseRotateDeg - 90f) % 360f },
+                            modifier = Modifier.weight(1f)
+                        )
+                        StudioFilterChip(
+                            label = "+90°",
+                            selected = false,
+                            icon = Icons.Default.RotateRight,
+                            onClick = { editBaseRotateDeg = (editBaseRotateDeg + 90f) % 360f },
+                            modifier = Modifier.weight(1f)
+                        )
+                        StudioFilterChip(
+                            label = "Reset",
+                            selected = false,
+                            icon = Icons.Default.RestartAlt,
+                            onClick = {
+                                editFlipH = false
+                                editBaseRotateDeg = 0f
+                                editTiltDeg = 0f
+                                editBrightness = 0f
+                                editContrast = 0f
+                                editWarmth = 0f
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
 
-                    // Sliders
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Tilt ${editTiltDeg.toInt()}°", color = Color(0xFFCBD5E1), fontSize = 11.sp, modifier = Modifier.width(84.dp))
-                            Slider(
-                                value = editTiltDeg,
-                                onValueChange = { editTiltDeg = it },
-                                valueRange = -20f..20f,
-                                colors = SliderDefaults.colors(thumbColor = Color(0xFF38BDF8), activeTrackColor = Color(0xFF38BDF8)),
-                                modifier = Modifier.weight(1f).height(28.dp)
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Bright ${editBrightness.toInt()}", color = Color(0xFFCBD5E1), fontSize = 11.sp, modifier = Modifier.width(84.dp))
-                            Slider(
-                                value = editBrightness,
-                                onValueChange = { editBrightness = it },
-                                valueRange = -35f..35f,
-                                colors = SliderDefaults.colors(thumbColor = Color(0xFF6366F1), activeTrackColor = Color(0xFF6366F1)),
-                                modifier = Modifier.weight(1f).height(28.dp)
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Contrast ${editContrast.toInt()}", color = Color(0xFFCBD5E1), fontSize = 11.sp, modifier = Modifier.width(84.dp))
-                            Slider(
-                                value = editContrast,
-                                onValueChange = { editContrast = it },
-                                valueRange = -35f..35f,
-                                colors = SliderDefaults.colors(thumbColor = Color(0xFF6366F1), activeTrackColor = Color(0xFF6366F1)),
-                                modifier = Modifier.weight(1f).height(28.dp)
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Warmth ${editWarmth.toInt()}", color = Color(0xFFCBD5E1), fontSize = 11.sp, modifier = Modifier.width(84.dp))
-                            Slider(
-                                value = editWarmth,
-                                onValueChange = { editWarmth = it },
-                                valueRange = -30f..30f,
-                                colors = SliderDefaults.colors(thumbColor = Color(0xFFFBBF24), activeTrackColor = Color(0xFFFBBF24)),
-                                modifier = Modifier.weight(1f).height(28.dp)
-                            )
-                        }
+                    StudioSectionCard {
+                        StudioSliderRow(
+                            label = "Tilt",
+                            valueText = "${editTiltDeg.toInt()}°",
+                            value = editTiltDeg,
+                            onValueChange = { editTiltDeg = it },
+                            valueRange = -20f..20f,
+                            accentColor = StudioColors.Secondary
+                        )
+                        StudioSliderRow(
+                            label = "Brightness",
+                            valueText = "${editBrightness.toInt()}",
+                            value = editBrightness,
+                            onValueChange = { editBrightness = it },
+                            valueRange = -35f..35f
+                        )
+                        StudioSliderRow(
+                            label = "Contrast",
+                            valueText = "${editContrast.toInt()}",
+                            value = editContrast,
+                            onValueChange = { editContrast = it },
+                            valueRange = -35f..35f
+                        )
+                        StudioSliderRow(
+                            label = "Warmth",
+                            valueText = "${editWarmth.toInt()}",
+                            value = editWarmth,
+                            onValueChange = { editWarmth = it },
+                            valueRange = -30f..30f,
+                            accentColor = StudioColors.Warning
+                        )
                     }
 
-                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                    HorizontalDivider(color = StudioColors.SurfaceContainerHighest, thickness = 1.dp)
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -497,26 +463,24 @@ fun FaceProfileManagerDialog(
                                 viewModel.removeAngleFromProfile(editProfId, editAngleId)
                                 editingFacePair = null
                             },
-                            shape = RoundedCornerShape(9.dp),
-                            border = BorderStroke(1.dp, Color(0xFFEF4444)),
-                            modifier = Modifier.height(38.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp)
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, StudioColors.Danger),
+                            modifier = Modifier.height(44.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
                         ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete Face", tint = Color(0xFFF87171), modifier = Modifier.size(15.dp))
+                            Icon(Icons.Default.Delete, contentDescription = "Delete Face", tint = StudioColors.Danger, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Delete", color = Color(0xFFF87171), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Delete", color = StudioColors.Danger, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
 
                         OutlinedButton(
                             onClick = { editingFacePair = null },
-                            shape = RoundedCornerShape(9.dp),
-                            border = BorderStroke(1.dp, Color(0xFF475569)),
-                            modifier = Modifier.weight(1f).height(38.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, StudioColors.OutlineVariant),
+                            modifier = Modifier.weight(1f).height(44.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp)
                         ) {
-                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color(0xFFCBD5E1), modifier = Modifier.size(15.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Cancel", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Cancel", color = StudioColors.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
 
                         Button(
@@ -532,14 +496,17 @@ fun FaceProfileManagerDialog(
                                 )
                                 editingFacePair = null
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
-                            shape = RoundedCornerShape(9.dp),
-                            modifier = Modifier.weight(1f).height(38.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StudioColors.Tertiary,
+                                contentColor = StudioColors.OnPrimary
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f).height(44.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp)
                         ) {
-                            Icon(Icons.Default.Check, contentDescription = "Save Face", tint = Color.White, modifier = Modifier.size(15.dp))
+                            Icon(Icons.Default.Check, contentDescription = "Save Face", modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Save", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("Save", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -547,96 +514,88 @@ fun FaceProfileManagerDialog(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Header
+                    StudioSheetDragHandle()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                             Box(
                                 modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF312E81)),
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(StudioColors.PrimaryContainer),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(Icons.Default.Face, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.Face, contentDescription = null, tint = StudioColors.Primary, modifier = Modifier.size(20.dp))
                             }
-                            Spacer(Modifier.width(8.dp))
+                            Spacer(Modifier.width(10.dp))
+                            val totalSavedAngles = viewModel.faceProfiles.sumOf { it.angles.size }
+                            val storageMb = viewModel.profileStorageStats.second
                             Column {
                                 Text(
-                                    "Face Profiles (${viewModel.faceProfiles.size})",
-                                    color = Color.White,
-                                    fontSize = 15.sp,
+                                    "Face Vault (${viewModel.faceProfiles.size})",
+                                    color = StudioColors.TextPrimary,
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    "Create profiles, add/edit/delete faces, and swap 96%–100% match",
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 10.sp
+                                    "Local Storage · Unlimited Angles · $totalSavedAngles saved (${String.format("%.1f", storageMb)} MB)",
+                                    color = StudioColors.Tertiary,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (viewModel.detectedFaces.isNotEmpty() && viewModel.faceProfiles.isNotEmpty()) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF0F172A))
-                                        .border(1.dp, Color(0xFF0EA5E9), RoundedCornerShape(8.dp))
-                                        .clickable { viewModel.autoMatchAllTargetFaces() }
-                                        .padding(horizontal = 8.dp, vertical = 5.dp)
-                                ) {
-                                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Auto-Match", color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                                }
+                                StudioFilterChip(
+                                    label = "Auto-Match",
+                                    selected = true,
+                                    icon = Icons.Default.AutoAwesome,
+                                    selectedContainerColor = StudioColors.SecondaryContainer,
+                                    selectedContentColor = StudioColors.OnSecondaryContainer,
+                                    onClick = { viewModel.autoMatchAllTargetFaces() }
+                                )
                             }
-                            IconButton(onClick = onDismiss, modifier = Modifier.size(30.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF94A3B8), modifier = Modifier.size(18.dp))
+                            IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = StudioColors.TextSecondary, modifier = Modifier.size(20.dp))
                             }
                         }
                     }
 
-                    // Create New Profile Section
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF111827))
-                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp))
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                    // Create New Profile Card
+                    StudioSectionCard {
                         Text(
                             "Create New Profile",
-                            color = Color(0xFFE2E8F0),
-                            fontSize = 12.sp,
+                            color = StudioColors.TextPrimary,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             OutlinedTextField(
                                 value = newProfileName,
                                 onValueChange = { newProfileName = it },
-                                placeholder = { Text("Profile name (e.g. Alex)", color = Color(0xFF64748B), fontSize = 12.sp) },
+                                placeholder = { Text("Profile name (e.g. Alex)", color = StudioColors.TextMuted, fontSize = 13.sp) },
                                 singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFF6366F1),
-                                    unfocusedBorderColor = Color(0xFF334155),
-                                    focusedContainerColor = Color(0xFF090F1D),
-                                    unfocusedContainerColor = Color(0xFF090F1D)
+                                    focusedTextColor = StudioColors.TextPrimary,
+                                    unfocusedTextColor = StudioColors.TextPrimary,
+                                    focusedBorderColor = StudioColors.Primary,
+                                    unfocusedBorderColor = StudioColors.OutlineVariant,
+                                    focusedContainerColor = StudioColors.SurfaceContainerLowest,
+                                    unfocusedContainerColor = StudioColors.SurfaceContainerLowest
                                 ),
                                 modifier = Modifier.weight(1f)
                             )
@@ -646,84 +605,69 @@ fun FaceProfileManagerDialog(
                                     newProfileName = ""
                                     selectedTargetProfileId = createdId
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
-                                shape = RoundedCornerShape(9.dp),
-                                modifier = Modifier.height(50.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp)
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = StudioColors.Tertiary,
+                                    contentColor = StudioColors.OnPrimary
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.height(52.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp)
                             ) {
-                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(3.dp))
-                                Text("Create", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Create", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Button(
+                            StudioTonalActionButton(
+                                label = "New + Multi-Photos",
+                                icon = Icons.Default.PhotoLibrary,
                                 onClick = { launchGalleryFor(null) },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
-                                shape = RoundedCornerShape(9.dp),
-                                modifier = Modifier.weight(1f).height(36.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp)
-                            ) {
-                                Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("New + Multi-Photos", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                            }
-                            Button(
+                                containerColor = StudioColors.PrimaryContainer,
+                                contentColor = StudioColors.OnPrimaryContainer,
+                                iconTint = StudioColors.Primary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            StudioTonalActionButton(
+                                label = "New + Camera",
+                                icon = Icons.Default.CameraAlt,
                                 onClick = { launchCameraFor(null) },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                                shape = RoundedCornerShape(9.dp),
-                                modifier = Modifier.weight(1f).height(36.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp)
-                            ) {
-                                Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("New + Camera", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                            }
+                                containerColor = StudioColors.SecondaryContainer,
+                                contentColor = StudioColors.OnSecondaryContainer,
+                                iconTint = StudioColors.Secondary,
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
 
-                    // Batch Face Angle Scan Progress & Strict No-Duplicate Scan Report
+                    // Batch Face Angle Scan Progress & Report
                     if (viewModel.isBatchImportingFaces) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF082F49))
-                                .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(10.dp))
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            CircularProgressIndicator(
-                                color = Color(0xFF38BDF8),
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                viewModel.batchImportStatus ?: "Scanning face angles & blocking duplicates...",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                        StudioSectionCard(containerColor = StudioColors.SecondaryContainer) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = StudioColors.Secondary,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    viewModel.batchImportStatus ?: "Scanning face angles & blocking duplicates...",
+                                    color = StudioColors.OnSecondaryContainer,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
 
                     viewModel.lastMultiImportReport?.let { report ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF0F172A))
-                                .border(
-                                    1.dp,
-                                    if (report.addedCount > 0) Color(0xFF059669) else Color(0xFFD97706),
-                                    RoundedCornerShape(10.dp)
-                                )
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        StudioSectionCard(
+                            containerColor = if (report.addedCount > 0) StudioColors.TertiaryContainer else StudioColors.WarningContainer
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -732,63 +676,50 @@ fun FaceProfileManagerDialog(
                             ) {
                                 Text(
                                     "Scan Result (${report.profileName}): +${report.addedCount} added",
-                                    color = if (report.addedCount > 0) Color(0xFF34D399) else Color(0xFFFBBF24),
-                                    fontSize = 11.sp,
+                                    color = if (report.addedCount > 0) StudioColors.Tertiary else StudioColors.Warning,
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 IconButton(
                                     onClick = { viewModel.clearMultiImportReport() },
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(24.dp)
                                 ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Dismiss report", tint = Color(0xFF94A3B8), modifier = Modifier.size(13.dp))
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss report", tint = StudioColors.TextSecondary, modifier = Modifier.size(16.dp))
                                 }
                             }
                             if (report.addedLabels.isNotEmpty()) {
                                 Text(
                                     "Angles: ${report.addedLabels.joinToString(", ")}",
-                                    color = Color(0xFFCBD5E1),
-                                    fontSize = 10.sp
+                                    color = Color.White,
+                                    fontSize = 11.sp
                                 )
                             }
                             if (report.skippedDuplicateCount > 0 || report.skippedNoFaceCount > 0) {
                                 Text(
-                                    "Blocked: ${report.skippedDuplicateCount} duplicate angle(s) · ${report.skippedNoFaceCount} no face",
-                                    color = Color(0xFFFDA4AF),
-                                    fontSize = 10.sp,
+                                    "Skipped: ${report.skippedDuplicateCount} duplicate(s) · ${report.skippedNoFaceCount} no face",
+                                    color = StudioColors.Danger,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium
                                 )
                             }
                         }
                     }
 
-                    // Select Specific Profile to Add Faces To
+                    // Select Target Profile to Add Faces
                     if (viewModel.faceProfiles.isNotEmpty()) {
                         val destProfile = viewModel.faceProfiles.find { it.id == selectedTargetProfileId }
                             ?: viewModel.faceProfiles.first()
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF0F172A))
-                                .border(1.dp, Color(0xFF312E81), RoundedCornerShape(12.dp))
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(7.dp)
-                        ) {
+                        StudioSectionCard {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    "Add Face to Selected Profile:",
-                                    color = Color(0xFFA5B4FC),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Text("Add Angles To", color = StudioColors.Primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                                 Text(
                                     destProfile.name,
-                                    color = Color.White,
-                                    fontSize = 11.sp,
+                                    color = StudioColors.TextPrimary,
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -801,86 +732,53 @@ fun FaceProfileManagerDialog(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 viewModel.faceProfiles.forEach { prof ->
-                                    val isSel = prof.id == destProfile.id
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (isSel) Color(0xFF4F46E5) else Color(0xFF1E293B))
-                                            .border(
-                                                1.dp,
-                                                if (isSel) Color(0xFFA5B4FC) else Color(0xFF334155),
-                                                RoundedCornerShape(8.dp)
-                                            )
-                                            .clickable { selectedTargetProfileId = prof.id }
-                                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                                    ) {
-                                        Text(
-                                            "${prof.name} (${prof.angles.size})",
-                                            color = Color.White,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
-                                            maxLines = 1
-                                        )
-                                    }
+                                    StudioFilterChip(
+                                        label = "${prof.name} (${prof.angles.size})",
+                                        selected = prof.id == destProfile.id,
+                                        onClick = { selectedTargetProfileId = prof.id }
+                                    )
                                 }
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF1E1B4B))
-                                        .border(1.dp, Color(0xFF6366F1), RoundedCornerShape(8.dp))
-                                        .clickable { launchGalleryFor(destProfile.id) }
-                                        .padding(horizontal = 8.dp, vertical = 7.dp)
-                                ) {
-                                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(14.dp))
-                                    Spacer(Modifier.width(5.dp))
-                                    Text("Multi-Select -> ${destProfile.name}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF082F49))
-                                        .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(8.dp))
-                                        .clickable { launchCameraFor(destProfile.id) }
-                                        .padding(horizontal = 8.dp, vertical = 7.dp)
-                                ) {
-                                    Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
-                                    Spacer(Modifier.width(5.dp))
-                                    Text("Add Camera -> ${destProfile.name}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
+                                StudioTonalActionButton(
+                                    label = "Multi -> ${destProfile.name}",
+                                    icon = Icons.Default.AddPhotoAlternate,
+                                    onClick = { launchGalleryFor(destProfile.id) },
+                                    containerColor = StudioColors.PrimaryContainer,
+                                    contentColor = StudioColors.OnPrimaryContainer,
+                                    iconTint = StudioColors.Primary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                StudioTonalActionButton(
+                                    label = "Camera -> ${destProfile.name}",
+                                    icon = Icons.Default.AddAPhoto,
+                                    onClick = { launchCameraFor(destProfile.id) },
+                                    containerColor = StudioColors.SecondaryContainer,
+                                    contentColor = StudioColors.OnSecondaryContainer,
+                                    iconTint = StudioColors.Secondary,
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
                         }
                     }
 
-                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
-
                     if (viewModel.faceProfiles.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(130.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF0F172A))
-                                .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp))
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                "No profiles saved yet. Tap Create or pick a Gallery/Camera photo above to build a profile.",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 12.sp
-                            )
+                        StudioSectionCard {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(100.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "No profiles saved yet. Tap Create or pick a Gallery/Camera photo above to build a profile.",
+                                    color = StudioColors.TextSecondary,
+                                    fontSize = 13.sp
+                                )
+                            }
                         }
                     } else {
                         LazyColumn(
@@ -895,34 +793,23 @@ fun FaceProfileManagerDialog(
                                 val isEditing = editingProfileId == profile.id
                                 val editableAngleId = profile.selectedAngleId ?: profile.angles.firstOrNull()?.id
 
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(if (isActive) Color(0xFF141B36) else Color(0xFF111827))
-                                        .border(
-                                            1.2.dp,
-                                            if (isActive) Color(0xFF6366F1) else Color(0xFF1E293B),
-                                            RoundedCornerShape(12.dp)
-                                        )
-                                        .padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                StudioSectionCard(
+                                    containerColor = if (isActive) Color(0xFF1A2138) else StudioColors.SurfaceContainer
                                 ) {
-                                    // Profile Header Row
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         Box(
                                             modifier = Modifier
-                                                .size(44.dp)
+                                                .size(48.dp)
                                                 .clip(CircleShape)
-                                                .background(Color(0xFF090F1D))
+                                                .background(StudioColors.SurfaceContainerHigh)
                                                 .border(
-                                                    1.5.dp,
-                                                    if (isActive) Color(0xFF818CF8) else Color(0xFF334155),
-                                                    CircleShape
+                                                    width = if (isActive) 2.dp else 1.dp,
+                                                    color = if (isActive) StudioColors.Primary else StudioColors.OutlineVariant,
+                                                    shape = CircleShape
                                                 )
                                                 .clickable {
                                                     selectedTargetProfileId = profile.id
@@ -935,15 +822,10 @@ fun FaceProfileManagerDialog(
                                                     bitmap = primaryCutout.asImageBitmap(),
                                                     contentDescription = null,
                                                     contentScale = ContentScale.Fit,
-                                                    modifier = Modifier.fillMaxSize().padding(2.dp)
+                                                    modifier = Modifier.fillMaxSize().padding(3.dp)
                                                 )
                                             } else {
-                                                Icon(
-                                                    Icons.Default.Face,
-                                                    contentDescription = null,
-                                                    tint = Color(0xFF475569),
-                                                    modifier = Modifier.size(22.dp)
-                                                )
+                                                Icon(Icons.Default.Face, contentDescription = null, tint = StudioColors.TextMuted, modifier = Modifier.size(24.dp))
                                             }
                                         }
 
@@ -957,11 +839,12 @@ fun FaceProfileManagerDialog(
                                                         value = editingNameDraft,
                                                         onValueChange = { editingNameDraft = it },
                                                         singleLine = true,
+                                                        shape = RoundedCornerShape(12.dp),
                                                         colors = OutlinedTextFieldDefaults.colors(
-                                                            focusedTextColor = Color.White,
-                                                            unfocusedTextColor = Color.White,
-                                                            focusedBorderColor = Color(0xFF6366F1),
-                                                            unfocusedBorderColor = Color(0xFF334155)
+                                                            focusedTextColor = StudioColors.TextPrimary,
+                                                            unfocusedTextColor = StudioColors.TextPrimary,
+                                                            focusedBorderColor = StudioColors.Primary,
+                                                            unfocusedBorderColor = StudioColors.OutlineVariant
                                                         ),
                                                         modifier = Modifier.weight(1f)
                                                     )
@@ -970,17 +853,17 @@ fun FaceProfileManagerDialog(
                                                             viewModel.renameFaceProfile(profile.id, editingNameDraft)
                                                             editingProfileId = null
                                                         },
-                                                        modifier = Modifier.size(28.dp)
+                                                        modifier = Modifier.size(34.dp)
                                                     ) {
-                                                        Icon(Icons.Default.Check, contentDescription = "Save name", tint = Color(0xFF34D399), modifier = Modifier.size(16.dp))
+                                                        Icon(Icons.Default.Check, contentDescription = "Save name", tint = StudioColors.Tertiary, modifier = Modifier.size(18.dp))
                                                     }
                                                 }
                                             } else {
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                                     Text(
                                                         profile.name,
-                                                        color = Color.White,
-                                                        fontSize = 13.sp,
+                                                        color = StudioColors.TextPrimary,
+                                                        fontSize = 14.sp,
                                                         fontWeight = FontWeight.Bold,
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis,
@@ -991,53 +874,43 @@ fun FaceProfileManagerDialog(
                                                             editingProfileId = profile.id
                                                             editingNameDraft = profile.name
                                                         },
-                                                        modifier = Modifier.size(24.dp)
+                                                        modifier = Modifier.size(28.dp)
                                                     ) {
-                                                        Icon(Icons.Default.Edit, contentDescription = "Rename", tint = Color(0xFF94A3B8), modifier = Modifier.size(13.dp))
+                                                        Icon(Icons.Default.Edit, contentDescription = "Rename", tint = StudioColors.TextSecondary, modifier = Modifier.size(14.dp))
                                                     }
                                                 }
                                                 Text(
                                                     "${profile.angles.size} ${if (profile.angles.size == 1) "face saved" else "faces saved"}",
-                                                    color = Color(0xFF94A3B8),
-                                                    fontSize = 10.sp
+                                                    color = StudioColors.TextSecondary,
+                                                    fontSize = 11.sp
                                                 )
                                             }
                                         }
 
-                                        Text(
-                                            if (isActive) "Swap Active" else "Swap This",
-                                            color = if (isActive) Color(0xFF0F172A) else Color.White,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(if (isActive) Color(0xFF34D399) else Color(0xFF312E81))
-                                                .border(
-                                                    1.dp,
-                                                    if (isActive) Color(0xFF34D399) else Color(0xFF6366F1),
-                                                    RoundedCornerShape(8.dp)
-                                                )
-                                                .clickable {
-                                                    selectedTargetProfileId = profile.id
-                                                    viewModel.scanAndSelectProfileForSwap(profile.id)
-                                                }
-                                                .padding(horizontal = 9.dp, vertical = 5.dp)
+                                        StudioFilterChip(
+                                            label = if (isActive) "Active" else "Use",
+                                            selected = true,
+                                            selectedContainerColor = if (isActive) StudioColors.TertiaryContainer else StudioColors.PrimaryContainer,
+                                            selectedContentColor = if (isActive) StudioColors.Tertiary else StudioColors.OnPrimaryContainer,
+                                            onClick = {
+                                                selectedTargetProfileId = profile.id
+                                                viewModel.scanAndSelectProfileForSwap(profile.id)
+                                            }
                                         )
 
                                         IconButton(
                                             onClick = { viewModel.removeFaceProfile(profile.id) },
-                                            modifier = Modifier.size(28.dp)
+                                            modifier = Modifier.size(32.dp)
                                         ) {
-                                            Icon(Icons.Default.Delete, contentDescription = "Delete profile", tint = Color(0xFFF87171), modifier = Modifier.size(16.dp))
+                                            Icon(Icons.Default.Delete, contentDescription = "Delete profile", tint = StudioColors.Danger, modifier = Modifier.size(18.dp))
                                         }
                                     }
 
-                                    // Saved Cutout Face Thumbnails Strip (pure cutout images, ZERO face labels; edit & delete icons)
                                     if (profile.angles.isEmpty()) {
                                         Text(
-                                            "No face added to '${profile.name}' yet. Add a face below.",
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 10.sp
+                                            "No face added to '${profile.name}' yet. Add photos below.",
+                                            color = StudioColors.TextSecondary,
+                                            fontSize = 11.sp
                                         )
                                     } else {
                                         Row(
@@ -1052,13 +925,13 @@ fun FaceProfileManagerDialog(
                                                 val angleBmp = viewModel.angleCutoutCache[angle.id] ?: viewModel.angleBitmapCache[angle.id]
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(58.dp)
-                                                        .clip(RoundedCornerShape(10.dp))
-                                                        .background(Color(0xFF090F1D))
+                                                        .size(62.dp)
+                                                        .clip(RoundedCornerShape(12.dp))
+                                                        .background(StudioColors.SurfaceContainerLowest)
                                                         .border(
                                                             width = if (isAngleSelected) 2.dp else 1.dp,
-                                                            color = if (isAngleSelected) Color(0xFF6366F1) else Color(0xFF334155),
-                                                            shape = RoundedCornerShape(10.dp)
+                                                            color = if (isAngleSelected) StudioColors.Primary else StudioColors.OutlineVariant,
+                                                            shape = RoundedCornerShape(12.dp)
                                                         )
                                                         .clickable {
                                                             selectedTargetProfileId = profile.id
@@ -1077,219 +950,155 @@ fun FaceProfileManagerDialog(
                                                         modifier = Modifier
                                                             .align(Alignment.TopEnd)
                                                             .padding(2.dp)
-                                                            .size(17.dp)
+                                                            .size(18.dp)
                                                             .clip(CircleShape)
-                                                            .background(Color(0xDD7F1D1D))
+                                                            .background(StudioColors.DangerContainer)
                                                             .clickable { viewModel.removeAngleFromProfile(profile.id, angle.id) },
                                                         contentAlignment = Alignment.Center
                                                     ) {
-                                                        Icon(
-                                                            Icons.Default.Close,
-                                                            contentDescription = "Delete face",
-                                                            tint = Color.White,
-                                                            modifier = Modifier.size(10.dp)
-                                                        )
+                                                        Icon(Icons.Default.Close, contentDescription = "Delete face", tint = Color.White, modifier = Modifier.size(10.dp))
                                                     }
                                                     Box(
                                                         modifier = Modifier
                                                             .align(Alignment.BottomEnd)
                                                             .padding(2.dp)
-                                                            .size(17.dp)
+                                                            .size(18.dp)
                                                             .clip(CircleShape)
-                                                            .background(Color(0xDD312E81))
+                                                            .background(StudioColors.PrimaryContainer)
                                                             .clickable { openFaceEditor(profile.id, angle.id) },
                                                         contentAlignment = Alignment.Center
                                                     ) {
-                                                        Icon(
-                                                            Icons.Default.Edit,
-                                                            contentDescription = "Edit face",
-                                                            tint = Color(0xFFA5B4FC),
-                                                            modifier = Modifier.size(10.dp)
-                                                        )
+                                                        Icon(Icons.Default.Edit, contentDescription = "Edit face", tint = StudioColors.OnPrimaryContainer, modifier = Modifier.size(10.dp))
                                                     }
-                                                    Box(
+                                                    Text(
+                                                        "${angle.yawDeg.toInt()}°",
+                                                        color = StudioColors.Secondary,
+                                                        fontSize = 8.sp,
+                                                        fontWeight = FontWeight.Bold,
                                                         modifier = Modifier
                                                             .align(Alignment.BottomStart)
                                                             .padding(2.dp)
                                                             .clip(RoundedCornerShape(4.dp))
-                                                            .background(Color(0xCC020617))
+                                                            .background(StudioColors.FloatingGlass)
                                                             .padding(horizontal = 3.dp, vertical = 1.dp)
-                                                    ) {
-                                                        Text(
-                                                            "${angle.yawDeg.toInt()}°",
-                                                            color = Color(0xFF38BDF8),
-                                                            fontSize = 8.sp,
-                                                            fontWeight = FontWeight.Bold
-                                                        )
-                                                    }
+                                                    )
                                                 }
                                             }
                                         }
                                     }
 
-                                    // 5-Slot Interactive Angle Coverage Checklist (Front / Left / Right / Up / Down)
+                                    // 5-Slot Interactive Angle Coverage Checklist (Unlimited angles per direction)
                                     run {
-                                        val frontMatch = profile.angles.firstOrNull {
+                                        val frontList = profile.angles.filter {
                                             it.bucket == FaceAngleBucket.FRONT || (abs(it.yawDeg) <= 10f && abs(it.pitchDeg) <= 13f)
                                         }
-                                        val leftMatch = profile.angles.firstOrNull {
+                                        val leftList = profile.angles.filter {
                                             it.bucket == FaceAngleBucket.LEFT_SLIGHT ||
                                                 it.bucket == FaceAngleBucket.LEFT_3QUARTER ||
                                                 it.bucket == FaceAngleBucket.LEFT_PROFILE ||
                                                 it.yawDeg < -9f
                                         }
-                                        val rightMatch = profile.angles.firstOrNull {
+                                        val rightList = profile.angles.filter {
                                             it.bucket == FaceAngleBucket.RIGHT_SLIGHT ||
                                                 it.bucket == FaceAngleBucket.RIGHT_3QUARTER ||
                                                 it.bucket == FaceAngleBucket.RIGHT_PROFILE ||
                                                 it.yawDeg > 9f
                                         }
-                                        val upMatch = profile.angles.firstOrNull {
+                                        val upList = profile.angles.filter {
                                             it.bucket == FaceAngleBucket.TILT_UP || it.pitchDeg > 12f
                                         }
-                                        val downMatch = profile.angles.firstOrNull {
+                                        val downList = profile.angles.filter {
                                             it.bucket == FaceAngleBucket.TILT_DOWN || it.pitchDeg < -12f
                                         }
                                         val coverageSlots = listOf(
-                                            "Front" to frontMatch,
-                                            "Left" to leftMatch,
-                                            "Right" to rightMatch,
-                                            "Up" to upMatch,
-                                            "Down" to downMatch
+                                            "Front" to frontList,
+                                            "Left" to leftList,
+                                            "Right" to rightList,
+                                            "Up" to upList,
+                                            "Down" to downList
                                         )
-                                        val coveredCount = coverageSlots.count { it.second != null }
+                                        val coveredCount = coverageSlots.count { it.second.isNotEmpty() }
 
-                                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                             Row(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.SpaceBetween,
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 Text(
-                                                    "Angle Coverage",
-                                                    color = Color(0xFF94A3B8),
-                                                    fontSize = 9.sp,
+                                                    "Angle Coverage (Unlimited)",
+                                                    color = StudioColors.TextSecondary,
+                                                    fontSize = 10.sp,
                                                     fontWeight = FontWeight.SemiBold
                                                 )
                                                 Text(
-                                                    if (coveredCount == 5) "5/5 Full Match Ready" else "$coveredCount/5 Angles Filled",
-                                                    color = if (coveredCount == 5) Color(0xFF34D399) else Color(0xFF38BDF8),
-                                                    fontSize = 9.sp,
+                                                    if (coveredCount == 5) "5/5 Zones · ${profile.angles.size} Total" else "$coveredCount/5 Zones · ${profile.angles.size} Saved",
+                                                    color = if (coveredCount == 5) StudioColors.Tertiary else StudioColors.Secondary,
+                                                    fontSize = 10.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
                                             }
                                             Row(
                                                 modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                                             ) {
-                                                coverageSlots.forEach { (slotLabel, variant) ->
-                                                    val filled = variant != null
-                                                    val isSelSlot = variant != null && profile.selectedAngleId == variant.id
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.Center,
-                                                        modifier = Modifier
-                                                            .weight(1f)
-                                                            .clip(RoundedCornerShape(7.dp))
-                                                            .background(
-                                                                when {
-                                                                    isSelSlot -> Color(0xFF065F46)
-                                                                    filled -> Color(0xFF0F2922)
-                                                                    else -> Color(0xFF090F1D)
-                                                                }
-                                                            )
-                                                            .border(
-                                                                1.dp,
-                                                                when {
-                                                                    isSelSlot -> Color(0xFF34D399)
-                                                                    filled -> Color(0xFF059669)
-                                                                    else -> Color(0xFF1E293B)
-                                                                },
-                                                                RoundedCornerShape(7.dp)
-                                                            )
-                                                            .clickable {
-                                                                selectedTargetProfileId = profile.id
-                                                                if (variant != null) {
-                                                                    viewModel.selectProfileAngle(profile.id, variant.id)
-                                                                } else {
-                                                                    launchGalleryFor(profile.id)
-                                                                }
+                                                coverageSlots.forEach { (slotLabel, list) ->
+                                                    val filled = list.isNotEmpty()
+                                                    val activeVariant = list.find { it.id == profile.selectedAngleId } ?: list.firstOrNull()
+                                                    val isSelSlot = activeVariant != null && profile.selectedAngleId == activeVariant.id
+                                                    StudioFilterChip(
+                                                        label = if (list.size > 1) "$slotLabel(${list.size})" else slotLabel,
+                                                        selected = filled,
+                                                        icon = if (filled) Icons.Default.Check else null,
+                                                        selectedContainerColor = if (isSelSlot) StudioColors.TertiaryContainer else StudioColors.SurfaceContainerHighest,
+                                                        selectedContentColor = if (isSelSlot) StudioColors.Tertiary else StudioColors.TextPrimary,
+                                                        onClick = {
+                                                            selectedTargetProfileId = profile.id
+                                                            if (list.isNotEmpty()) {
+                                                                val curIdx = list.indexOfFirst { it.id == profile.selectedAngleId }
+                                                                val nextVariant = if (curIdx >= 0) list[(curIdx + 1) % list.size] else list.first()
+                                                                viewModel.selectProfileAngle(profile.id, nextVariant.id)
+                                                            } else {
+                                                                launchGalleryFor(profile.id)
                                                             }
-                                                            .padding(vertical = 4.dp, horizontal = 2.dp)
-                                                    ) {
-                                                        if (filled) {
-                                                            Icon(
-                                                                Icons.Default.Check,
-                                                                contentDescription = null,
-                                                                tint = Color(0xFF34D399),
-                                                                modifier = Modifier.size(10.dp)
-                                                            )
-                                                            Spacer(Modifier.width(2.dp))
-                                                        }
-                                                        Text(
-                                                            slotLabel,
-                                                            color = if (filled) Color(0xFFD1FAE5) else Color(0xFF64748B),
-                                                            fontSize = 9.sp,
-                                                            fontWeight = if (filled) FontWeight.Bold else FontWeight.Medium,
-                                                            maxLines = 1
-                                                        )
-                                                    }
+                                                        },
+                                                        modifier = Modifier.weight(1f)
+                                                    )
                                                 }
                                             }
                                         }
                                     }
 
-                                    // Add / Edit Face buttons for this Profile
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.Center,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFF1E1B4B))
-                                                .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
-                                                .clickable { launchGalleryFor(profile.id) }
-                                                .padding(horizontal = 6.dp, vertical = 6.dp)
-                                        ) {
-                                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(13.dp))
-                                            Spacer(Modifier.width(4.dp))
-                                            Text("+ Multi", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                                        }
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.Center,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFF082F49))
-                                                .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(8.dp))
-                                                .clickable { launchCameraFor(profile.id) }
-                                                .padding(horizontal = 6.dp, vertical = 6.dp)
-                                        ) {
-                                            Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
-                                            Spacer(Modifier.width(4.dp))
-                                            Text("+ Camera", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                                        }
+                                        StudioTonalActionButton(
+                                            label = "+ Multi",
+                                            icon = Icons.Default.AddPhotoAlternate,
+                                            onClick = { launchGalleryFor(profile.id) },
+                                            containerColor = StudioColors.PrimaryContainer,
+                                            contentColor = StudioColors.OnPrimaryContainer,
+                                            iconTint = StudioColors.Primary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        StudioTonalActionButton(
+                                            label = "+ Cam",
+                                            icon = Icons.Default.AddAPhoto,
+                                            onClick = { launchCameraFor(profile.id) },
+                                            containerColor = StudioColors.SecondaryContainer,
+                                            contentColor = StudioColors.OnSecondaryContainer,
+                                            iconTint = StudioColors.Secondary,
+                                            modifier = Modifier.weight(1f)
+                                        )
                                         if (editableAngleId != null) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.Center,
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .background(Color(0xFF1E293B))
-                                                    .border(1.dp, Color(0xFF475569), RoundedCornerShape(8.dp))
-                                                    .clickable { openFaceEditor(profile.id, editableAngleId) }
-                                                    .padding(horizontal = 6.dp, vertical = 6.dp)
-                                            ) {
-                                                Icon(Icons.Default.Edit, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(13.dp))
-                                                Spacer(Modifier.width(4.dp))
-                                                Text("Edit Face", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                                            }
+                                            StudioTonalActionButton(
+                                                label = "Edit",
+                                                icon = Icons.Default.Edit,
+                                                onClick = { openFaceEditor(profile.id, editableAngleId) },
+                                                iconTint = StudioColors.Warning,
+                                                modifier = Modifier.weight(1f)
+                                            )
                                         }
                                     }
                                 }

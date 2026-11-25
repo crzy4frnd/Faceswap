@@ -42,6 +42,13 @@ object BuiltInWardrobeFactory {
                 outerDark = Color.rgb(24, 28, 36),
                 zipColor = Color.rgb(212, 218, 228)
             )
+            "asset-kurta-emerald" -> renderKurta(
+                fabricLight = Color.rgb(20, 96, 84),
+                fabricMid = Color.rgb(13, 72, 62),
+                fabricDark = Color.rgb(8, 48, 42),
+                embroideryGold = Color.rgb(232, 192, 92)
+            )
+            "asset-watch-gold" -> renderGoldWatch()
             "asset-glasses-aviator" -> renderAviatorGlasses()
             else -> null
         }
@@ -341,6 +348,125 @@ object BuiltInWardrobeFactory {
         // Temple tips
         canvas.drawLine(cx - 166f, 50f, cx - 192f, 54f, framePaint)
         canvas.drawLine(cx + 166f, 50f, cx + 192f, 54f, framePaint)
+        return bmp
+    }
+
+    private fun renderKurta(
+        fabricLight: Int,
+        fabricMid: Int,
+        fabricDark: Int,
+        embroideryGold: Int
+    ): Bitmap {
+        val w = 480
+        val h = 620
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bmp.setHasAlpha(true)
+        val canvas = Canvas(bmp)
+        val cx = w * 0.5f
+
+        val kurtaPath = Path().apply {
+            moveTo(cx - 52f, 32f)
+            lineTo(cx - 188f, 78f)
+            quadTo(cx - 216f, 94f, cx - 222f, 152f)
+            lineTo(cx - 212f, 372f)
+            lineTo(cx - 158f, 374f)
+            lineTo(cx - 146f, 224f)
+            lineTo(cx - 154f, 594f)
+            lineTo(cx + 154f, 594f)
+            lineTo(cx + 146f, 224f)
+            lineTo(cx + 158f, 374f)
+            lineTo(cx + 212f, 372f)
+            lineTo(cx + 222f, 152f)
+            quadTo(cx + 216f, 94f, cx + 188f, 78f)
+            lineTo(cx + 52f, 32f)
+            quadTo(cx, 66f, cx - 52f, 32f)
+            close()
+        }
+
+        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                0f, 32f, w.toFloat(), h.toFloat(),
+                intArrayOf(fabricLight, fabricMid, fabricDark),
+                floatArrayOf(0f, 0.55f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawPath(kurtaPath, bodyPaint)
+
+        // Mandarin band collar + embroidered placket
+        val goldPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = embroideryGold
+            style = Paint.Style.STROKE
+            strokeWidth = 3.2f
+        }
+        val mandarinBand = Path().apply {
+            moveTo(cx - 52f, 30f)
+            quadTo(cx, 58f, cx + 52f, 30f)
+            lineTo(cx + 46f, 64f)
+            quadTo(cx, 92f, cx - 46f, 64f)
+            close()
+        }
+        canvas.drawPath(mandarinBand, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fabricDark })
+        canvas.drawPath(mandarinBand, goldPaint)
+
+        // Embroidered center placket & buttons
+        canvas.drawRect(
+            cx - 15f, 78f, cx + 15f, 286f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fabricDark }
+        )
+        canvas.drawRect(cx - 15f, 78f, cx + 15f, 286f, goldPaint)
+
+        val goldBtnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = embroideryGold }
+        for (by in listOf(108f, 148f, 188f, 228f, 268f)) {
+            canvas.drawCircle(cx, by, 5.2f, goldBtnPaint)
+        }
+
+        // Subtle gold cuff & hem border trims
+        canvas.drawLine(cx - 154f, 580f, cx + 154f, 580f, goldPaint)
+        canvas.drawLine(cx - 210f, 360f, cx - 158f, 362f, goldPaint)
+        canvas.drawLine(cx + 158f, 362f, cx + 210f, 360f, goldPaint)
+        return bmp
+    }
+
+    private fun renderGoldWatch(): Bitmap {
+        val w = 240
+        val h = 240
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bmp.setHasAlpha(true)
+        val canvas = Canvas(bmp)
+        val cx = w * 0.5f
+        val cy = h * 0.5f
+
+        val strapPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                cx - 60f, 0f, cx + 60f, 0f,
+                intArrayOf(Color.rgb(92, 68, 34), Color.rgb(198, 158, 72), Color.rgb(92, 68, 34)),
+                floatArrayOf(0f, 0.5f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        // Horizontal band + vertical lugs silhouette so wrist angle wraps naturally around wrist
+        canvas.drawRoundRect(RectF(cx - 104f, cy - 30f, cx + 104f, cy + 30f), 14f, 14f, strapPaint)
+
+        val bezelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                cx - 48f, cy - 48f, cx + 48f, cy + 48f,
+                intArrayOf(Color.rgb(246, 214, 126), Color.rgb(184, 134, 48), Color.rgb(235, 198, 102)),
+                floatArrayOf(0f, 0.55f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawCircle(cx, cy, 48f, bezelPaint)
+        canvas.drawCircle(cx, cy, 38f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(14, 22, 38) })
+
+        val handPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(246, 214, 126)
+            strokeWidth = 3.5f
+            strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawLine(cx, cy, cx + 18f, cy - 16f, handPaint)
+        canvas.drawLine(cx, cy, cx - 12f, cy - 22f, handPaint)
+        canvas.drawCircle(cx, cy, 4f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(246, 214, 126) })
         return bmp
     }
 }

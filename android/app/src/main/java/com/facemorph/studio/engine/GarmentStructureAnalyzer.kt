@@ -64,14 +64,14 @@ object GarmentStructureAnalyzer {
             return fallback
         }
 
-        // Shoulder seam sits where silhouette has widened rapidly from collar (~22-35%) out to >=70% of upper span
-        val shoulderThresh = maxUpperWidth * 0.70f
+        // Shoulder corner inflection sits where silhouette widens from collar (~30%) out to ~80% of full upper sleeve span
+        val shoulderThresh = maxUpperWidth * 0.80f
         var detectedSeamV = 0.14f
-        var widthAtSeam = 0.80f
+        var widthAtSeam = 0.88f
         for ((v, spanNorm) in rowWidths) {
             if (v >= 0.03f && spanNorm >= shoulderThresh) {
                 detectedSeamV = v.coerceIn(0.05f, 0.25f)
-                widthAtSeam = (spanNorm / maxUpperWidth).coerceIn(0.65f, 0.96f)
+                widthAtSeam = (spanNorm / maxUpperWidth).coerceIn(0.78f, 0.98f)
                 break
             }
         }
@@ -93,7 +93,7 @@ object GarmentStructureAnalyzer {
 
         val metrics = GarmentStructureMetrics(
             shoulderSeamV = detectedSeamV,
-            shoulderWidthRatio = min(0.96f, max(0.65f, widthAtSeam)),
+            shoulderWidthRatio = min(0.98f, max(0.78f, widthAtSeam)),
             collarDipV = collarTopV
         )
         cache[key] = metrics

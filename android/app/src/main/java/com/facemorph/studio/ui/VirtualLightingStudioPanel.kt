@@ -3,14 +3,13 @@ package com.facemorph.studio.ui
 import android.graphics.Paint as NativePaint
 import android.os.Build
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,10 +22,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -43,6 +46,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.facemorph.studio.engine.VirtualLightingStudioShader
@@ -69,35 +73,45 @@ fun VirtualLightingStudioPanel(
 ) {
     val latestLight by rememberUpdatedState(light)
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF111827))
-            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 7.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+    StudioSectionCard(
+        containerColor = StudioColors.SurfaceContainer,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
     ) {
-        // Header Bar: Icon + Title + Auto-Match + Reset + Enable Toggle
+        // Header Bar: Icon + Title + Auto-Match + Reset + Enable Switch
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.WbSunny,
-                    contentDescription = null,
-                    tint = if (light.enabled) Color(0xFFFBBF24) else Color(0xFF64748B),
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "Virtual Lighting Studio",
-                    color = Color(0xFFE2E8F0),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (light.enabled) StudioColors.WarningContainer else StudioColors.SurfaceContainerHigh,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Default.WbSunny,
+                            contentDescription = null,
+                            tint = if (light.enabled) StudioColors.Warning else StudioColors.TextMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(
+                        "Lighting Studio",
+                        color = StudioColors.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        if (light.enabled) "Drag 3D dome to move key light" else "Relighting paused",
+                        color = StudioColors.TextMuted,
+                        fontSize = 11.sp
+                    )
+                }
             }
 
             Row(
@@ -105,31 +119,39 @@ fun VirtualLightingStudioPanel(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (onAutoMatchTarget != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(Color(0xFF1E1B4B))
-                            .border(1.dp, Color(0xFF4F46E5), RoundedCornerShape(7.dp))
-                            .clickable { onAutoMatchTarget() }
-                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                    FilledTonalButton(
+                        onClick = onAutoMatchTarget,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = StudioColors.PrimaryContainer,
+                            contentColor = StudioColors.OnPrimaryContainer
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        modifier = Modifier.height(36.dp)
                     ) {
-                        Icon(Icons.Default.AutoFixHigh, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(12.dp))
-                        Spacer(Modifier.width(3.dp))
-                        Text("Auto", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                        Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Auto", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
-                Icon(
-                    Icons.Default.RestartAlt,
-                    contentDescription = "Reset Lighting",
-                    tint = Color(0xFF94A3B8),
-                    modifier = Modifier
-                        .size(18.dp)
-                        .clickable { onLightChange(VirtualLightConfig()) }
-                )
+                FilledTonalIconButton(
+                    onClick = { onLightChange(VirtualLightConfig()) },
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = StudioColors.SurfaceContainerHigh,
+                        contentColor = StudioColors.TextSecondary
+                    ),
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(Icons.Default.RestartAlt, contentDescription = "Reset Lighting", modifier = Modifier.size(18.dp))
+                }
                 Switch(
                     checked = light.enabled,
-                    onCheckedChange = { onLightChange(light.copy(enabled = it)) }
+                    onCheckedChange = { onLightChange(light.copy(enabled = it)) },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = StudioColors.OnPrimary,
+                        checkedTrackColor = StudioColors.Warning,
+                        uncheckedTrackColor = StudioColors.SurfaceContainerHighest
+                    )
                 )
             }
         }
@@ -137,11 +159,11 @@ fun VirtualLightingStudioPanel(
         if (light.enabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Interactive 360-degree Ambient Light Direction + Elevation Dome Pad
-                val padSize = if (compact) 78.dp else 92.dp
+                val padSize = if (compact) 86.dp else 104.dp
                 Box(
                     modifier = Modifier.size(padSize),
                     contentAlignment = Alignment.Center
@@ -212,7 +234,6 @@ fun VirtualLightingStudioPanel(
                             )
                         }
 
-                        // Subtle azimuth & elevation reference rings
                         drawCircle(
                             color = Color(0x5594A3B8),
                             radius = r,
@@ -226,7 +247,6 @@ fun VirtualLightingStudioPanel(
                             style = Stroke(width = 1.0f)
                         )
 
-                        // Light handle orb position from (directionDeg, elevationDeg)
                         val normDist = ((72f - light.elevationDeg) / 82f).coerceIn(0f, 1f)
                         val azRad = light.directionDeg * (PI.toFloat() / 180f)
                         val handlePos = Offset(
@@ -239,85 +259,71 @@ fun VirtualLightingStudioPanel(
                             end = handlePos,
                             strokeWidth = 1.5f
                         )
-                        drawCircle(color = Color(0xEE020617), radius = 7.5f, center = handlePos)
-                        drawCircle(color = Color(0xFFFBBF24), radius = 5.5f, center = handlePos)
+                        drawCircle(color = Color(0xEE0E1015), radius = 8.5f, center = handlePos)
+                        drawCircle(color = StudioColors.Warning, radius = 6.2f, center = handlePos)
                     }
                 }
 
-                // Right Column: Intensity, Warmth & Quick Light Direction Presets
+                // Right Column: Readable Sliders + Thumb Presets
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Intensity ${(light.intensity * 100f).roundToInt()}%",
-                            color = Color(0xFFCBD5E1),
-                            fontSize = 10.sp,
-                            modifier = Modifier.width(78.dp)
-                        )
-                        Slider(
-                            value = light.intensity,
-                            onValueChange = { onLightChange(light.copy(intensity = it)) },
-                            valueRange = 0f..1f,
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color(0xFFFBBF24),
-                                activeTrackColor = Color(0xFFFBBF24)
-                            ),
-                            modifier = Modifier.weight(1f).height(24.dp)
-                        )
-                    }
+                    StudioSliderRow(
+                        label = "Intensity",
+                        valueText = "${(light.intensity * 100f).roundToInt()}%",
+                        value = light.intensity,
+                        onValueChange = { onLightChange(light.copy(intensity = it)) },
+                        valueRange = 0f..1f,
+                        accentColor = StudioColors.Warning
+                    )
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Warmth ${(light.warmth * 100f).roundToInt()}",
-                            color = Color(0xFFCBD5E1),
-                            fontSize = 10.sp,
-                            modifier = Modifier.width(78.dp)
-                        )
-                        Slider(
-                            value = light.warmth,
-                            onValueChange = { onLightChange(light.copy(warmth = it)) },
-                            valueRange = -0.35f..0.55f,
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color(0xFFFB923C),
-                                activeTrackColor = Color(0xFFFB923C)
-                            ),
-                            modifier = Modifier.weight(1f).height(24.dp)
-                        )
-                    }
+                    StudioSliderRow(
+                        label = "Warmth",
+                        valueText = "${(light.warmth * 100f).roundToInt()}",
+                        value = light.warmth,
+                        onValueChange = { onLightChange(light.copy(warmth = it)) },
+                        valueRange = -0.35f..0.55f,
+                        accentColor = Color(0xFFFB923C)
+                    )
+                }
+            }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    Triple("Left", 180f, 30f),
+                    Triple("Top", 270f, 44f),
+                    Triple("Key", 315f, 38f),
+                    Triple("Right", 0f, 30f)
+                ).forEach { (label, dir, elev) ->
+                    val isNear = kotlin.math.abs(((light.directionDeg - dir + 540f) % 360f) - 180f) < 22f
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                onLightChange(
+                                    light.copy(
+                                        enabled = true,
+                                        directionDeg = dir,
+                                        elevationDeg = elev
+                                    )
+                                )
+                            },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isNear) StudioColors.Warning else StudioColors.SurfaceContainerHigh
                     ) {
-                        listOf(
-                            Triple("Left", 180f, 30f),
-                            Triple("Top", 270f, 44f),
-                            Triple("Key", 315f, 38f),
-                            Triple("Right", 0f, 30f)
-                        ).forEach { (label, dir, elev) ->
-                            val isNear = kotlin.math.abs(((light.directionDeg - dir + 540f) % 360f) - 180f) < 22f
+                        Box(contentAlignment = Alignment.Center) {
                             Text(
-                                label,
-                                color = if (isNear) Color(0xFF0F172A) else Color(0xFF94A3B8),
-                                fontSize = 9.sp,
+                                text = label,
+                                color = if (isNear) StudioColors.OnPrimary else StudioColors.TextSecondary,
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (isNear) Color(0xFFFBBF24) else Color(0xFF1E293B))
-                                    .clickable {
-                                        onLightChange(
-                                            light.copy(
-                                                enabled = true,
-                                                directionDeg = dir,
-                                                elevationDeg = elev
-                                            )
-                                        )
-                                    }
-                                    .padding(vertical = 4.dp),
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                textAlign = TextAlign.Center
                             )
                         }
                     }

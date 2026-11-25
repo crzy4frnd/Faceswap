@@ -35,11 +35,13 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 object NativeFaceSwapEngine {
@@ -146,6 +148,29 @@ object NativeFaceSwapEngine {
                                 )
                             } ?: emptyList()
 
+                            val uLipTop = f.getContour(FaceContour.UPPER_LIP_TOP)?.points.orEmpty()
+                            val lLipBot = f.getContour(FaceContour.LOWER_LIP_BOTTOM)?.points.orEmpty()
+                            val uLipBot = f.getContour(FaceContour.UPPER_LIP_BOTTOM)?.points.orEmpty()
+                            val lLipTop = f.getContour(FaceContour.LOWER_LIP_TOP)?.points.orEmpty()
+                            val allLipPts = uLipTop + lLipBot
+                            val donorMouthW = if (allLipPts.size >= 4) {
+                                val minLx = allLipPts.minOf { it.x }
+                                val maxLx = allLipPts.maxOf { it.x }
+                                ((maxLx - minLx) / cropW).coerceIn(0.22f, 0.56f)
+                            } else 0.38f
+                            val donorMouthOpen = if (uLipBot.isNotEmpty() && lLipTop.isNotEmpty()) {
+                                val uAvg = uLipBot.map { it.y }.average().toFloat()
+                                val lAvg = lLipTop.map { it.y }.average().toFloat()
+                                ((lAvg - uAvg) / cropH).coerceIn(0.01f, 0.18f)
+                            } else 0.04f
+                            val donorBrows = f.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points.orEmpty() +
+                                f.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points.orEmpty()
+                            val donorBrowY = if (donorBrows.isNotEmpty()) {
+                                val bAvg = donorBrows.map { it.y }.average().toFloat()
+                                ((bAvg - cropT * h) / cropH).coerceIn(0.14f, 0.42f)
+                            } else (eyeMidY - eyeDist * 0.28f).coerceIn(0.14f, 0.40f)
+                            val donorSmile = f.smilingProbability ?: 0.5f
+
                             val yaw = f.headEulerAngleY.coerceIn(-65f, 65f)
                             val pitch = f.headEulerAngleX.coerceIn(-45f, 45f)
                             val visSig = computeVisualSignature(bitmap, cropL, cropT, cropR, cropB)
@@ -169,7 +194,11 @@ object NativeFaceSwapEngine {
                                             mouthYRatio = mouthY.coerceIn(0.58f, 0.88f),
                                             aspectRatio = (cropW / cropH).coerceIn(0.60f, 1.15f),
                                             contourNorm = contourNorm,
-                                            visualSignature = visSig
+                                            visualSignature = visSig,
+                                            smileScore = donorSmile,
+                                            mouthWidthRatio = donorMouthW,
+                                            mouthOpenRatio = donorMouthOpen,
+                                            browHeightRatio = donorBrowY
                                         )
                                     )
                                 )
@@ -244,6 +273,13 @@ object NativeFaceSwapEngine {
                                 val contourPts = f.getContour(FaceContour.FACE)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
                                 val lbPts = f.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
                                 val rbPts = f.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val ulTopPts = f.getContour(FaceContour.UPPER_LIP_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val llBotPts = f.getContour(FaceContour.LOWER_LIP_BOTTOM)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val ulBotPts = f.getContour(FaceContour.UPPER_LIP_BOTTOM)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val llTopPts = f.getContour(FaceContour.LOWER_LIP_TOP)?.points?.map { Point2D(it.x, it.y) } ?: emptyList()
+                                val innerMouthPts = if (ulBotPts.isNotEmpty() && llTopPts.isNotEmpty()) {
+                                    ulBotPts + llTopPts.reversed()
+                                } else emptyList()
                                 val roll = if (viewerLe != null && viewerRe != null) {
                                     Math.toDegrees(
                                         atan2(
@@ -271,7 +307,10 @@ object NativeFaceSwapEngine {
                                     rollDeg = roll.coerceIn(-45f, 45f),
                                     faceContour = contourPts,
                                     leftBrowTop = lbPts,
-                                    rightBrowTop = rbPts
+                                    rightBrowTop = rbPts,
+                                    upperLipContour = ulTopPts,
+                                    lowerLipContour = llBotPts,
+                                    innerMouthContour = innerMouthPts
                                 )
                             }
                             if (cont.isActive) cont.resume(mapped)
@@ -372,31 +411,30 @@ object NativeFaceSwapEngine {
     fun checkDuplicateAngle(
         existing: List<Pair<FaceAngleVariant, SourceFaceMetrics?>>,
         candidate: SourceFaceMetrics,
-        strictAngleDedup: Boolean = true
+        strictAngleDedup: Boolean = false
     ): Boolean {
         val candidateBucket = classifyFaceAngleBucket(candidate.yawDeg, candidate.pitchDeg)
         for ((angle, metrics) in existing) {
             val yaw = metrics?.yawDeg ?: angle.yawDeg
             val pitch = metrics?.pitchDeg ?: angle.pitchDeg
+            val existingSmile = metrics?.smileScore ?: angle.smileScore
             val existingBucket = classifyFaceAngleBucket(yaw, pitch)
             val yawDiff = abs(yaw - candidate.yawDeg)
             val pitchDiff = abs(pitch - candidate.pitchDeg)
+            val smileDiff = abs(existingSmile - candidate.smileScore)
 
-            // Reject identical / nearly identical visual image regardless of angle
+            // Reject identical / nearly identical visual image regardless of angle bucket
             val sig = metrics?.visualSignature ?: emptyList()
             if (sig.isNotEmpty() && candidate.visualSignature.isNotEmpty() &&
-                cosineSimilarity(sig, candidate.visualSignature) >= 0.94f
+                cosineSimilarity(sig, candidate.visualSignature) >= 0.965f &&
+                yawDiff < 4.5f && pitchDiff < 4.5f && smileDiff < 0.14f
             ) {
                 return true
             }
 
             if (strictAngleDedup) {
-                // Strict pose deduplication: block same angle zone or angles within 9.5 deg yaw & 10 deg pitch
                 if (yawDiff < 9.5f && pitchDiff < 10.0f) return true
                 if (existingBucket == candidateBucket && yawDiff < 15.0f && pitchDiff < 14.0f) return true
-            } else if (yawDiff < 6.5f && pitchDiff < 6.5f) {
-                if (sig.isEmpty() || candidate.visualSignature.isEmpty()) return true
-                if (cosineSimilarity(sig, candidate.visualSignature) >= 0.945f) return true
             }
         }
         return false
@@ -407,7 +445,8 @@ object NativeFaceSwapEngine {
         angleMetrics: Map<String, SourceFaceMetrics>,
         targetYawDeg: Float,
         targetPitchDeg: Float,
-        targetRollDeg: Float
+        targetRollDeg: Float,
+        targetSmileScore: Float = 0.5f
     ): FaceAngleMatchResult {
         if (profile.angles.isEmpty()) {
             return FaceAngleMatchResult(
@@ -429,17 +468,19 @@ object NativeFaceSwapEngine {
         var bestRollD = 0f
 
         for (angle in profile.angles) {
-            val m = angleMetrics[angle.id]
+            val m = angleMetrics[angle.id] ?: angle.savedMetrics
             val srcYaw = m?.yawDeg ?: angle.yawDeg
             val srcPitch = m?.pitchDeg ?: angle.pitchDeg
             val srcRoll = m?.rollDeg ?: angle.rollDeg
+            val srcSmile = m?.smileScore ?: angle.smileScore
+            val smilePenalty = abs(targetSmileScore - srcSmile) * 5.0f
 
             // Direct orientation
             run {
                 val yD = abs(targetYawDeg - srcYaw)
                 val pD = abs(targetPitchDeg - srcPitch)
                 val rD = abs(targetRollDeg - srcRoll)
-                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f
+                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f + smilePenalty
                 if (penalty < bestPenalty) {
                     bestPenalty = penalty
                     bestVariant = angle
@@ -455,7 +496,7 @@ object NativeFaceSwapEngine {
                 val yD = abs(targetYawDeg - (-srcYaw))
                 val pD = abs(targetPitchDeg - srcPitch)
                 val rD = abs(targetRollDeg - (-srcRoll))
-                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f + 5.5f
+                val penalty = yD * 1.45f + pD * 1.15f + min(22f, rD) * 0.22f + smilePenalty + 5.5f
                 if (penalty < bestPenalty) {
                     bestPenalty = penalty
                     bestVariant = angle
@@ -651,6 +692,73 @@ object NativeFaceSwapEngine {
         )
         maskBmp.recycle()
         canvas.restoreToCount(layerSave)
+        return out
+    }
+
+    fun createTargetFaceThumbnail(
+        targetBitmap: Bitmap,
+        face: DetectedFaceData,
+        sizePx: Int = 96
+    ): Bitmap {
+        val bw = targetBitmap.width
+        val bh = targetBitmap.height
+        val fw = max(24f, face.boxRight - face.boxLeft)
+        val fh = max(24f, face.boxBottom - face.boxTop)
+        val padX = fw * 0.22f
+        val padTop = fh * 0.28f
+        val padBot = fh * 0.14f
+        val cx = (face.boxLeft + face.boxRight) * 0.5f
+        val cy = (face.boxTop + face.boxBottom) * 0.5f - (padTop - padBot) * 0.35f
+        val halfSide = max(fw + padX * 2f, fh + padTop + padBot) * 0.5f
+
+        val sL = (cx - halfSide).toInt().coerceIn(0, max(0, bw - 2))
+        val sT = (cy - halfSide).toInt().coerceIn(0, max(0, bh - 2))
+        val sR = (cx + halfSide).toInt().coerceIn(sL + 2, bw)
+        val sB = (cy + halfSide).toInt().coerceIn(sT + 2, bh)
+
+        val out = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawBitmap(
+            targetBitmap,
+            Rect(sL, sT, sR, sB),
+            RectF(0f, 0f, sizePx.toFloat(), sizePx.toFloat()),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
+        return out
+    }
+
+    fun extractFaceCropForProfile(
+        targetBitmap: Bitmap,
+        face: DetectedFaceData,
+        maxSidePx: Int = 640
+    ): Bitmap {
+        val bw = targetBitmap.width
+        val bh = targetBitmap.height
+        val fw = max(32f, face.boxRight - face.boxLeft)
+        val fh = max(32f, face.boxBottom - face.boxTop)
+        val padX = fw * 0.50f
+        val padTop = fh * 0.55f
+        val padBot = fh * 0.40f
+
+        val sL = (face.boxLeft - padX).toInt().coerceIn(0, max(0, bw - 8))
+        val sT = (face.boxTop - padTop).toInt().coerceIn(0, max(0, bh - 8))
+        val sR = (face.boxRight + padX).toInt().coerceIn(sL + 8, bw)
+        val sB = (face.boxBottom + padBot).toInt().coerceIn(sT + 8, bh)
+
+        val cropW = sR - sL
+        val cropH = sB - sT
+        val scale = (maxSidePx.toFloat() / max(cropW, cropH)).coerceAtMost(1f)
+        val outW = max(32, (cropW * scale).toInt())
+        val outH = max(32, (cropH * scale).toInt())
+
+        val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawBitmap(
+            targetBitmap,
+            Rect(sL, sT, sR, sB),
+            RectF(0f, 0f, outW.toFloat(), outH.toFloat()),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
         return out
     }
 
@@ -1011,7 +1119,8 @@ object NativeFaceSwapEngine {
         protectionMask: Bitmap? = null,
         segmentedLayers: SegmentedTargetLayers? = null,
         angleBitmaps: Map<String, Bitmap> = emptyMap(),
-        angleMetrics: Map<String, SourceFaceMetrics> = emptyMap()
+        angleMetrics: Map<String, SourceFaceMetrics> = emptyMap(),
+        perFaceAdjustments: Map<String, FaceAdjustments> = emptyMap()
     ): Bitmap {
         val w = targetBitmap.width
         val h = targetBitmap.height
@@ -1072,6 +1181,7 @@ object NativeFaceSwapEngine {
         val swapLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         swapLayer.setHasAlpha(true)
         val swapCanvas = Canvas(swapLayer)
+        var activeSwappedFaceCount = 0
 
         for (face in faces) {
             if (!adjustments.showFaceLayer) break
@@ -1081,12 +1191,25 @@ object NativeFaceSwapEngine {
             val rawSrcBitmap = (if (resolvedAngleId != null) angleBitmaps[resolvedAngleId] else null)
                 ?: profileBitmaps[profId]
                 ?: continue
+            activeSwappedFaceCount++
             val rawMetrics = (if (resolvedAngleId != null) angleMetrics[resolvedAngleId] else null)
                 ?: profileMetrics[profId]
                 ?: defaultSourceMetrics()
             val flippedTemp = if (face.angleMatchFlipped) flipBitmapHorizontal(rawSrcBitmap) else null
             val srcBitmap = flippedTemp ?: rawSrcBitmap
             val metrics = if (face.angleMatchFlipped) mirrorMetricsHorizontal(rawMetrics) else rawMetrics
+
+            val faceAdj = perFaceAdjustments[face.id]?.copy(
+                showBackgroundLayer = adjustments.showBackgroundLayer,
+                showFaceLayer = adjustments.showFaceLayer,
+                showForeLayers = adjustments.showForeLayers,
+                preserveTargetLayers = adjustments.preserveTargetLayers,
+                showGeometricMesh = adjustments.showGeometricMesh,
+                hiddenLayerIds = adjustments.hiddenLayerIds,
+                autoMaskHair = adjustments.autoMaskHair,
+                autoMaskAccessories = adjustments.autoMaskAccessories,
+                autoMaskObjects = adjustments.autoMaskObjects
+            ) ?: adjustments
 
             val lm = face.landmarks
             val (viewerLeft, viewerRight) = if (lm.leftEye.x <= lm.rightEye.x) {
@@ -1098,20 +1221,20 @@ object NativeFaceSwapEngine {
             val eyeDy = viewerRight.y - viewerLeft.y
             val eyeDist = hypot(eyeDx.toDouble(), eyeDy.toDouble()).toFloat()
             val targetAngleDeg = Math.toDegrees(atan2(eyeDy.toDouble(), eyeDx.toDouble())).toFloat()
-            val finalAngle = (targetAngleDeg - metrics.rollDeg) + adjustments.rotation
+            val finalAngle = (targetAngleDeg - metrics.rollDeg) + faceAdj.rotation
 
-            val targetEyeMidX = (viewerLeft.x + viewerRight.x) * 0.5f + adjustments.offsetX
-            val targetEyeMidY = (viewerLeft.y + viewerRight.y) * 0.5f + adjustments.offsetY
+            val targetEyeMidX = (viewerLeft.x + viewerRight.x) * 0.5f + faceAdj.offsetX
+            val targetEyeMidY = (viewerLeft.y + viewerRight.y) * 0.5f + faceAdj.offsetY
 
             // Strict isotropic scaling locked to donor aspectRatio -> keeps donor's true proportions (never stretched!)
             val safeAspect = metrics.aspectRatio.coerceIn(0.60f, 1.15f)
-            val faceW = max(32f, eyeDist / max(0.22f, metrics.eyeDistRatio)) * adjustments.scale
+            val faceW = max(32f, eyeDist / max(0.22f, metrics.eyeDistRatio)) * faceAdj.scale
             val faceH = max(36f, faceW / safeAspect)
 
             val patchW = max(20, faceW.toInt())
             val patchH = max(24, faceH.toInt())
 
-            val manualPatch = adjustments.manualSkinPatch
+            val manualPatch = faceAdj.manualSkinPatch
             val autoCheekRgb = sampleFacialSkinOnlyRgb(
                 targetBitmap,
                 lm.nose.x.toInt(),
@@ -1119,7 +1242,7 @@ object NativeFaceSwapEngine {
                 max(6, (faceW * 0.24f).toInt()),
                 max(6, (faceH * 0.16f).toInt())
             )
-            val targetSkinRgb = if (adjustments.skinToneMatch) {
+            val targetSkinRgb = if (faceAdj.skinToneMatch) {
                 if (manualPatch != null) {
                     Triple(manualPatch.sampledRed, manualPatch.sampledGreen, manualPatch.sampledBlue)
                 } else {
@@ -1127,27 +1250,27 @@ object NativeFaceSwapEngine {
                 }
             } else null
 
-            val featherRatio = (adjustments.featherRadius / 50f).coerceIn(0.10f, 0.85f)
-            val patch = createFeatheredInnerFacePatch(
+            val featherRatio = (faceAdj.featherRadius / 50f).coerceIn(0.10f, 0.85f)
+            var patch = createFeatheredInnerFacePatch(
                 srcBitmap = srcBitmap,
                 metrics = metrics,
                 patchW = patchW,
                 patchH = patchH,
                 featherRatio = featherRatio,
-                smartBlend = adjustments.smartBlend,
+                smartBlend = faceAdj.smartBlend,
                 targetSkinRgb = targetSkinRgb,
                 applyDefaultRadialMask = false,
                 isManualSkinReference = manualPatch != null,
-                brightness = adjustments.brightness,
-                contrast = adjustments.contrast,
-                saturation = adjustments.saturation,
-                warmth = adjustments.warmth
+                brightness = faceAdj.brightness,
+                contrast = faceAdj.contrast,
+                saturation = faceAdj.saturation,
+                warmth = faceAdj.warmth
             )
             flippedTemp?.recycle()
 
-            if (adjustments.virtualLight.enabled && adjustments.virtualLight.intensity > 0.015f) {
-                val localLight = adjustments.virtualLight.copy(
-                    directionDeg = adjustments.virtualLight.directionDeg - finalAngle
+            if (faceAdj.virtualLight.enabled && faceAdj.virtualLight.intensity > 0.015f) {
+                val localLight = faceAdj.virtualLight.copy(
+                    directionDeg = faceAdj.virtualLight.directionDeg - finalAngle
                 )
                 VirtualLightingStudioShader.applyFaceMeshRelighting(
                     patch = patch,
@@ -1163,6 +1286,24 @@ object NativeFaceSwapEngine {
                 postTranslate(targetEyeMidX, targetEyeMidY)
             }
 
+            if (faceAdj.expressionAlignEnabled && faceAdj.expressionAlignStrength > 1) {
+                val warpedPatch = FaceExpressionMeshWarper.warpPatchForExpression(
+                    patch = patch,
+                    donorMetrics = metrics,
+                    targetFace = face,
+                    targetEyeMidX = targetEyeMidX,
+                    targetEyeMidY = targetEyeMidY,
+                    targetEyeDist = eyeDist,
+                    swapMatrix = swapMatrix,
+                    mode = faceAdj.expressionMode,
+                    strength = (faceAdj.expressionAlignStrength / 100f).coerceIn(0f, 1f)
+                )
+                if (warpedPatch !== patch) {
+                    patch.recycle()
+                    patch = warpedPatch
+                }
+            }
+
             // Determine clean brow-top cut line in donor patch [0..1] so target's forehead/maang tikka/hair sits ON TOP
             val targetBrowAvgY = (face.leftBrowTop + face.rightBrowTop)
                 .takeIf { it.isNotEmpty() }
@@ -1174,31 +1315,51 @@ object NativeFaceSwapEngine {
                 (metrics.eyeMidYRatio - metrics.eyeDistRatio * 0.34f).coerceIn(0.11f, 0.27f)
             }
 
-            val autoOcclusions = (adjustments.autoMaskHair || adjustments.autoMaskAccessories || adjustments.autoMaskObjects) && !hasDiscreteLayers
-            val useFallbackLayers = adjustments.preserveTargetLayers && !hasDiscreteLayers
+            // Sample target forehead skin cleanly above brow ridge (for Forehead-to-Brow Tone Harmonizer)
+            val targetRad = Math.toRadians(targetAngleDeg.toDouble())
+            val upNx = sin(targetRad).toFloat()
+            val upNy = -cos(targetRad).toFloat()
+            val foreSampleDist = eyeDist * 0.44f
+            val targetForeheadRgb = sampleFacialSkinOnlyRgb(
+                bmp = targetBitmap,
+                cx = (targetEyeMidX + upNx * foreSampleDist).toInt(),
+                cy = (targetEyeMidY + upNy * foreSampleDist).toInt(),
+                radiusX = max(5, (eyeDist * 0.28f).toInt()),
+                radiusY = max(4, (eyeDist * 0.14f).toInt())
+            )
+
+            val autoOcclusions = (faceAdj.autoMaskHair || faceAdj.autoMaskAccessories || faceAdj.autoMaskObjects) && !hasDiscreteLayers
+            val useFallbackLayers = faceAdj.preserveTargetLayers && !hasDiscreteLayers
             val foregroundPunch = FaceSwapEdgeBlendShader.applyContrastAwareEdgeBlend(
                 patch = patch,
                 targetSource = targetBitmap,
                 swapMatrix = swapMatrix,
                 featherRatio = featherRatio,
-                smartBlend = adjustments.smartBlend,
-                blendIntensity = (adjustments.smartBlendIntensity / 100f).coerceIn(0f, 1f),
+                smartBlend = faceAdj.smartBlend,
+                blendIntensity = (faceAdj.smartBlendIntensity / 100f).coerceIn(0f, 1f),
                 preserveHighContrastOcclusions = autoOcclusions,
                 donorContourNorm = metrics.contourNorm,
                 foreheadCutYRatio = browBasedCut,
                 preserveTargetLayers = useFallbackLayers,
-                returnForegroundPunch = useFallbackLayers || autoOcclusions
+                returnForegroundPunch = useFallbackLayers || autoOcclusions,
+                foreheadCutShift = faceAdj.foreheadCutShift,
+                foreheadSoftness = faceAdj.foreheadSoftness,
+                foreheadToneHarmonize = if (faceAdj.skinToneMatch) {
+                    (faceAdj.foreheadToneHarmonize / 100f).coerceIn(0f, 1f)
+                } else 0f,
+                targetForeheadSkinRgb = targetForeheadRgb,
+                skinTextureMatch = (faceAdj.skinTextureMatch / 100f).coerceIn(0f, 1f)
             )
 
-            val alpha = ((adjustments.swapStrength / 100f) * (face.strength / 100f) * 255f)
+            val alpha = ((faceAdj.swapStrength / 100f) * (face.strength / 100f) * 255f)
                 .toInt()
                 .coerceIn(0, 255)
             val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
                 this.alpha = alpha
             }
 
-            // Fallback cavity fill only when discrete ML Kit backgroundLayer isn't active
-            if (useFallbackLayers && alpha > 75) {
+            // Paint smooth cheek-toned cavity bed ONLY for faces that actually have an active donor swap
+            if (faceAdj.preserveTargetLayers && alpha > 75) {
                 val (sr, sg, sb) = targetSkinRgb ?: autoCheekRgb
                 val cavityColor = Color.argb(
                     (alpha * 0.92f).toInt().coerceIn(0, 255),
@@ -1213,9 +1374,9 @@ object NativeFaceSwapEngine {
                     sb.toInt().coerceIn(0, 255)
                 )
                 val cavX = targetEyeMidX * 0.56f + lm.lips.x * 0.44f
-                val cavY = targetEyeMidY * 0.58f + lm.lips.y * 0.42f
-                val cavRx = max(10f, eyeDist * 0.78f * adjustments.scale)
-                val cavRy = max(12f, abs(lm.lips.y - targetEyeMidY) * 0.86f * adjustments.scale)
+                val cavY = targetEyeMidY * 0.44f + lm.lips.y * 0.56f
+                val cavRx = max(10f, eyeDist * 0.78f * faceAdj.scale)
+                val cavRy = max(12f, abs(lm.lips.y - targetEyeMidY) * 0.68f * faceAdj.scale)
                 val cavShader = RadialGradient(
                     0f,
                     0f,
@@ -1240,7 +1401,7 @@ object NativeFaceSwapEngine {
             patch.recycle()
 
             if (foregroundPunch != null && !foregroundPunch.isRecycled) {
-                if (adjustments.showForeLayers) {
+                if (faceAdj.showForeLayers) {
                     val punchPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
                         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
                         this.alpha = alpha
@@ -1248,6 +1409,15 @@ object NativeFaceSwapEngine {
                     swapCanvas.drawBitmap(foregroundPunch, swapMatrix, punchPaint)
                 }
                 foregroundPunch.recycle()
+            }
+
+            if (faceAdj.keepTargetMouthInterior && alpha > 20) {
+                FaceExpressionMeshWarper.applyKeepMouthInteriorMask(
+                    swapCanvas = swapCanvas,
+                    face = face,
+                    targetEyeDist = eyeDist,
+                    alpha = alpha
+                )
             }
         }
 
@@ -1272,11 +1442,11 @@ object NativeFaceSwapEngine {
         if (splitX != null) {
             canvas.clipRect(splitX, 0f, w.toFloat(), h.toFloat())
         }
-        if (adjustments.showFaceLayer) {
+        if (adjustments.showFaceLayer && activeSwappedFaceCount > 0) {
             canvas.drawBitmap(swapLayer, 0f, 0f, null)
         }
         // LAYERS 3..N (Dynamic Object Cutouts: z-ordered forehead/hair/jewelry/hands/objects placed ON TOP non-destructively)
-        if (hasDiscreteLayers && adjustments.showForeLayers) {
+        if (hasDiscreteLayers && adjustments.showForeLayers && activeSwappedFaceCount > 0) {
             val dynamicLayers = segmentedLayers!!.objectLayers
             if (dynamicLayers.isNotEmpty()) {
                 for (objLayer in dynamicLayers) {

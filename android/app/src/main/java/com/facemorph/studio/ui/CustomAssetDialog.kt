@@ -355,7 +355,7 @@ fun CustomAssetDialog(
         )
     ) {
         Surface(
-            color = Color(0xFF020617),
+            color = StudioColors.Background,
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
@@ -369,14 +369,14 @@ fun CustomAssetDialog(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF020617))
+                        .background(StudioColors.Background)
                 ) {
                     // Step 2 Top Bar
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(52.dp)
-                            .background(Color(0xFF0A0F1E))
+                            .height(54.dp)
+                            .background(StudioColors.SurfaceContainerLow)
                             .padding(horizontal = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -384,7 +384,7 @@ fun CustomAssetDialog(
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(12.dp))
                                 .clickable { studioStep = 1 }
                                 .padding(horizontal = 8.dp, vertical = 8.dp)
                         ) {
@@ -392,12 +392,12 @@ fun CustomAssetDialog(
                             Spacer(Modifier.width(6.dp))
                             Text("Back to Edit", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
-                        Text("Save Cutout Item", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Save Cutout Item", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         IconButton(onClick = onDismiss) {
-                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF94A3B8))
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = StudioColors.OnSurfaceMuted)
                         }
                     }
-                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                    HorizontalDivider(color = StudioColors.OutlineSubtle, thickness = 1.dp)
 
                     Column(
                         modifier = Modifier
@@ -411,9 +411,9 @@ fun CustomAssetDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(185.dp)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color(0xFF0F172A))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(16.dp)),
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(StudioColors.SurfaceContainer)
+                                .border(1.dp, StudioColors.OutlineSubtle, RoundedCornerShape(18.dp)),
                             contentAlignment = Alignment.Center
                         ) {
                             CheckerboardBackdrop(modifier = Modifier.fillMaxSize())
@@ -593,9 +593,9 @@ fun CustomAssetDialog(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(Color(0xFF0F172A))
-                                    .border(1.dp, Color(0xFF059669), RoundedCornerShape(14.dp))
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(StudioColors.SurfaceContainer)
+                                    .border(1.dp, Color(0xFF059669), RoundedCornerShape(16.dp))
                                     .padding(12.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
@@ -614,12 +614,12 @@ fun CustomAssetDialog(
                                         val tLabel = if (targetCat == WardrobeCategory.ACCESSORY) "Other / Accessory" else targetCat.label
                                         Text(
                                             tLabel,
-                                            color = if (sel) Color(0xFF020617) else Color(0xFFCBD5E1),
+                                            color = if (sel) StudioColors.Background else Color(0xFFCBD5E1),
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
                                             modifier = Modifier
-                                                .clip(RoundedCornerShape(7.dp))
-                                                .background(if (sel) Color(0xFF34D399) else Color(0xFF1E293B))
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (sel) Color(0xFF34D399) else StudioColors.SurfaceContainerHigh)
                                                 .clickable { newSubCategoryTargetCat = targetCat }
                                                 .padding(horizontal = 9.dp, vertical = 5.dp)
                                         )
@@ -734,7 +734,7 @@ fun CustomAssetDialog(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF0A0F1E))
+                            .background(StudioColors.SurfaceContainerLow)
                             .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
                         Button(
@@ -824,14 +824,14 @@ fun CustomAssetDialog(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF020617))
+                        .background(StudioColors.Background)
                 ) {
-                    // Clean Slim Single-Row Top Header (50dp)
+                    // Clean Slim Single-Row Top Header (54dp)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp)
-                            .background(Color(0xFF0A0F1E))
+                            .height(54.dp)
+                            .background(StudioColors.SurfaceContainerLow)
                             .padding(horizontal = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -911,11 +911,11 @@ fun CustomAssetDialog(
                                 enabled = workingBitmap != null,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF059669),
-                                    disabledContainerColor = Color(0xFF1E293B)
+                                    disabledContainerColor = StudioColors.SurfaceContainerHigh
                                 ),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 11.dp, vertical = 0.dp),
-                                modifier = Modifier.height(32.dp)
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                modifier = Modifier.height(34.dp)
                             ) {
                                 Text("Next", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.width(3.dp))
@@ -923,7 +923,7 @@ fun CustomAssetDialog(
                             }
                         }
                     }
-                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                    HorizontalDivider(color = StudioColors.OutlineSubtle, thickness = 1.dp)
 
                     // Huge Unobstructed Cutout Canvas (~85-88% of Screen!)
                     Box(
@@ -931,12 +931,12 @@ fun CustomAssetDialog(
                             .fillMaxWidth()
                             .weight(1f)
                             .clipToBounds()
-                            .background(Color(0xFF060A13)),
+                            .background(StudioColors.Background),
                         contentAlignment = Alignment.Center
                     ) {
                         when (backdropMode) {
                             CanvasBackdropMode.CHECKER -> CheckerboardBackdrop(modifier = Modifier.fillMaxSize())
-                            CanvasBackdropMode.DARK -> Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0B1120)))
+                            CanvasBackdropMode.DARK -> Box(modifier = Modifier.fillMaxSize().background(StudioColors.SurfaceContainerLow))
                             CanvasBackdropMode.LIGHT -> Box(modifier = Modifier.fillMaxSize().background(Color(0xFFF1F5F9)))
                         }
 
@@ -1355,17 +1355,17 @@ fun CustomAssetDialog(
                                 modifier = Modifier
                                     .align(Alignment.TopStart)
                                     .padding(10.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xCC0F172A))
-                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(StudioColors.SurfaceContainer.copy(alpha = 0.88f))
+                                    .border(1.dp, StudioColors.OutlineSubtle, RoundedCornerShape(12.dp))
                                     .clickable {
                                         settingsOpenForTool = if (settingsOpenForTool == activeTool) null else activeTool
                                     }
-                                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
-                                Icon(Icons.Default.Tune, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(13.dp))
+                                Icon(Icons.Default.Tune, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(14.dp))
                                 Text(
                                     text = when (activeTool) {
                                         CutoutToolId.RESTORE, CutoutToolId.ERASE -> "${activeTool.defaultLabel} · ${brushSizePx.toInt()}px"
@@ -1374,7 +1374,7 @@ fun CustomAssetDialog(
                                         CutoutToolId.PAN -> "Zoom ${(zoom * 100).toInt()}%"
                                     },
                                     color = Color(0xFFE2E8F0),
-                                    fontSize = 10.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -1391,14 +1391,14 @@ fun CustomAssetDialog(
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(Color(0xD90F172A))
-                                            .border(1.dp, Color(0xFF0891B2), RoundedCornerShape(10.dp))
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(StudioColors.SurfaceContainer.copy(alpha = 0.90f))
+                                            .border(1.dp, Color(0xFF0891B2), RoundedCornerShape(12.dp))
                                             .clickable {
                                                 zoom = 1f
                                                 pan = Offset.Zero
                                             }
-                                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
                                     ) {
                                         Icon(Icons.Default.ZoomOutMap, contentDescription = null, tint = Color(0xFF22D3EE), modifier = Modifier.size(14.dp))
                                         Spacer(Modifier.width(4.dp))
@@ -1410,16 +1410,16 @@ fun CustomAssetDialog(
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(Color(0xD90F172A))
-                                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(StudioColors.SurfaceContainer.copy(alpha = 0.90f))
+                                            .border(1.dp, StudioColors.OutlineSubtle, RoundedCornerShape(12.dp))
                                             .clickable {
                                                 val all = CanvasBackdropMode.entries
                                                 backdropMode = all[(backdropMode.ordinal + 1) % all.size]
                                             }
-                                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
                                     ) {
-                                        Icon(Icons.Default.Layers, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
+                                        Icon(Icons.Default.Layers, contentDescription = null, tint = StudioColors.OnSurfaceMuted, modifier = Modifier.size(14.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text(backdropMode.label, color = Color.White, fontSize = 11.sp)
                                     }
@@ -1428,14 +1428,14 @@ fun CustomAssetDialog(
                                 if (toolbarPrefs.showCompareButton) {
                                     Box(
                                         modifier = Modifier
-                                            .size(34.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(if (isComparingOriginal) Color(0xFF4F46E5) else Color(0xD90F172A))
-                                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(if (isComparingOriginal) StudioColors.Primary else StudioColors.SurfaceContainer.copy(alpha = 0.90f))
+                                            .border(1.dp, StudioColors.OutlineSubtle, RoundedCornerShape(12.dp))
                                             .clickable(interactionSource = compareInteraction, indication = null, onClick = {}),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Icon(Icons.Default.Visibility, contentDescription = "Hold to Compare Original", tint = Color.White, modifier = Modifier.size(17.dp))
+                                        Icon(Icons.Default.Visibility, contentDescription = "Hold to Compare Original", tint = Color.White, modifier = Modifier.size(18.dp))
                                     }
                                 }
                             }
@@ -1446,9 +1446,9 @@ fun CustomAssetDialog(
                                 verticalArrangement = Arrangement.spacedBy(14.dp),
                                 modifier = Modifier
                                     .padding(24.dp)
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(Color(0xE60B1120))
-                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(20.dp))
+                                    .clip(RoundedCornerShape(22.dp))
+                                    .background(StudioColors.SurfaceContainerLow.copy(alpha = 0.94f))
+                                    .border(1.dp, StudioColors.OutlineSubtle, RoundedCornerShape(22.dp))
                                     .padding(22.dp)
                             ) {
                                 Box(
@@ -1603,9 +1603,9 @@ fun CustomAssetDialog(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(Color(0xF50B1120))
-                                    .border(1.2.dp, Color(0xFF4F46E5), RoundedCornerShape(16.dp))
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(StudioColors.SurfaceContainerLow.copy(alpha = 0.96f))
+                                    .border(1.dp, StudioColors.Primary.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
                                     .clickable(
                                         interactionSource = remember { MutableInteractionSource() },
                                         indication = null,
@@ -1844,13 +1844,13 @@ fun CustomAssetDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF0A0F1E))
+                            .background(StudioColors.SurfaceContainerLow)
                     ) {
-                        HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                        HorizontalDivider(color = StudioColors.OutlineSubtle, thickness = 1.dp)
                         val barHeight = when {
-                            toolbarPrefs.largeButtons -> 64.dp
-                            toolbarPrefs.compactLabels -> 54.dp
-                            else -> 46.dp
+                            toolbarPrefs.largeButtons -> 68.dp
+                            toolbarPrefs.compactLabels -> 58.dp
+                            else -> 50.dp
                         }
                         Row(
                             modifier = Modifier
@@ -1868,18 +1868,18 @@ fun CustomAssetDialog(
                                     selected && tool == CutoutToolId.RESTORE -> Color(0xFF34D399)
                                     selected && tool == CutoutToolId.ERASE -> Color(0xFFF43F5E)
                                     selected -> Color(0xFF818CF8)
-                                    else -> Color(0xFF94A3B8)
+                                    else -> StudioColors.OnSurfaceMuted
                                 }
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
                                         .height(barHeight - 8.dp)
-                                        .clip(RoundedCornerShape(12.dp))
+                                        .clip(RoundedCornerShape(14.dp))
                                         .background(
                                             when {
-                                                isQuickDragging -> Color(0xFF0F172A)
+                                                isQuickDragging -> StudioColors.SurfaceContainer
                                                 settingsOpen -> Color(0xFF312E81)
-                                                selected -> Color(0xFF1E293B)
+                                                selected -> StudioColors.SurfaceContainerHigh
                                                 else -> Color.Transparent
                                             }
                                         )
@@ -1890,7 +1890,7 @@ fun CustomAssetDialog(
                                                 settingsOpen -> Color(0xFF818CF8)
                                                 else -> Color.Transparent
                                             },
-                                            shape = RoundedCornerShape(12.dp)
+                                            shape = RoundedCornerShape(14.dp)
                                         )
                                         .pointerInput(tool) {
                                             val canQuickDrag = tool == CutoutToolId.RESTORE ||
@@ -2037,9 +2037,9 @@ private fun CustomizeCutoutToolsSheet(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 420.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xF70B1120))
-            .border(1.2.dp, Color(0xFF10B981), RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(20.dp))
+            .background(StudioColors.SurfaceContainerLow.copy(alpha = 0.96f))
+            .border(1.dp, Color(0xFF10B981).copy(alpha = 0.65f), RoundedCornerShape(20.dp))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -2064,8 +2064,8 @@ private fun CustomizeCutoutToolsSheet(
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(Color(0xFF1E293B))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(StudioColors.SurfaceContainerHigh)
                         .clickable { onResetDefaults() }
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
@@ -2075,7 +2075,7 @@ private fun CustomizeCutoutToolsSheet(
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(7.dp))
+                        .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFF059669))
                         .clickable { onClose() }
                         .padding(horizontal = 9.dp, vertical = 4.dp)
@@ -2089,15 +2089,15 @@ private fun CustomizeCutoutToolsSheet(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text("Tool Button Order & Visibility", color = Color(0xFF94A3B8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text("Tool Button Order & Visibility", color = StudioColors.OnSurfaceMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             prefs.orderedTools.forEachIndexed { idx, tool ->
                 val isVisible = tool in prefs.enabledTools
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF111827))
-                        .border(1.dp, if (isVisible) Color(0xFF334155) else Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(StudioColors.SurfaceContainer)
+                        .border(1.dp, if (isVisible) StudioColors.OutlineSubtle else StudioColors.SurfaceContainerHigh, RoundedCornerShape(12.dp))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -2288,11 +2288,11 @@ private fun CompactToolSlider(
             colors = SliderDefaults.colors(
                 thumbColor = accent,
                 activeTrackColor = accent,
-                inactiveTrackColor = Color(0xFF334155)
+                inactiveTrackColor = StudioColors.OutlineSubtle
             ),
             modifier = Modifier
                 .weight(1f)
-                .height(28.dp)
+                .height(30.dp)
         )
     }
 }
@@ -2307,11 +2307,11 @@ private fun ActionPill(
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(bg)
-            .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+            .border(1.dp, StudioColors.OutlineSubtle, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .padding(horizontal = 11.dp, vertical = 8.dp)
     ) {
         if (icon != null) {
             Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))

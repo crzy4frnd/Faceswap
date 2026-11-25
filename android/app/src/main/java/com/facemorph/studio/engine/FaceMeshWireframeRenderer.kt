@@ -441,10 +441,17 @@ object FaceMeshWireframeRenderer {
     ) {
         val torso = bodyFitState.pose
         val torsoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(175, 56, 189, 248)
+            color = if (bodyFitState.skeletonPoseActive) Color.argb(205, 34, 211, 238) else Color.argb(175, 56, 189, 248)
             style = Paint.Style.STROKE
-            strokeWidth = 2.2f
+            strokeWidth = 2.4f
+            strokeCap = Paint.Cap.ROUND
         }
+        val jointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(225, 16, 185, 129)
+            style = Paint.Style.FILL
+        }
+
+        // Torso box (shoulders -> chest -> waist)
         canvas.drawLine(torso.shoulderLeftX, torso.shoulderLeftY, torso.shoulderRightX, torso.shoulderRightY, torsoPaint)
         canvas.drawLine(torso.leftChestX, torso.chestY, torso.rightChestX, torso.chestY, torsoPaint)
         canvas.drawLine(torso.leftWaistX, torso.waistY, torso.rightWaistX, torso.waistY, torsoPaint)
@@ -452,6 +459,68 @@ object FaceMeshWireframeRenderer {
         canvas.drawLine(torso.shoulderRightX, torso.shoulderRightY, torso.rightChestX, torso.chestY, torsoPaint)
         canvas.drawLine(torso.leftChestX, torso.chestY, torso.leftWaistX, torso.waistY, torsoPaint)
         canvas.drawLine(torso.rightChestX, torso.chestY, torso.rightWaistX, torso.waistY, torsoPaint)
+
+        // Central spine & collar pivot
+        val shMidX = (torso.shoulderLeftX + torso.shoulderRightX) * 0.5f
+        val shMidY = (torso.shoulderLeftY + torso.shoulderRightY) * 0.5f
+        val chMidX = (torso.leftChestX + torso.rightChestX) * 0.5f
+        val waMidX = (torso.leftWaistX + torso.rightWaistX) * 0.5f
+        canvas.drawLine(shMidX, shMidY, chMidX, torso.chestY, torsoPaint)
+        canvas.drawLine(chMidX, torso.chestY, waMidX, torso.waistY, torsoPaint)
         canvas.drawCircle(bodyFitState.collarPivotX, bodyFitState.collarPivotY, 5.5f, torsoPaint)
+
+        // Skeletal shoulder joints, hip belt & arms when ML Kit Pose is locked
+        if (bodyFitState.skeletonPoseActive) {
+            canvas.drawCircle(torso.shoulderLeftX, torso.shoulderLeftY, 4.5f, jointPaint)
+            canvas.drawCircle(torso.shoulderRightX, torso.shoulderRightY, 4.5f, jointPaint)
+
+            if (bodyFitState.hipTracked) {
+                val hipPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.argb(200, 16, 185, 129)
+                    style = Paint.Style.STROKE
+                    strokeWidth = 2.4f
+                    strokeCap = Paint.Cap.ROUND
+                }
+                canvas.drawLine(torso.hipLeftX, torso.hipY, torso.hipRightX, torso.hipY, hipPaint)
+                canvas.drawLine(torso.leftWaistX, torso.waistY, torso.hipLeftX, torso.hipY, hipPaint)
+                canvas.drawLine(torso.rightWaistX, torso.waistY, torso.hipRightX, torso.hipY, hipPaint)
+                canvas.drawCircle(torso.hipLeftX, torso.hipY, 4.5f, jointPaint)
+                canvas.drawCircle(torso.hipRightX, torso.hipY, 4.5f, jointPaint)
+            }
+
+            val armPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(185, 129, 140, 248)
+                style = Paint.Style.STROKE
+                strokeWidth = 2.2f
+                strokeCap = Paint.Cap.ROUND
+            }
+            // Left arm chain
+            if (hypot((torso.leftElbowX - torso.shoulderLeftX).toDouble(), (torso.leftElbowY - torso.shoulderLeftY).toDouble()) > 12.0) {
+                canvas.drawLine(torso.shoulderLeftX, torso.shoulderLeftY, torso.leftElbowX, torso.leftElbowY, armPaint)
+                canvas.drawCircle(torso.leftElbowX, torso.leftElbowY, 4f, jointPaint)
+                if (hypot((torso.leftWristX - torso.leftElbowX).toDouble(), (torso.leftWristY - torso.leftElbowY).toDouble()) > 10.0) {
+                    canvas.drawLine(torso.leftElbowX, torso.leftElbowY, torso.leftWristX, torso.leftWristY, armPaint)
+                }
+            }
+            // Right arm chain
+            if (hypot((torso.rightElbowX - torso.shoulderRightX).toDouble(), (torso.rightElbowY - torso.shoulderRightY).toDouble()) > 12.0) {
+                canvas.drawLine(torso.shoulderRightX, torso.shoulderRightY, torso.rightElbowX, torso.rightElbowY, armPaint)
+                canvas.drawCircle(torso.rightElbowX, torso.rightElbowY, 4f, jointPaint)
+                if (hypot((torso.rightWristX - torso.rightElbowX).toDouble(), (torso.rightWristY - torso.rightElbowY).toDouble()) > 10.0) {
+                    canvas.drawLine(torso.rightElbowX, torso.rightElbowY, torso.rightWristX, torso.rightWristY, armPaint)
+                }
+            }
+        }
+
+        // Primary wrist watch/bracelet lock reticle
+        if (bodyFitState.wristTracked) {
+            val wristPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(230, 251, 191, 36)
+                style = Paint.Style.STROKE
+                strokeWidth = 2.4f
+            }
+            canvas.drawCircle(torso.primaryWristX, torso.primaryWristY, 8f, wristPaint)
+            canvas.drawLine(torso.primaryWristX - 11f, torso.primaryWristY, torso.primaryWristX + 11f, torso.primaryWristY, wristPaint)
+        }
     }
 }

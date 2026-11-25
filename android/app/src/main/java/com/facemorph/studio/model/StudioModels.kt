@@ -62,7 +62,11 @@ data class SourceFaceMetrics(
     val mouthYRatio: Float = 0.75f,
     val aspectRatio: Float = 0.86f,
     val contourNorm: List<Point2D> = emptyList(),
-    val visualSignature: List<Float> = emptyList()
+    val visualSignature: List<Float> = emptyList(),
+    val smileScore: Float = 0.5f,
+    val mouthWidthRatio: Float = 0.38f,
+    val mouthOpenRatio: Float = 0.04f,
+    val browHeightRatio: Float = 0.25f
 )
 
 data class DetectedFaceData(
@@ -86,7 +90,10 @@ data class DetectedFaceData(
     val isLandmarksEdited: Boolean = false,
     val faceContour: List<Point2D> = emptyList(),
     val leftBrowTop: List<Point2D> = emptyList(),
-    val rightBrowTop: List<Point2D> = emptyList()
+    val rightBrowTop: List<Point2D> = emptyList(),
+    val upperLipContour: List<Point2D> = emptyList(),
+    val lowerLipContour: List<Point2D> = emptyList(),
+    val innerMouthContour: List<Point2D> = emptyList()
 )
 
 data class FaceAngleVariant(
@@ -97,7 +104,9 @@ data class FaceAngleVariant(
     val yawDeg: Float = 0f,
     val pitchDeg: Float = 0f,
     val rollDeg: Float = 0f,
-    val createdAt: Long = System.currentTimeMillis()
+    val smileScore: Float = 0.5f,
+    val createdAt: Long = System.currentTimeMillis(),
+    val savedMetrics: SourceFaceMetrics? = null
 )
 
 data class FaceAngleMatchResult(
@@ -182,6 +191,11 @@ data class SegmentedTargetLayers(
     val objectLayers: List<CutoutObjectLayer> = emptyList()
 )
 
+enum class ExpressionAlignMode(val label: String) {
+    LOCK_EDGE("Lock Edge"),
+    CONTOUR_CAGE("Contour")
+}
+
 data class FaceAdjustments(
     val swapStrength: Int = 100,
     val skinToneMatch: Boolean = true,
@@ -206,7 +220,15 @@ data class FaceAdjustments(
     val offsetX: Float = 0f,
     val offsetY: Float = 0f,
     val manualSkinPatch: SkinSamplePatch? = null,
-    val virtualLight: VirtualLightConfig = VirtualLightConfig()
+    val virtualLight: VirtualLightConfig = VirtualLightConfig(),
+    val foreheadCutShift: Float = 0f,
+    val foreheadSoftness: Float = 0.50f,
+    val foreheadToneHarmonize: Int = 65,
+    val skinTextureMatch: Int = 45,
+    val expressionAlignEnabled: Boolean = false,
+    val expressionMode: ExpressionAlignMode = ExpressionAlignMode.LOCK_EDGE,
+    val expressionAlignStrength: Int = 72,
+    val keepTargetMouthInterior: Boolean = false
 )
 
 enum class CutoutToolId(val defaultLabel: String, val hasSettings: Boolean) {
@@ -349,7 +371,8 @@ data class FittedWardrobeLayer(
     val rotation: Float = 0f,
     val offsetX: Float = 0f,
     val offsetY: Float = 0f,
-    val shadowDepth: Int = 45
+    val shadowDepth: Int = 45,
+    val lengthScale: Float = 1.0f
 )
 
 data class ClothPhysicsConfig(
@@ -384,7 +407,31 @@ data class BodyScanResult(
     val leftWaist: Point2D,
     val rightWaist: Point2D,
     val leftWrist: Point2D,
-    val rightWrist: Point2D
+    val rightWrist: Point2D,
+    val leftHip: Point2D = leftWaist,
+    val rightHip: Point2D = rightWaist,
+    val leftElbow: Point2D = Point2D(leftShoulder.x, (leftShoulder.y + leftWaist.y) * 0.5f),
+    val rightElbow: Point2D = Point2D(rightShoulder.x, (rightShoulder.y + rightWaist.y) * 0.5f),
+    val eyeMid: Point2D = Point2D(nose.x, nose.y - 22f),
+    val faceWidthPx: Float = kotlin.math.max(40f, kotlin.math.abs(rightShoulder.x - leftShoulder.x) * 0.42f),
+    val chestHalfWidthPx: Float = kotlin.math.max(30f, kotlin.math.abs(rightShoulder.x - leftShoulder.x) * 0.44f),
+    val headRollDeg: Float = 0f,
+    val torsoTiltDeg: Float = 0f,
+    val hasSkeletonPose: Boolean = false,
+    val hasHips: Boolean = false,
+    val hasWrists: Boolean = false
+)
+
+data class LiveBodyMeasurementSummary(
+    val shoulderCm: Int = 44,
+    val chestCm: Int = 96,
+    val waistCm: Int = 79,
+    val torsoCm: Int = 52,
+    val estimatedSize: String = "M",
+    val poseConfidence: Float = 0f,
+    val hasSkeletonPose: Boolean = false,
+    val hasHips: Boolean = false,
+    val hasWrists: Boolean = false
 )
 
 data class LiveCameraConfig(
@@ -399,8 +446,10 @@ data class LiveCameraConfig(
     val faceSwapEnabled: Boolean = false,
     val swapStrength: Int = 90,
     val showLandmarkMesh: Boolean = false,
+    val showBodyMeasurements: Boolean = true,
     val useFrontCamera: Boolean = true,
     val clothWidthScale: Float = 1.0f,
+    val clothLengthScale: Float = 1.0f,
     val clothCollarOffset: Float = 0f,
     val clothFitHug: Float = 0.45f,
     val faceMotionTrail: Boolean = true,

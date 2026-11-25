@@ -129,16 +129,122 @@ object NativeStorageHelper {
         }
     }
 
+    private fun writeBitmapAtomic(outFile: File, bitmap: Bitmap, format: Bitmap.CompressFormat, quality: Int): Boolean {
+        return try {
+            outFile.parentFile?.mkdirs()
+            val tmpFile = File(outFile.parentFile, "${outFile.name}.tmp")
+            FileOutputStream(tmpFile).use { fos ->
+                bitmap.compress(format, quality, fos)
+                fos.flush()
+                runCatching { fos.fd.sync() }
+            }
+            if (outFile.exists()) outFile.delete()
+            if (!tmpFile.renameTo(outFile)) {
+                tmpFile.copyTo(outFile, overwrite = true)
+                tmpFile.delete()
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun saveBitmapToInternalFile(context: Context, bitmap: Bitmap, fileName: String): String? {
         return try {
             val dir = File(context.filesDir, "custom_assets").apply { mkdirs() }
             val outFile = File(dir, fileName)
-            FileOutputStream(outFile).use { fos ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-            }
-            outFile.absolutePath
+            if (writeBitmapAtomic(outFile, bitmap, Bitmap.CompressFormat.PNG, 100)) {
+                outFile.absolutePath
+            } else null
         } catch (_: Exception) {
             null
+        }
+    }
+
+    fun saveProfileAngleBitmap(
+        context: Context,
+        profileId: String,
+        bitmap: Bitmap,
+        fileName: String,
+        preferJpegWhenOpaque: Boolean = true
+    ): String? {
+        return try {
+            val safeId = profileId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val dir = File(context.filesDir, "face_profiles/$safeId").apply { mkdirs() }
+            val useJpeg = preferJpegWhenOpaque && !bitmap.hasAlpha()
+            val outFile = File(dir, fileName)
+            val ok = writeBitmapAtomic(
+                outFile = outFile,
+                bitmap = bitmap,
+                format = if (useJpeg) Bitmap.CompressFormat.JPEG else Bitmap.CompressFormat.PNG,
+                quality = if (useJpeg) 94 else 100
+            )
+            if (ok) outFile.absolutePath else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun saveProfileDbJson(context: Context, json: String): Boolean {
+        return try {
+            val dir = File(context.filesDir, "face_profiles").apply { mkdirs() }
+            val dbFile = File(dir, "profiles_db_v2.json")
+            val tmpFile = File(dir, "profiles_db_v2.json.tmp")
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(json.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                runCatching { fos.fd.sync() }
+            }
+            if (dbFile.exists()) dbFile.delete()
+            if (!tmpFile.renameTo(dbFile)) {
+                tmpFile.copyTo(dbFile, overwrite = true)
+                tmpFile.delete()
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun loadProfileDbJson(context: Context): String? {
+        return try {
+            val dbFile = File(File(context.filesDir, "face_profiles"), "profiles_db_v2.json")
+            if (dbFile.exists() && dbFile.length() > 2L) {
+                dbFile.readText(Charsets.UTF_8)
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun deleteProfileFolder(context: Context, profileId: String) {
+        try {
+            val safeId = profileId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val dir = File(context.filesDir, "face_profiles/$safeId")
+            if (dir.exists()) {
+                dir.deleteRecursively()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun getProfileStorageStats(context: Context): Pair<Int, Float> {
+        return try {
+            val root = File(context.filesDir, "face_profiles")
+            if (!root.exists()) return 0 to 0f
+            var filesCount = 0
+            var bytes = 0L
+            root.walkTopDown().forEach { f ->
+                if (f.isFile && !f.name.endsWith(".tmp") && f.name != "profiles_db_v2.json") {
+                    bytes += f.length()
+                    if (!f.name.endsWith("_cutout.png")) {
+                        filesCount++
+                    }
+                }
+            }
+            filesCount to (bytes / (1024f * 1024f))
+        } catch (_: Exception) {
+            0 to 0f
         }
     }
 

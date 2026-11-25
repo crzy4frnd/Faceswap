@@ -6,6 +6,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -204,7 +205,26 @@ data class RawBodyPoseKeypoints(
     val leftWaistX: Float,
     val rightWaistX: Float,
     val waistY: Float,
-    val poseConfidence: Float
+    val poseConfidence: Float,
+    val isSkeletonDetected: Boolean = false,
+    val hipTracked: Boolean = false,
+    val hipLeftX: Float = leftWaistX,
+    val hipRightX: Float = rightWaistX,
+    val hipY: Float = waistY,
+    val wristTracked: Boolean = false,
+    val primaryWristX: Float = leftWaistX,
+    val primaryWristY: Float = waistY,
+    val primaryElbowX: Float = shoulderLeftX,
+    val primaryElbowY: Float = chestY,
+    val wristScore: Float = 0f,
+    val leftElbowX: Float = shoulderLeftX,
+    val leftElbowY: Float = chestY,
+    val rightElbowX: Float = shoulderRightX,
+    val rightElbowY: Float = chestY,
+    val leftWristX: Float = leftWaistX,
+    val leftWristY: Float = waistY,
+    val rightWristX: Float = rightWaistX,
+    val rightWristY: Float = waistY
 )
 
 data class StabilizedBodyFitState(
@@ -222,7 +242,16 @@ data class StabilizedBodyFitState(
     val effectiveTiltDeg: Float,
     val poseBlendAlpha: Float,
     val shoulderSeamV: Float,
-    val shoulderSlopeDiffY: Float
+    val shoulderSlopeDiffY: Float,
+    val shoulderCm: Int = 44,
+    val chestCm: Int = 96,
+    val waistCm: Int = 79,
+    val torsoCm: Int = 52,
+    val estimatedSize: String = "M",
+    val skeletonPoseActive: Boolean = false,
+    val hipTracked: Boolean = false,
+    val wristTracked: Boolean = false,
+    val torsoLengthRatio: Float = 1.0f
 )
 
 /**
@@ -292,7 +321,28 @@ class BodyPoseMatrixSmoother {
     private val pWaLX = OneEuroFilter1D(minCutoff = 1.05f, beta = 0.010f)
     private val pWaRX = OneEuroFilter1D(minCutoff = 1.05f, beta = 0.010f)
     private val pWaY = OneEuroFilter1D(minCutoff = 1.05f, beta = 0.010f)
+    private val pHipLX = OneEuroFilter1D(minCutoff = 1.05f, beta = 0.011f)
+    private val pHipRX = OneEuroFilter1D(minCutoff = 1.05f, beta = 0.011f)
+    private val pHipY = OneEuroFilter1D(minCutoff = 1.05f, beta = 0.011f)
+    private val pPrWrX = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.018f)
+    private val pPrWrY = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.018f)
+    private val pPrElbX = OneEuroFilter1D(minCutoff = 1.25f, beta = 0.015f)
+    private val pPrElbY = OneEuroFilter1D(minCutoff = 1.25f, beta = 0.015f)
+    private val pElbLX = OneEuroFilter1D(minCutoff = 1.25f, beta = 0.015f)
+    private val pElbLY = OneEuroFilter1D(minCutoff = 1.25f, beta = 0.015f)
+    private val pElbRX = OneEuroFilter1D(minCutoff = 1.25f, beta = 0.015f)
+    private val pElbRY = OneEuroFilter1D(minCutoff = 1.25f, beta = 0.015f)
+    private val pWrLX = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.018f)
+    private val pWrLY = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.018f)
+    private val pWrRX = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.018f)
+    private val pWrRY = OneEuroFilter1D(minCutoff = 1.45f, beta = 0.018f)
     private val pConfFilter = OneEuroFilter1D(minCutoff = 0.90f, beta = 0.005f)
+
+    // Physical body measurement One-Euro filters (in centimeters)
+    private val mShoulderCm = OneEuroFilter1D(minCutoff = 0.65f, beta = 0.003f)
+    private val mChestCm = OneEuroFilter1D(minCutoff = 0.65f, beta = 0.003f)
+    private val mWaistCm = OneEuroFilter1D(minCutoff = 0.65f, beta = 0.003f)
+    private val mTorsoCm = OneEuroFilter1D(minCutoff = 0.65f, beta = 0.003f)
 
     // Interpolated Transformation Matrix (Face <-> Body Pose) filters
     private val mTx = OneEuroFilter1D(minCutoff = 1.30f, beta = 0.016f)
@@ -315,7 +365,10 @@ class BodyPoseMatrixSmoother {
         ).forEach { it.reset() }
         listOf(
             fCx, fCy, fChinY, fW, fH, fEyeX, fEyeY, fEyeDist, fRoll, fYaw, fPitch,
-            pShLX, pShLY, pShRX, pShRY, pChLX, pChRX, pChY, pWaLX, pWaRX, pWaY, pConfFilter,
+            pShLX, pShLY, pShRX, pShRY, pChLX, pChRX, pChY, pWaLX, pWaRX, pWaY,
+            pHipLX, pHipRX, pHipY, pPrWrX, pPrWrY, pPrElbX, pPrElbY,
+            pElbLX, pElbLY, pElbRX, pElbRY, pWrLX, pWrLY, pWrRX, pWrRY, pConfFilter,
+            mShoulderCm, mChestCm, mWaistCm, mTorsoCm,
             mTx, mTy, mSx, mSy, mRot, mSkew
         ).forEach { it.reset() }
     }
@@ -553,20 +606,39 @@ class BodyPoseMatrixSmoother {
             leftWaistX = pWaLX.filter(rawPose.leftWaistX, dtSec),
             rightWaistX = pWaRX.filter(rawPose.rightWaistX, dtSec),
             waistY = pWaY.filter(rawPose.waistY, dtSec),
-            poseConfidence = pConfFilter.filter(rawPose.poseConfidence, dtSec).coerceIn(0f, 1f)
+            poseConfidence = pConfFilter.filter(rawPose.poseConfidence, dtSec).coerceIn(0f, 1f),
+            isSkeletonDetected = rawPose.isSkeletonDetected,
+            hipTracked = rawPose.hipTracked,
+            hipLeftX = pHipLX.filter(rawPose.hipLeftX, dtSec),
+            hipRightX = pHipRX.filter(rawPose.hipRightX, dtSec),
+            hipY = pHipY.filter(rawPose.hipY, dtSec),
+            wristTracked = rawPose.wristTracked,
+            primaryWristX = pPrWrX.filter(rawPose.primaryWristX, dtSec),
+            primaryWristY = pPrWrY.filter(rawPose.primaryWristY, dtSec),
+            primaryElbowX = pPrElbX.filter(rawPose.primaryElbowX, dtSec),
+            primaryElbowY = pPrElbY.filter(rawPose.primaryElbowY, dtSec),
+            wristScore = rawPose.wristScore,
+            leftElbowX = pElbLX.filter(rawPose.leftElbowX, dtSec),
+            leftElbowY = pElbLY.filter(rawPose.leftElbowY, dtSec),
+            rightElbowX = pElbRX.filter(rawPose.rightElbowX, dtSec),
+            rightElbowY = pElbRY.filter(rawPose.rightElbowY, dtSec),
+            leftWristX = pWrLX.filter(rawPose.leftWristX, dtSec),
+            leftWristY = pWrLY.filter(rawPose.leftWristY, dtSec),
+            rightWristX = pWrRX.filter(rawPose.rightWristX, dtSec),
+            rightWristY = pWrRY.filter(rawPose.rightWristY, dtSec)
         )
 
         val faceW = max(24f, stabilizedFace.width)
         val faceH = max(28f, stabilizedFace.height)
         val aspect = garmentAspectRatio.coerceIn(0.25f, 3.0f)
         val seamV = if (isWaistGarment) 0.04f else garmentShoulderSeamV.coerceIn(0.03f, 0.28f)
-        val sleeveScaleInv = if (isWaistGarment) 1.0f else (1f / garmentShoulderWidthRatio.coerceIn(0.62f, 0.98f))
+        val sleeveScaleInv = if (isWaistGarment) 1.0f else (1f / garmentShoulderWidthRatio.coerceIn(0.78f, 0.98f))
 
         // 2. Build Matrix A: Face-Tracking-Driven Garment Transformation Matrix (M_face)
         // Pin garment shoulder seam (seamV) onto anatomical collarbone level (~chinY + 0.16*faceH)
-        val faceShoulderSpan = faceW * 2.95f
+        val faceShoulderSpan = faceW * 2.75f
         val faceSpanW = if (isWaistGarment) {
-            faceW * 2.65f
+            faceW * 2.45f
         } else {
             faceShoulderSpan * sleeveScaleInv
         }
@@ -588,30 +660,51 @@ class BodyPoseMatrixSmoother {
         val shMidY = (smoothPose.shoulderLeftY + smoothPose.shoulderRightY) * 0.5f
         val shDx = smoothPose.shoulderRightX - smoothPose.shoulderLeftX
         val shDy = smoothPose.shoulderRightY - smoothPose.shoulderLeftY
-        val shoulderSpan = max(faceW * 2.85f, hypot(shDx.toDouble(), shDy.toDouble()).toFloat())
-        val rawPoseTiltDeg = Math.toDegrees(atan2(shDy.toDouble(), max(1f, shDx).toDouble())).toFloat().coerceIn(-22f, 22f)
+        val rawHypotSpan = hypot(shDx.toDouble(), shDy.toDouble()).toFloat()
+        // Allow true skeletal shoulder span down to narrow builds / sideways yaw turns (1.62x faceW) when pose is locked!
+        val minShoulderSpan = if (rawPose.isSkeletonDetected) faceW * 1.62f else faceW * 2.35f
+        val shoulderSpan = max(minShoulderSpan, rawHypotSpan).coerceAtMost(faceW * 4.5f)
+        val rawPoseTiltDeg = Math.toDegrees(atan2(shDy.toDouble(), max(1f, shDx).toDouble())).toFloat().coerceIn(-24f, 24f)
 
         val chestMidX = (smoothPose.leftChestX + smoothPose.rightChestX) * 0.5f
-        val chestSpan = max(shoulderSpan * 0.94f, smoothPose.rightChestX - smoothPose.leftChestX)
+        val chestSpan = max(shoulderSpan * 0.76f, smoothPose.rightChestX - smoothPose.leftChestX)
         val waistMidX = (smoothPose.leftWaistX + smoothPose.rightWaistX) * 0.5f
-        val waistSpan = max(chestSpan * 0.88f, smoothPose.rightWaistX - smoothPose.leftWaistX)
+        val waistSpan = max(shoulderSpan * 0.66f, smoothPose.rightWaistX - smoothPose.leftWaistX)
 
-        // Size garment width so outer sleeves wrap cleanly around outer arms/chest silhouette
         val poseSpanW = if (isWaistGarment) {
-            waistSpan * 1.24f
+            waistSpan * 1.20f
         } else {
-            max(shoulderSpan * sleeveScaleInv * 1.06f, chestSpan * 1.05f)
+            max(shoulderSpan * sleeveScaleInv * 0.96f, chestSpan * 1.02f)
         }
-        val poseHeight = poseSpanW * aspect
+        val basePoseH = poseSpanW * aspect
+        val measuredTorsoPx = max(faceH * 1.15f, (if (rawPose.hipTracked) smoothPose.hipY else smoothPose.waistY) - shMidY)
+        val expectedTorsoPx = max(24f, basePoseH * (0.76f - seamV))
+        val torsoStretchRatio = if (rawPose.hipTracked) {
+            (measuredTorsoPx / expectedTorsoPx).coerceIn(0.78f, 1.32f)
+        } else {
+            1.0f
+        }
+        val poseHeight = if (isWaistGarment) basePoseH else basePoseH * (0.35f + 0.65f * torsoStretchRatio)
+
         val poseTopY = if (isWaistGarment) {
-            smoothPose.waistY - poseHeight * 0.10f
+            (if (rawPose.hipTracked) smoothPose.hipY else smoothPose.waistY) - poseHeight * 0.10f
         } else {
-            // Rest garment shoulder seam directly onto user's shoulder ridge (back collar sits neatly behind neck)
-            shMidY - poseHeight * seamV - faceH * 0.03f
+            // Rest garment shoulder seam directly onto tracked shoulder ridge
+            shMidY - poseHeight * seamV - faceH * 0.025f
         }
-        val poseAnchorX = if (isWaistGarment) waistMidX else (shMidX * 0.62f + stabilizedFace.centerX * 0.38f)
-        val torsoSkew = (((chestMidX - shMidX) / max(30f, poseHeight)) * 0.60f).coerceIn(-0.14f, 0.14f)
-        val poseRotDeg = (rawPoseTiltDeg * 0.65f + stabilizedFace.rollDeg * 0.35f).coerceIn(-24f, 24f)
+        val poseAnchorX = if (isWaistGarment) {
+            waistMidX
+        } else if (rawPose.isSkeletonDetected) {
+            shMidX * 0.78f + stabilizedFace.centerX * 0.22f
+        } else {
+            shMidX * 0.62f + stabilizedFace.centerX * 0.38f
+        }
+        val torsoSkew = (((chestMidX - shMidX) / max(30f, poseHeight)) * 0.65f).coerceIn(-0.16f, 0.16f)
+        val poseRotDeg = if (rawPose.isSkeletonDetected) {
+            (rawPoseTiltDeg * 0.78f + stabilizedFace.rollDeg * 0.22f).coerceIn(-24f, 24f)
+        } else {
+            (rawPoseTiltDeg * 0.65f + stabilizedFace.rollDeg * 0.35f).coerceIn(-24f, 24f)
+        }
 
         val poseMatrix = Matrix().apply {
             setScale(poseSpanW, poseHeight)
@@ -623,7 +716,11 @@ class BodyPoseMatrixSmoother {
         // 4. Interpolate Transformation Matrices (M_face <-> M_pose) weighted by live pose confidence
         val faceDec = decomposeAffine(faceMatrix)
         val poseDec = decomposeAffine(poseMatrix)
-        val blendAlpha = (0.18f + 0.82f * smoothPose.poseConfidence).coerceIn(0f, 1f)
+        val blendAlpha = if (rawPose.isSkeletonDetected) {
+            (0.35f + 0.65f * smoothPose.poseConfidence).coerceIn(0f, 1f)
+        } else {
+            (0.18f + 0.82f * smoothPose.poseConfidence).coerceIn(0f, 1f)
+        }
 
         val interpTx = faceDec.tx + (poseDec.tx - faceDec.tx) * blendAlpha
         val interpTy = faceDec.ty + (poseDec.ty - faceDec.ty) * blendAlpha
@@ -647,11 +744,34 @@ class BodyPoseMatrixSmoother {
             postTranslate(finalTx, finalTy)
         }
 
-        // Keep sleeves full enough to cover outer upper arms while contouring chest & waist
-        val chestRatio = (chestSpan * 1.06f / max(1f, finalSx)).coerceIn(0.95f, 1.15f)
-        val waistRatio = (waistSpan * 1.04f / max(1f, finalSx)).coerceIn(0.90f, 1.12f)
-        val chestShiftRatio = ((chestMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.10f, 0.10f)
-        val waistShiftRatio = ((waistMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.14f, 0.14f)
+        // Contour chest & waist ratios to real tracked body proportions
+        val chestRatio = (chestSpan * 1.04f / max(1f, finalSx)).coerceIn(0.76f, 1.32f)
+        val waistRatio = (waistSpan * 1.03f / max(1f, finalSx)).coerceIn(0.70f, 1.28f)
+        val chestShiftRatio = ((chestMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.14f, 0.14f)
+        val waistShiftRatio = ((waistMidX - finalTx) / max(1f, finalSx)).coerceIn(-0.18f, 0.18f)
+
+        // 6. Compute Real-Time Anatomical Body Measurements (cm + apparel size)
+        val pxPerCmFace = faceW / 15.0f
+        val pxPerCmEye = max(8f, stabilizedFace.eyeDist) / 6.3f
+        val pxPerCm = (pxPerCmFace * 0.55f + pxPerCmEye * 0.45f).coerceAtLeast(1.2f)
+
+        val rawShoulderCm = (shoulderSpan / pxPerCm).coerceIn(32f, 60f)
+        val rawChestCm = ((chestSpan / pxPerCm) * 2.26f).coerceIn(72f, 136f)
+        val rawWaistCm = ((waistSpan / pxPerCm) * 2.16f).coerceIn(58f, 126f)
+        val rawTorsoCm = (measuredTorsoPx / pxPerCm).coerceIn(38f, 70f)
+
+        val smoothShoulderCm = mShoulderCm.filter(rawShoulderCm, dtSec).roundToInt()
+        val smoothChestCm = mChestCm.filter(rawChestCm, dtSec).roundToInt()
+        val smoothWaistCm = mWaistCm.filter(rawWaistCm, dtSec).roundToInt()
+        val smoothTorsoCm = mTorsoCm.filter(rawTorsoCm, dtSec).roundToInt()
+        val estSize = when {
+            smoothChestCm < 86 -> "XS"
+            smoothChestCm < 94 -> "S"
+            smoothChestCm < 102 -> "M"
+            smoothChestCm < 110 -> "L"
+            smoothChestCm < 118 -> "XL"
+            else -> "XXL"
+        }
 
         return StabilizedBodyFitState(
             face = stabilizedFace,
@@ -668,7 +788,16 @@ class BodyPoseMatrixSmoother {
             effectiveTiltDeg = finalRot,
             poseBlendAlpha = blendAlpha,
             shoulderSeamV = seamV,
-            shoulderSlopeDiffY = (smoothPose.shoulderRightY - smoothPose.shoulderLeftY).coerceIn(-faceH * 0.25f, faceH * 0.25f)
+            shoulderSlopeDiffY = (smoothPose.shoulderRightY - smoothPose.shoulderLeftY).coerceIn(-faceH * 0.25f, faceH * 0.25f),
+            shoulderCm = smoothShoulderCm,
+            chestCm = smoothChestCm,
+            waistCm = smoothWaistCm,
+            torsoCm = smoothTorsoCm,
+            estimatedSize = estSize,
+            skeletonPoseActive = rawPose.isSkeletonDetected,
+            hipTracked = rawPose.hipTracked,
+            wristTracked = rawPose.wristTracked,
+            torsoLengthRatio = torsoStretchRatio
         )
     }
 

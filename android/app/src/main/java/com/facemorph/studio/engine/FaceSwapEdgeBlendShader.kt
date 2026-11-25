@@ -41,7 +41,12 @@ object FaceSwapEdgeBlendShader {
         donorContourNorm: List<Point2D> = emptyList(),
         foreheadCutYRatio: Float = 0.23f,
         preserveTargetLayers: Boolean = true,
-        returnForegroundPunch: Boolean = false
+        returnForegroundPunch: Boolean = false,
+        foreheadCutShift: Float = 0f,
+        foreheadSoftness: Float = 0.50f,
+        foreheadToneHarmonize: Float = 0.65f,
+        targetForeheadSkinRgb: Triple<Float, Float, Float>? = null,
+        skinTextureMatch: Float = 0.45f
     ): Bitmap? {
         val w = patch.width
         val h = patch.height
@@ -144,6 +149,157 @@ object FaceSwapEdgeBlendShader {
             }
         }
 
+        // Forehead-to-Brow Seamless Tone Harmonizer:
+        // Match donor upper brow-ridge & temple skin tone/luminance into target forehead lighting
+        // while keeping dark eyebrows, irises, and mid-face contrast untouched.
+        val harmStrength = foreheadToneHarmonize.coerceIn(0f, 1f)
+        val effectiveForeCut = (foreheadCutYRatio - foreheadCutShift.coerceIn(-0.14f, 0.14f) * 0.45f).coerceIn(0.06f, 0.36f)
+        if (harmStrength > 0.02f) {
+            var browRSum = 0f
+            var browGSum = 0f
+            var browBSum = 0f
+            var browCnt = 0
+            val by0 = (effectiveForeCut * h).toInt().coerceIn(0, h - 1)
+            val by1 = ((effectiveForeCut + 0.14f) * h).toInt().coerceIn(by0, h - 1)
+            val bx0 = (w * 0.26f).toInt().coerceIn(0, w - 1)
+            val bx1 = (w * 0.74f).toInt().coerceIn(bx0, w - 1)
+            for (y in by0..by1 step max(1, (by1 - by0) / 6)) {
+                val row = y * w
+                for (x in bx0..bx1 step max(1, (bx1 - bx0) / 8)) {
+                    val pc = patchPixels[row + x]
+                    if (Color.alpha(pc) > 180) {
+                        val pr = Color.red(pc)
+                        val pg = Color.green(pc)
+                        val pb = Color.blue(pc)
+                        val pl = patchLum[row + x]
+                        if (pr >= pg && (pr - pb) >= 2 && pl > 58f) {
+                            browRSum += pr
+                            browGSum += pg
+                            browBSum += pb
+                            browCnt++
+                        }
+                    }
+                }
+            }
+            val refForeR = targetForeheadSkinRgb?.first ?: targetSkinR
+            val refForeG = targetForeheadSkinRgb?.second ?: targetSkinG
+            val refForeB = targetForeheadSkinRgb?.third ?: targetSkinB
+            if (browCnt >= 4) {
+                val dBrowR = browRSum / browCnt
+                val dBrowG = browGSum / browCnt
+                val dBrowB = browBSum / browCnt
+                val deltaR = (refForeR - dBrowR).coerceIn(-48f, 48f)
+                val deltaG = (refForeG - dBrowG).coerceIn(-48f, 48f)
+                val deltaB = (refForeB - dBrowB).coerceIn(-48f, 48f)
+                val endY = ((effectiveForeCut + 0.16f + foreheadSoftness.coerceIn(0.15f, 1f) * 0.08f) * h)
+                    .toInt().coerceIn(2, h)
+                val bandSpan = max(8f, endY - effectiveForeCut * h * 0.4f)
+                for (y in 0 until endY) {
+                    val row = y * w
+                    val yt = ((endY - y) / bandSpan).coerceIn(0f, 1f)
+                    val wVert = (yt * yt * (3f - 2f * yt)) * harmStrength * 0.85f
+                    if (wVert <= 0.01f) continue
+                    for (x in 0 until w) {
+                        val idx = row + x
+                        val pc = patchPixels[idx]
+                        val pA = Color.alpha(pc)
+                        if (pA < 10) continue
+                        val pr = Color.red(pc)
+                        val pg = Color.green(pc)
+                        val pb = Color.blue(pc)
+                        val pl = patchLum[idx]
+                        // Protect dark eyebrow hairs & lashes from washing out
+                        val skinWeight = ((pl - 44f) / 48f).coerceIn(0f, 1f)
+                        if (skinWeight <= 0.02f) continue
+                        val k = wVert * skinWeight
+                        val nr = (pr + deltaR * k).toInt().coerceIn(0, 255)
+                        val ng = (pg + deltaG * k).toInt().coerceIn(0, 255)
+                        val nb = (pb + deltaB * k).toInt().coerceIn(0, 255)
+                        patchPixels[idx] = Color.argb(pA, nr, ng, nb)
+                        patchLum[idx] = 0.299f * nr + 0.587f * ng + 0.114f * nb
+                    }
+                }
+            }
+        }
+
+        // Real Skin Pore & Grain Matching (anti-plastic realism):
+        // Measure target camera skin micro-grain on clean skin pixels and match it across donor skin midtones
+        // while keeping eyes, brows, lashes, and lip contours crisp.
+        val texStrength = skinTextureMatch.coerceIn(0f, 1f)
+        if (texStrength > 0.02f) {
+            var grainSum = 0f
+            var grainCount = 0
+            for (y in cy0..cy1 step max(1, (cy1 - cy0) / 10)) {
+                val row = y * w
+                val yUp = if (y > 0) (y - 1) * w else row
+                val yDn = if (y < h - 1) (y + 1) * w else row
+                for (x in cx0..cx1 step max(1, (cx1 - cx0) / 10)) {
+                    val idx = row + x
+                    val tc = targetPixels[idx]
+                    if (Color.alpha(tc) > 200) {
+                        val tr = Color.red(tc)
+                        val tg = Color.green(tc)
+                        val tb = Color.blue(tc)
+                        if (tr >= tg && (tr - tb) > 4 && targetLum[idx] in 50f..238f) {
+                            val xL = if (x > 0) x - 1 else x
+                            val xR = if (x < w - 1) x + 1 else x
+                            val localBlur = (targetLum[row + xL] + targetLum[row + xR] + targetLum[yUp + x] + targetLum[yDn + x]) * 0.25f
+                            val hf = abs(targetLum[idx] - localBlur)
+                            if (hf < 9.5f) {
+                                grainSum += hf
+                                grainCount++
+                            }
+                        }
+                    }
+                }
+            }
+            val targetGrainAmp = if (grainCount >= 6) (grainSum / grainCount).coerceIn(0.6f, 6.5f) else 2.2f
+            for (y in 1 until h - 1) {
+                val row = y * w
+                val yUp = (y - 1) * w
+                val yDn = (y + 1) * w
+                for (x in 1 until w - 1) {
+                    val idx = row + x
+                    if (rNormGrid[idx] > 0.94f) continue
+                    val pc = patchPixels[idx]
+                    val pA = Color.alpha(pc)
+                    if (pA < 120) continue
+                    val pl = patchLum[idx]
+                    if (pl !in 52f..236f) continue
+                    val pr = Color.red(pc)
+                    val pg = Color.green(pc)
+                    val pb = Color.blue(pc)
+                    if (pr < pg) continue
+
+                    val pGrad = (abs(patchLum[row + x + 1] - patchLum[row + x - 1]) +
+                        abs(patchLum[yDn + x] - patchLum[yUp + x])) * 0.5f
+                    // Protect sharp eye/brow/lip edges
+                    if (pGrad > 13.5f) continue
+
+                    val smoothMask = ((13.5f - pGrad) / 9f).coerceIn(0f, 1f)
+                    val tc = targetPixels[idx]
+                    val tDetail = if (Color.alpha(tc) > 180 &&
+                        Color.red(tc) >= Color.green(tc) &&
+                        (abs(Color.red(tc) - targetSkinR) + abs(Color.green(tc) - targetSkinG) + abs(Color.blue(tc) - targetSkinB)) < 75f
+                    ) {
+                        val tBlur = (targetLum[row + x - 1] + targetLum[row + x + 1] + targetLum[yUp + x] + targetLum[yDn + x]) * 0.25f
+                        (targetLum[idx] - tBlur).coerceIn(-6.5f, 6.5f)
+                    } else 0f
+
+                    val hash = (((x * 73856093) xor (y * 19349663)) and 0xFF) / 127.5f - 1.0f
+                    val grainDelta = ((hash * targetGrainAmp * 1.15f + tDetail * 0.45f) * texStrength * smoothMask)
+                        .coerceIn(-11f, 11f)
+                    if (abs(grainDelta) > 0.35f) {
+                        val nr = (pr + grainDelta).toInt().coerceIn(0, 255)
+                        val ng = (pg + grainDelta).toInt().coerceIn(0, 255)
+                        val nb = (pb + grainDelta).toInt().coerceIn(0, 255)
+                        patchPixels[idx] = Color.argb(pA, nr, ng, nb)
+                        patchLum[idx] = 0.299f * nr + 0.587f * ng + 0.114f * nb
+                    }
+                }
+            }
+        }
+
         // Layer 3 foreground occlusion mask (0..1 -> higher means reveal original target foreground ON TOP)
         val occlusionMask = if (preserveTargetLayers || preserveHighContrastOcclusions) {
             detectForegroundOcclusionMask(
@@ -156,7 +312,8 @@ object FaceSwapEdgeBlendShader {
                 targetSkinG = targetSkinG,
                 targetSkinB = targetSkinB,
                 targetSkinLum = targetSkinLum,
-                foreheadCutYRatio = foreheadCutYRatio,
+                foreheadCutYRatio = effectiveForeCut,
+                foreheadSoftness = foreheadSoftness,
                 preserveTargetLayers = preserveTargetLayers,
                 preserveHighContrastOcclusions = preserveHighContrastOcclusions
             )
@@ -303,6 +460,7 @@ object FaceSwapEdgeBlendShader {
         targetSkinB: Float,
         targetSkinLum: Float,
         foreheadCutYRatio: Float,
+        foreheadSoftness: Float,
         preserveTargetLayers: Boolean,
         preserveHighContrastOcclusions: Boolean
     ): FloatArray {
@@ -313,11 +471,39 @@ object FaceSwapEdgeBlendShader {
         var qHead = 0
         var qTail = 0
 
-        val foreCut = foreheadCutYRatio.coerceIn(0.10f, 0.34f)
-        val darkHairCutoff = min(76f, targetSkinLum * 0.53f)
-        val brightJewelCutoff = max(188f, targetSkinLum + 24f)
+        val foreCut = foreheadCutYRatio.coerceIn(0.06f, 0.36f)
+        val foreFadeBand = (0.03f + foreheadSoftness.coerceIn(0.15f, 1.0f) * 0.13f)
+        val darkHairCutoff = min(92f, targetSkinLum * 0.64f)
+        val brightJewelCutoff = max(182f, targetSkinLum + 20f)
         val hInv = 1f / max(1, h - 1)
         val wInv = 1f / max(1, w - 1)
+
+        // Sample dominant hair tone from crown above forehead
+        var hSumR = 0L
+        var hSumG = 0L
+        var hSumB = 0L
+        var hCnt = 0
+        val crownMaxY = ((foreCut - 0.03f).coerceAtLeast(0.05f) * h).toInt().coerceIn(2, h - 1)
+        for (y in 0 until crownMaxY) {
+            val row = y * w
+            for (x in 0 until w) {
+                val idx = row + x
+                if (rNormGrid[idx] > 1.03f) continue
+                val tc = targetPixels[idx]
+                if (Color.alpha(tc) < 40) continue
+                val tr = Color.red(tc)
+                val tg = Color.green(tc)
+                val tb = Color.blue(tc)
+                val sDist = abs(tr - targetSkinR) + abs(tg - targetSkinG) + abs(tb - targetSkinB)
+                if (sDist > 38f || targetLum[idx] < targetSkinLum * 0.72f) {
+                    hSumR += tr; hSumG += tg; hSumB += tb; hCnt++
+                }
+            }
+        }
+        val hasCrownHairRef = hCnt >= 10
+        val hairRefR = if (hasCrownHairRef) hSumR.toFloat() / hCnt else 32f
+        val hairRefG = if (hasCrownHairRef) hSumG.toFloat() / hCnt else 28f
+        val hairRefB = if (hasCrownHairRef) hSumB.toFloat() / hCnt else 26f
 
         for (y in 0 until h) {
             val v = y * hInv
@@ -338,13 +524,11 @@ object FaceSwapEdgeBlendShader {
 
                 // 1) Automatic Forehead / Hairline / Maang Tikka top layer above donor eyebrows
                 if (preserveTargetLayers) {
-                    // Gently arch forehead cut slightly higher over temples & lower on midline for parting/tikka
                     val archedCut = foreCut - uAbs * 0.035f
-                    val fadeBand = 0.095f
                     if (v < archedCut) {
-                        val ft = ((archedCut - v) / fadeBand).coerceIn(0f, 1f)
+                        val ft = ((archedCut - v) / foreFadeBand).coerceIn(0f, 1f)
                         val smoothFt = ft * ft * (3f - 2f * ft)
-                        reveal = max(reveal, smoothFt * 0.96f)
+                        reveal = max(reveal, if (ft >= 0.62f) 1f else smoothFt)
                     }
                 }
 
@@ -356,40 +540,68 @@ object FaceSwapEdgeBlendShader {
                     val maxC = max(tR, max(tG, tB))
                     val minC = min(tR, min(tG, tB))
                     val tSat = if (maxC > 0) (maxC - minC).toFloat() / maxC else 0f
+                    val colorDist = abs(tR - targetSkinR) + abs(tG - targetSkinG) + abs(tB - targetSkinB)
 
                     val xL = if (x > 0) x - 1 else x
                     val xR = if (x < w - 1) x + 1 else x
                     val tGrad = (abs(targetLum[row + xR] - targetLum[row + xL]) +
                         abs(targetLum[yDown + x] - targetLum[yUp + x])) * 0.5f
 
-                    // Guard central orbital eye/brow box from false eyelash/eyebrow reveal!
-                    val inOcularCore = v in (foreCut + 0.02f)..(foreCut + 0.27f) && uAbs < 0.72f
+                    // Guard left & right orbital eye sockets/lashes while leaving center glabella open for bindis/tikka!
+                    val inEyeSockets = v in (foreCut + 0.02f)..(foreCut + 0.27f) && (uAbs in 0.17f..0.76f)
+                    val inNoseMouthCore = v in (foreCut + 0.16f)..0.82f && uAbs < 0.44f
 
-                    // 2a) Midline / upper forehead jewelry, pearls, veil, bindis, glasses bridge
-                    val inUpperZone = v < (foreCut + 0.14f) && uAbs < 0.80f
-                    val inMidlineOrnament = v < (foreCut + 0.18f) && uAbs < 0.24f
-                    if ((inUpperZone || inMidlineOrnament || r > 0.78f) &&
-                        tLum > brightJewelCutoff &&
-                        (tGrad > 8f || tSat < 0.22f)
-                    ) {
-                        val sStr = ((tLum - (brightJewelCutoff - 6f)) / 40f).coerceIn(0f, 1f)
-                        reveal = max(reveal, sStr * 0.95f)
+                    // 2a) Forehead jewelry (maang tikka, bindi, matha patti, gold chains, pearls, veil, glasses)
+                    val inUpperZone = v < (foreCut + 0.16f) && uAbs < 0.88f
+                    val inGlabellaOrnament = v < (foreCut + 0.22f) && uAbs < 0.22f
+                    if (!inEyeSockets && (inUpperZone || inGlabellaOrnament || r > 0.76f)) {
+                        val isBrightJewel = tLum > brightJewelCutoff && (tGrad > 6f || tSat < 0.26f || colorDist > 32f)
+                        val isGoldMetal = tR > targetSkinR * 0.78f && (tR - tB) > 22f && colorDist > 26f &&
+                            ((tSat > 0.30f && (tR - tB) > 32f) || tGrad > 8.5f)
+                        val isColoredGemOrBindi = tSat > 0.34f && colorDist > 38f && (inGlabellaOrnament || v < foreCut + 0.14f)
+                        val isDarkBindi = inGlabellaOrnament && uAbs < 0.16f && v > (foreCut - 0.10f) &&
+                            tLum < targetSkinLum * 0.64f && colorDist > 36f
+                        val isFiligree = (inGlabellaOrnament || v < foreCut + 0.06f) && colorDist > 38f && tGrad > 9.5f && tLum > 38f &&
+                            !(hasCrownHairRef && abs(tR - hairRefR) + abs(tG - hairRefG) + abs(tB - hairRefB) < 38f)
+                        if (isBrightJewel || isGoldMetal || isColoredGemOrBindi || isDarkBindi || isFiligree) {
+                            val sStr = when {
+                                isBrightJewel -> ((tLum - (brightJewelCutoff - 8f)) / 32f).coerceIn(0.72f, 1f)
+                                isColoredGemOrBindi -> (colorDist / 66f).coerceIn(0.78f, 1f)
+                                isDarkBindi -> ((targetSkinLum * 0.72f - tLum) / 34f).coerceIn(0.82f, 1f)
+                                isGoldMetal -> (colorDist / 58f).coerceIn(0.75f, 1f)
+                                else -> (tGrad / 20f).coerceIn(0.72f, 0.98f)
+                            }
+                            reveal = max(reveal, if (sStr > 0.82f) 1f else sStr)
+                        }
                     }
 
-                    // 2b) Dark hair strands / parting / bangs on upper forehead, temples, or outer jaw rim
-                    val inHairPerimeter = v < (foreCut + 0.08f) || uAbs > 0.74f || r > 0.85f
-                    if (!inOcularCore && inHairPerimeter && tLum < darkHairCutoff) {
-                        val hStr = ((darkHairCutoff + 4f - tLum) / 34f).coerceIn(0f, 1f)
-                        reveal = max(reveal, hStr * 0.95f)
+                    // 2b) Dark + colored/brown/lit hair strands / parting / bangs on forehead, temples, or jaw rim
+                    val inHairPerimeter = v < (foreCut + 0.10f) || uAbs > 0.70f || r > 0.80f
+                    if (!inEyeSockets && !inNoseMouthCore && inHairPerimeter) {
+                        val hairDist = if (hasCrownHairRef) {
+                            abs(tR - hairRefR) + abs(tG - hairRefG) + abs(tB - hairRefB)
+                        } else 999f
+                        val isDarkHair = tLum < darkHairCutoff
+                        val matchesHair = hasCrownHairRef && hairDist < 84f && hairDist < colorDist * 0.92f && colorDist > 22f
+                        val isLitHair = colorDist > 36f && (tLum < targetSkinLum - 12f || tLum > targetSkinLum + 22f) &&
+                            (v < foreCut + 0.05f || r > 0.80f) && tSat < 0.62f &&
+                            (tLum < targetSkinLum - 14f || tGrad > 7f || r > 0.86f)
+                        if (isDarkHair || matchesHair || isLitHair) {
+                            val hStr = when {
+                                isDarkHair -> ((darkHairCutoff + 8f - tLum) / 32f).coerceIn(0.70f, 1f)
+                                matchesHair -> ((86f - hairDist) / 44f).coerceIn(0.68f, 1f)
+                                else -> (colorDist / 72f).coerceIn(0.62f, 0.98f)
+                            }
+                            reveal = max(reveal, if (hStr > 0.84f) 1f else hStr)
+                        }
                     }
 
                     // 3) Seed perimeter BFS for continuous foreground objects (hands, fingers, flowers, veil, sleeves)
-                    if (preserveTargetLayers && !inOcularCore && r in 0.82f..0.99f) {
-                        val colorDist = abs(tR - targetSkinR) + abs(tG - targetSkinG) + abs(tB - targetSkinB)
-                        val isForeignTint = colorDist > 68f ||
+                    if (preserveTargetLayers && !inEyeSockets && r in 0.82f..0.99f) {
+                        val isForeignTint = colorDist > 64f ||
                             tLum < darkHairCutoff ||
                             (tLum > brightJewelCutoff && tSat < 0.26f)
-                        val isSharpHandEdge = tGrad > 13f && colorDist > 26f
+                        val isSharpHandEdge = tGrad > 13f && colorDist > 24f
                         if (isForeignTint || isSharpHandEdge) {
                             visited[idx] = true
                             queue[qTail++] = idx
@@ -431,22 +643,25 @@ object FaceSwapEdgeBlendShader {
 
                 val nv = ny * hInv
                 val nuAbs = abs(nx * wInv - 0.50f) * 2f
-                // Keep orbital eye core strictly protected so eyelashes never bleed back
-                if (nv in (foreCut + 0.02f)..(foreCut + 0.26f) && nuAbs < 0.68f) continue
+                // Keep left/right orbital eye core protected while allowing BFS along center glabella jewelry
+                if (nv in (foreCut + 0.02f)..(foreCut + 0.27f) && (nuAbs in 0.17f..0.76f)) continue
 
                 val nPix = targetPixels[nIdx]
                 if (Color.alpha(nPix) < 30) continue
                 val nR = Color.red(nPix)
                 val nG = Color.green(nPix)
                 val nB = Color.blue(nPix)
+                val nMaxC = max(nR, max(nG, nB))
+                val nMinC = min(nR, min(nG, nB))
+                val nSat = if (nMaxC > 0) (nMaxC - nMinC).toFloat() / nMaxC else 0f
 
                 val stepDiff = abs(nR - cR) + abs(nG - cG) + abs(nB - cB)
                 val skinDist = abs(nR - targetSkinR) + abs(nG - targetSkinG) + abs(nB - targetSkinB)
                 val nLum = targetLum[nIdx]
 
-                // Continue along coherent object surfaces (hair, cloth, petal, dark rim) that stay non-cheek
+                // Continue along coherent object surfaces (hair, cloth, jewelry/gems, petal, dark rim)
                 val stillForegroundObj = stepDiff < 42f &&
-                    (skinDist > 52f || nLum < darkHairCutoff || nLum > brightJewelCutoff)
+                    (skinDist > 48f || nLum < darkHairCutoff || nLum > brightJewelCutoff || nSat > 0.34f)
                 if (stillForegroundObj) {
                     visited[nIdx] = true
                     queue[qTail++] = nIdx
